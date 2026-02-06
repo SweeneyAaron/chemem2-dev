@@ -1,0 +1,39 @@
+# Include documentation
+include README.md
+include LICENSE.txt
+include CHANGELOG.md
+
+# Include build configuration
+include pyproject.toml
+include CMakeLists.txt
+include meta.yaml
+
+# Include all C++ source files
+recursive-include ChemEM/cpp *.cpp *.h *.hpp
+
+# Include all Python files (including __main__.py)
+recursive-include ChemEM *.py
+
+# Include ChemDock2 data files - IMPORTANT for scoring functions
+include ChemEM/data/ECHO_dock/TableA.json
+include ChemEM/data/ECHO_dock/TableB.json
+include ChemEM/data/ECHO_dock/TableC.json
+include ChemEM/data/ECHO_dock/HBOND_POLY_A.json
+include ChemEM/data/ECHO_dock/HBOND_POLY_B.json
+include ChemEM/data/ECHO_dock/HBOND_POLY_C.json
+recursive-include ChemEM/data/ECHO_dock/halogen *.pkl
+recursive-include ChemEM/data/ECHO_dock/aromatic *.pkl
+
+# Include any other data files
+recursive-include ChemEM/data *
+
+# Exclude development files
+exclude .gitignore
+exclude .pre-commit-config.yaml
+exclude conda_build_config.yaml
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
+recursive-exclude * .DS_Store
+recursive-exclude * .pytest_cache
+recursive-exclude build *
+recursive-exclude dist *

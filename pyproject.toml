@@ -1,0 +1,89 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.9",
+  "pybind11>=2.10",
+  "cmake>=3.23",
+  "ninja; platform_system!='Windows'",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "ChemEM"
+version = "2.0.0"
+description = "Chemical Entity Modeling with docking capabilities"
+readme = "README.md"
+license = {file = "LICENSE.txt"}
+authors = [
+    {name = "Aaron Sweeney", email = "ucbtasw@ucl.ac.uk"},
+]
+maintainers = [
+    {name = "Aaron Sweeney", email = "ucbtasw@ucl.ac.uk"},
+]
+keywords = ["chemistry", "molecular-docking", "rdkit", "computational-chemistry"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: C++",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.19.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov",
+    "black",
+    "flake8",
+    "mypy",
+    "pre-commit",
+]
+docs = [
+    "sphinx",
+    "sphinx-rtd-theme",
+    "myst-parser",
+]
+test = [
+    "pytest>=6.0",
+    "pytest-cov",
+    "rdkit",  # Needed for testing
+]
+
+[project.urls]
+Homepage = "https://github.com/SweeneyAaron/chemem2-dev"
+Documentation = "https://github.com/SweeneyAaron/chemem2-dev#readme"
+Repository = "https://github.com/SweeneyAaron/chemem2-dev.git"
+"Bug Tracker" = "https://github.com/SweeneyAaron/chemem2-dev/issues"
+
+[project.scripts]
+chemem = "ChemEM.__main__:main"
+
+[tool.setuptools]
+packages = ["ChemEM"]
+
+[tool.setuptools.package-data]
+ChemEM = [
+    "*.so", "*.dll", "*.dylib",
+    "ECHO_dock/*.json",
+    "ECHO_dock/halogen/*.pkl", 
+    "ECHO_dock/aromatic/*.pkl"
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+addopts = "-v --cov=ChemEM --cov-report=term-missing"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true

@@ -1,0 +1,31 @@
+# macOS junk
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+
+# C/C++ build artifacts
+*.o
+*.a
+*.so
+*.dylib
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+
+# IDE
+.vscode/
+.idea/
+
+# --- OPTIONAL: ignore tests directory (uncomment if you really want this) ---
+# tests/

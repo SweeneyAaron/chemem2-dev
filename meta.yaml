@@ -1,0 +1,80 @@
+{% set name = "chemem" %}
+{% set version = "2.0.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  path: .
+
+build:
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+  skip: true  # [py<38]
+  entry_points:
+    - chemem = ChemEM.__main__:main
+
+requirements:
+  build:
+    - {{ compiler('cxx') }}
+    
+  host:
+    - cmake
+    - ninja  # [not win]
+    - make   # [win]
+    - scikit-build-core
+    - python >=3.11,<3.11.12
+    - pip
+    - pybind11 >=2.10.0
+    - eigen
+    - rdkit =2024.03.3
+    - rdkit-dev =2024.03.3
+    - numpy >=1.19.0
+    - boost-cpp
+    - llvm-openmp  # [osx]
+  run:
+    - python >=3.11,<3.11.12
+    - numpy =1.26.4
+    - scipy 
+    - rdkit=2024.03.3
+    - dimorphite-dl >=2.0.1
+    - spyrmsd >=0.8.0
+    - ambertools =23.6
+    - openff-toolkit =0.16.0
+    - openff-toolkit-base =0.16.0
+    - openff-amber-ff-ports =0.0.4
+    - openff-forcefields =2024.09.0
+    - openff-interchange =0.3.29
+    - openff-interchange-base =0.3.29
+    - openff-models =0.1.2
+    - openff-units =0.2.2
+    - openff-utilities =0.1.12
+    - pdbfixer >=1.11
+    - mrcfile >=1.5.0
+    - scikit-image 
+    - kneed 
+    - mdtraj 
+    - networkx
+    - tqdm 
+    - scikit-learn
+    - grand
+    - boost-cpp
+    - llvm-openmp  # [osx]
+
+test:
+  imports:
+    - ChemEM
+
+about:
+  home: https://github.com/yourusername/chemem
+  license: MIT
+  license_file: LICENSE.txt
+  summary: ChemEM - Chemical Modeling/Drug discovery/Cryo-EM
+  description: |
+    A package for chemical entity modeling with docking capabilities.
+  dev_url: https://github.com/yourusername/chemem
+
+extra:
+  recipe-maintainers:
+    - yourusername
