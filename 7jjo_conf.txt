@@ -6,7 +6,7 @@ ligand = ./test/Ligand_dep.sdf
 #ligand = CC(C)NCC(C1=CC=C(C=C1)O)O
 #ligand = CC(C)NC[C@@H](c1ccc(c(c1)O)O)O
 
-#densmap = /Users/aaron.sweeney/Documents/ChemEM_benchmark/7jjo/7jjo.mrc
+densmap = /Users/aaron.sweeney/Documents/ChemEM_benchmark/7jjo/7jjo.mrc
 resolution = 3.0  
 
 centroid = (134.087, 133.507, 174.180)output = ./test/test_output

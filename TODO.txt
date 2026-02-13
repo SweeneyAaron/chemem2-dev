@@ -1,0 +1,24 @@
+Parsing
+
+-- Add System ligands 
+-- Add neuclotide models
+--fix the ring systems
+--fix flexible rings
+
+OutPUT 
+
+-- add a verbose output option so it only writes the requested analysis output by default
+
+--alphamask 
+
+work out which stage is slow and refactor
+
+
+--resample subsite 
+
+Binding site
+--binding-site add a manual site pathway.
+
+
+TOOLS
+

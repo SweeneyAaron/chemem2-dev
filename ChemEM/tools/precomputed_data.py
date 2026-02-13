@@ -86,8 +86,8 @@ from ChemEM import grid_maps
 from rdkit.Chem import rdMolDescriptors
 from scipy.ndimage import gaussian_filter
 from scipy.ndimage import distance_transform_edt, binary_dilation
-
-
+from scipy import signal
+from line_profiler import profile
 
 def _attach_attributes(dst, src, *, prefix: str = "") -> None:
     """
@@ -149,7 +149,7 @@ def select_ring_flip_torsions(mol, torsion_quads):
         
         
         
-        
+
 
 class PreCompDataLigand:
     '''
@@ -201,7 +201,7 @@ class PreCompDataLigand:
         _, self.ligand_charges = compute_charges(ligand.complex_structure, ligand.complex_system)
         
         self.ligand_charges = list(self.ligand_charges)
-        n_ligand_atoms = len(self.ligand_atom_types)
+        self.n_ligand_atoms = len(self.ligand_atom_types)
         
         self.per_atom_logp = np.array(per_atom_logp(ligand.mol))
         
@@ -212,11 +212,11 @@ class PreCompDataLigand:
         # ------------------------------------------------------------------ #
         
         #shape (n_ligand_atoms, n_ligand_atoms), type = float
-        self.LIGAND_INTRA_A_VALUES =  np.zeros((n_ligand_atoms, n_ligand_atoms), dtype=np.float64)
+        self.LIGAND_INTRA_A_VALUES =  np.zeros((self.n_ligand_atoms, self.n_ligand_atoms), dtype=np.float64)
         #shape (n_ligand_atoms, n_ligand_atoms), type = float
-        self.LIGAND_INTRA_B_VALUES =  np.zeros((n_ligand_atoms, n_ligand_atoms), dtype=np.float64)
+        self.LIGAND_INTRA_B_VALUES =  np.zeros((self.n_ligand_atoms, self.n_ligand_atoms), dtype=np.float64)
         #shape (n_ligand_atoms, n_ligand_atoms), type = float
-        self.LIGAND_INTRA_C_VALUES =  np.zeros((n_ligand_atoms, n_ligand_atoms), dtype=np.float64)
+        self.LIGAND_INTRA_C_VALUES =  np.zeros((self.n_ligand_atoms, self.n_ligand_atoms), dtype=np.float64)
         
         for i, l_idx_1 in enumerate(self.ligand_atom_types):
             for j, l_idx_2 in enumerate(self.ligand_atom_types):
@@ -281,9 +281,7 @@ class PreCompDataLigand:
         self.improper_torsion_constraints = get_imporper_torsion_restraints(
             ligand.mol, atoms_to_constrain
             )
-        #TODO!
-        #macrocycles 
-        #what happens if you only
+        
         return new_torsions
         
     def _clear_fragment_state(self) :
@@ -523,70 +521,6 @@ class PreCompDataProtein:
         
         
 
-        #out = os.path.join(system.output, 'env_scaled.mrc')
-        #site_maps['env_scaled_map'].write_mrc(out)
-        
-       
-        
-        def get_water_bridge_map_cpp(protein_positions, 
-                                     protein_atom_roles,
-                                     protein_atom_dir,
-                                     grid_shape,
-                                     origin,
-                                     apix,
-                                     d0 = 5.0,
-                                     sigma = 0.5,
-                                     max_dist = 6.0,
-                                     theta = 60
-                                     ):
-            
-            
-            w_map = grid_maps.compute_water_bridge_grid_cpp(protein_positions,
-                                                            protein_atom_roles,
-                                                            grid_shape,
-                                                            origin,
-                                                            apix,
-                                                            d0=d0,
-                                                            sigma=sigma,
-                                                            max_dist=max_dist)
-            
-            
-            
-            water_map = EMMap(origin,
-                              tuple(apix),
-                              w_map,
-                              3.0)
-            
-            
-            
-            
-            return water_map
-                              
-           
-            
-            
-        
-        
-        water_map = get_water_bridge_map_cpp(self.protein_positions,
-                                             self.protein_atom_roles,
-                                             self.protein_hbond_dirs,
-                                             site_maps['electro_raw_map'].box_size,
-                                             site_maps['electro_raw_map'].origin,
-                                             np.array(site_maps['electro_raw_map'].apix))
-        
-        
-        
-                              
-                                             
-        #grid_maps.compute_water_bridge_grid_cpp
-        #import pdb 
-        #pdb.set_trace()
-        # env_scaled
-        
-        self.water_map_origin = water_map.origin 
-        self.water_map_apix = np.array(water_map.apix)
-        self.water_map_grid = water_map.density_map 
-        self.watz, self.waty, self.watx = water_map.density_map.shape
         
         
         self.env_scaled_origin = site_maps['env_scaled_map'].origin
@@ -617,24 +551,6 @@ class PreCompDataProtein:
         self.hydrophob_enc_grid   = site_maps['hydrophob_enc_map'].density_map
         self.hydrophob_enc_z, self.hydrophob_enc_y, self.hydrophob_enc_x = site_maps['hydrophob_enc_map'].density_map.shape
         
-        # desolvation_polar
-        self.desolvation_polar_origin = site_maps['desolvation_polar_grid'].origin
-        self.desolvation_polar_apix   = np.array(site_maps['desolvation_polar_grid'].apix)
-        self.desolvation_polar_grid   = site_maps['desolvation_polar_grid'].density_map
-        self.desolvation_polar_z, self.desolvation_polar_y, self.desolvation_polar_x = site_maps['desolvation_polar_grid'].density_map.shape
-        
-        # desolv_hphob
-        self.desolv_hphob_origin = site_maps['desolv_hphob_grid'].origin
-        self.desolv_hphob_apix   = np.array(site_maps['desolv_hphob_grid'].apix)
-        self.desolv_hphob_grid   = site_maps['desolv_hphob_grid'].density_map
-        self.desolv_hphob_z, self.desolv_hphob_y, self.desolv_hphob_x = site_maps['desolv_hphob_grid'].density_map.shape
-        
-        # delta_sasa
-        self.delta_sasa_origin = site_maps['delta_sasa_map'].origin
-        self.delta_sasa_apix   = np.array(site_maps['delta_sasa_map'].apix)
-        self.delta_sasa_grid   = site_maps['delta_sasa_map'].density_map
-        self.delta_sasa_z, self.delta_sasa_y, self.delta_sasa_x = site_maps['delta_sasa_map'].density_map.shape
-        
         
         #------scores-----
         #salt bridge Buckingham boost 
@@ -645,7 +561,7 @@ class PreCompDataProtein:
         self.aromatic_score = AromaticScore()
         _stack_map = {'p': 0, 't': 1}
 
-        # we’ll collect one list per coefficient type:
+        
         keys      = []
         kxA_list  = []; kyA_list  = []; dimA_list  = []; coeffsA = []
         kxB_list  = []; kyB_list  = []; dimB_list  = []; coeffsB = []
@@ -713,7 +629,7 @@ class PreCompDataProtein:
             kxC_list.append(kxC); kyC_list.append(kyC); dimC_list.append((nxC, nyC))
             
             
-        # now store them as Python lists or ragged arrays:
+        # 
         self.arom_keys   = np.array(keys,    dtype=np.int32)     # (M,3)
         
         self.arom_kxA    = np.array(kxA_list, dtype=np.int32)    # (M,)
@@ -723,7 +639,6 @@ class PreCompDataProtein:
         self.arom_ky = np.array(kyA_list, dtype=np.int32)
         
         self.arom_dimsA  = np.array(dimA_list,dtype=np.int32)    # (M,2)
-        #only need this if the if else is True!
         self.arom_dims = np.array(dimA_list, dtype=np.int32)
         self.arom_coefA  = coeffsA                                    # list of (nxA,nyA) arrays
         
@@ -814,7 +729,7 @@ class PreCompDataProtein:
             cB  = splineB.get_coeffs()
             assert cB.size == nxB * nyB, f"Halogen B[{i1},{i2}]: expected {nxB*nyB} coeffs, got {cB.size}"
         
-            # — Pull knots, degrees, and coefficients for spline C
+            
             txC, tyC = splineC.get_knots()
             halo_knots_x_list_C.append(np.array(txC, dtype=np.float64))
             halo_knots_y_list_C.append(np.array(tyC, dtype=np.float64))
@@ -882,24 +797,24 @@ class PreCompDataProtein:
         self.w_constraint = 1.0
         
         self.nb_cell = 4.5
-    
+        self.no_map = system.options.no_map
         #add maps 
         #-----Add the density map----
         if not system.options.no_map and hasattr(system,'binding_site_maps') :
             density_map = system.binding_site_maps[binding_site.key][0][0]
             
-            self.binding_site_density_map = density_map.density_map 
+            self.binding_site_density_map_grid = density_map.density_map 
             self.binding_site_density_map_apix = density_map.apix 
             self.binding_site_density_map_origin = density_map.origin
             self.binding_site_density_map_resolution = density_map.resolution
             self.binding_site_density_map_sigma_coeff = 0.356
             self.mi_weight = system.options.mi_weight
             self.sci_weight = system.options.sci_weight
-        
+            
        
         else:
            
-            self.binding_site_density_map = None
+            self.binding_site_density_map_grid = None
             self.binding_site_density_map_apix = None 
             self.binding_site_density_map_origin = None
             self.binding_site_density_map_resolution = None
@@ -997,7 +912,7 @@ class PreCompDataProtein:
     
         
         #------density map addition------
-        if self.binding_site_density_map is not None:
+        if self.binding_site_density_map_grid is not None:
             
         
             
@@ -1013,24 +928,21 @@ class PreCompDataProtein:
             
             
             print("Pre-computing feature maps from ground truth ligand...")
-            smoothed_map_data = ndimage.convolve(self.binding_site_density_map, G, mode='constant', cval=0.0)
+            smoothed_map_data = ndimage.convolve(self.binding_site_density_map_grid, G, mode='constant', cval=0.0)
             dx_field = ndimage.convolve(smoothed_map_data, kernel_dx, mode='constant', cval=0.0)
             dy_field = ndimage.convolve(smoothed_map_data, kernel_dy, mode='constant', cval=0.0)
             dz_field = ndimage.convolve(smoothed_map_data, kernel_dz, mode='constant', cval=0.0)
             exp_grad_mag = np.sqrt(dx_field**2 + dy_field**2 + dz_field**2)
             laplacian_map = ndimage.laplace(smoothed_map_data, mode='constant', cval=0.0)
             
-            
-            
-                
-            
             self.G_kernal = G
             self.grad_kernal = grad_kernel_mag
             self.G_lap_kernal = Glap
             self.r = r
-            self.smoothed_map = smoothed_map_data
+            self.smoothed_map = smoothed_map_data #why is this here?
             self.grad_map  = exp_grad_mag 
             self.laplacian_map = laplacian_map
+            
             
             ccc0_map, ccc1_map, ccc2_map  = precompute_score_maps(smoothed_map_data, 
                                   exp_grad_mag,
@@ -1042,42 +954,22 @@ class PreCompDataProtein:
                                   self.binding_site_density_map_apix[0],
                                   r)
             
+            self.smoothed_map_grid = ccc0_map
+            self.smoothed_map_origin = self.binding_site_density_map_origin
+            self.smoothed_map_apix = self.binding_site_density_map_apix 
             
-            db1 = EMMap(self.binding_site_density_map_origin,
-                        self.binding_site_density_map_apix,
-                        ccc0_map,
-                        3.0)
+            self.grad_map_grid  = ccc1_map
+            self.grad_map_origin = self.binding_site_density_map_origin
+            self.grad_map_apix = self.binding_site_density_map_apix 
             
-            db2 = EMMap(self.binding_site_density_map_origin,
-                        self.binding_site_density_map_apix,
-                        ccc1_map,
-                        3.0)
+            self.laplacian_map_grid = ccc2_map
+            self.laplacian_map_origin = self.binding_site_density_map_origin
+            self.laplacian_map_apix = self.binding_site_density_map_apix
             
-            db3 = EMMap(self.binding_site_density_map_origin,
-                        self.binding_site_density_map_apix,
-                        ccc2_map,
-                        3.0)
-            
-            #db1.write_mrc('/Users/aaron.sweeney/Documents/ChemEM2/docking/nonbonded_score/7jjo/ccc1_sf.mrc')
-            #db2.write_mrc('/Users/aaron.sweeney/Documents/ChemEM2/docking/nonbonded_score/7jjo/ccc2_sf.mrc')
-            #db3.write_mrc('/Users/aaron.sweeney/Documents/ChemEM2/docking/nonbonded_score/7jjo/ccc3_sf.mrc')
-            
-            print(np.max(ccc0_map), np.max(ccc1_map), np.max(ccc2_map))
-            print(np.min(ccc0_map), np.min(ccc1_map), np.min(ccc2_map))
-            #import pdb 
-            #pdb.set_trace()
-            
-            self.smoothed_map = ccc0_map
-            self.grad_map  = ccc1_map
-            self.laplacian_map = ccc2_map
-            
-           
-            
-            
-            
+            #remove!!
             #mi precomp data 
             mi = build_mi_assets_for_map(
-                self.binding_site_density_map,
+                self.binding_site_density_map_grid,
                 self.binding_site_density_map_origin,
                 self.binding_site_density_map_apix,
                 self.binding_site_density_map_resolution,
@@ -1085,10 +977,11 @@ class PreCompDataProtein:
                 sigma_coeff=getattr(self, "binding_site_density_map_sigma_coeff", 0.356)
             )
             
+            
             self.mi_bins       = mi["mi_bins"]
-            self.mi_map_bins   = mi["mi_map_bins"]         # uint8 [Z,Y,X]
-            self.mi_origin     = mi["mi_origin"]           # float64[3]
-            self.mi_apix       = mi["mi_apix"]             # float64[3]
+            self.mi_map_bins_grid = mi["mi_map_bins"]         # uint8 [Z,Y,X]
+            self.mi_map_bins_origin = mi["mi_origin"]           # float64[3]
+            self.mi_map_bins_apix = mi["mi_apix"]             # float64[3]
             self.mi_k_offsets  = mi["mi_k_offsets"]        # int16 [N,3]
             self.mi_k_bins     = mi["mi_k_bins"]           # uint8 [N]
             self.mi_kernel_r   = mi["mi_kernel_r"]
@@ -1096,7 +989,7 @@ class PreCompDataProtein:
             
 
         else:
-            self.binding_site_density_map = None
+            self.binding_site_density_map_grid = None
             self.binding_site_density_map_apix = None 
             self.binding_site_density_map_origin = None
             self.binding_site_density_map_resolution = None
@@ -1112,12 +1005,13 @@ class PreCompDataProtein:
             self.atom_masses = None
             
             self.mi_bins       = None
-            self.mi_map_bins   = None    
-            self.mi_origin     = None
-            self.mi_apix       = None
+            self.mi_map_bins_grid = None    
+            self.mi_map_bins_origin = None
+            self.mi_map_bins_apix = None
             self.mi_k_offsets  = None
             self.mi_k_bins     = None
             self.mi_kernel_r   = None
+        
         
         
     
@@ -2713,7 +2607,7 @@ def only_h_moves_on_rotation(mol: Chem.Mol,
     return moved.count(True) == 1 and moved[torsion[3]]
 
 
-def find_best_ring_bond_to_break(mol, ring_info=None):
+def find_best_ring_bond_to_break_(mol, ring_info=None):
     """
     Finds the best bond to break in each non-aromatic ring of a molecule.
 
@@ -2792,6 +2686,161 @@ def find_best_ring_bond_to_break(mol, ring_info=None):
 
     
     return sorted(list(set(breakable_bonds_by_ring)))
+
+
+import numpy as np
+from rdkit import Chem
+from rdkit.Chem.rdchem import HybridizationType as HT
+
+def _best_fit_plane_rms(conf, atom_ids):
+    # returns (rms_distance_to_plane, max_abs_distance)
+    pts = []
+    for i in atom_ids:
+        p = conf.GetAtomPosition(int(i))
+        pts.append([p.x, p.y, p.z])
+    pts = np.asarray(pts, dtype=float)
+
+    ctr = pts.mean(axis=0)
+    u, s, vh = np.linalg.svd(pts - ctr, full_matrices=False)
+    normal = vh[-1]
+    d = (pts - ctr) @ normal
+    return float(np.sqrt(np.mean(d * d))), float(np.max(np.abs(d)))
+
+def _amide_like_bonds(mol):
+    """
+    Returns a set of bond indices for common 'amide-like' linkages you almost never
+    want to break for ring-flex (amide/urea/carbamate/sulfonamide-ish).
+    """
+    patt_smarts = [
+        "[CX3](=[OX1])[NX3]",                 # amide / lactam / carbamate / urea C(=O)-N
+        "[SX4](=[OX1])(=[OX1])[NX3]",         # sulfonamide S(=O)2-N
+        "[PX4](=[OX1])([OX1])[NX3]",          # phosphoramidate-like (rare)
+    ]
+    out = set()
+    for sm in patt_smarts:
+        q = Chem.MolFromSmarts(sm)
+        if q is None:
+            continue
+        for match in mol.GetSubstructMatches(q):
+            # match includes at least C and N (or S and N). find the bond between first and last atom in match
+            a = match[0]
+            n = match[-1]
+            b = mol.GetBondBetweenAtoms(int(a), int(n))
+            if b is not None:
+                out.add(b.GetIdx())
+    return out
+
+def find_best_ring_bond_to_break(
+    mol,
+    *,
+    min_ring_size=5,
+    min_sp3_fraction=0.70,
+    planar_rms_cutoff=0.10,
+    planar_maxdev_cutoff=0.20,
+    confId=-1
+):
+    """
+    Pick one breakable bond per eligible (simple) non-aromatic ring.
+
+    Key guards:
+      - ring is not fused/bridged/spiro: all ring atoms AND ring bonds must be in exactly 1 ring
+      - ring is 'aliphatic enough': mostly SP3 atoms
+      - candidate bond is single, non-conjugated, non-amide-like
+    """
+    ri = mol.GetRingInfo()
+    if ri is None:
+        return []
+
+    atom_rings = list(ri.AtomRings())
+    bond_rings = list(ri.BondRings())
+    if not atom_rings:
+        return []
+
+    conf = None
+    if mol.GetNumConformers() > 0:
+        try:
+            conf = mol.GetConformer(confId)
+        except Exception:
+            conf = mol.GetConformer()
+
+    amide_bonds = _amide_like_bonds(mol)
+
+    chosen = []
+
+    for ring_atoms, ring_bonds in zip(atom_rings, bond_rings):
+        if len(ring_atoms) < min_ring_size:
+            continue
+
+        #-----skip anything aromatic / partially aromatic----
+        if any(mol.GetAtomWithIdx(a).GetIsAromatic() for a in ring_atoms):
+            continue
+        if any(mol.GetBondWithIdx(b).GetIsAromatic() for b in ring_bonds):
+            continue
+
+        #-----skip fused/bridged/spiro ring systems-----
+    
+        if any(ri.NumAtomRings(a) != 1 for a in ring_atoms):
+            continue
+        if any(ri.NumBondRings(b) != 1 for b in ring_bonds):
+            continue
+
+        # -----require mostly SP3 ring atoms (rigidity heuristic) ---
+        '''
+        sp3_count = 0
+        for a in ring_atoms:
+            at = mol.GetAtomWithIdx(a)
+            if (at.GetHybridization() == HT.SP3) and (not at.GetIsAromatic()):
+                sp3_count += 1
+        sp3_frac = sp3_count / float(len(ring_atoms))
+        if sp3_frac < float(min_sp3_fraction):
+            continue
+        '''
+
+        # -----Skip plannar rings-----
+        if conf is not None:
+            rms, mx = _best_fit_plane_rms(conf, ring_atoms)
+            if (rms <= planar_rms_cutoff) and (mx <= planar_maxdev_cutoff):
+                continue
+
+        # --- Candidate bonds inside this ring ---
+        candidates = []
+        for bidx in ring_bonds:
+            b = mol.GetBondWithIdx(bidx)
+
+            if b.GetBondType() != Chem.BondType.SINGLE:
+                continue
+            if b.GetIsAromatic():
+                continue
+            if b.GetIsConjugated():  # RDKit exposes this directly :contentReference[oaicite:4]{index=4}
+                continue
+            if bidx in amide_bonds:
+                continue
+
+            a1 = mol.GetAtomWithIdx(b.GetBeginAtomIdx())
+            a2 = mol.GetAtomWithIdx(b.GetEndAtomIdx())
+
+            # keep breaks in the truly flexible part: both ends should be SP3
+            if a1.GetHybridization() != HT.SP3 or a2.GetHybridization() != HT.SP3:
+                continue
+
+            # score: prefer C–C, then C–X; avoid "busy" atoms a bit
+            score = 0
+            if a1.GetAtomicNum() == 6 and a2.GetAtomicNum() == 6:
+                score += 100
+            elif a1.GetAtomicNum() == 6 or a2.GetAtomicNum() == 6:
+                score += 20
+            score -= (a1.GetTotalDegree() + a2.GetTotalDegree())  # mild preference for less substituted
+
+            candidates.append((score, bidx))
+
+        if not candidates:
+            continue
+
+        candidates.sort(reverse=True)
+        chosen.append(candidates[0][1])
+
+    return sorted(set(chosen))
+
 
 def remove_bonds_from_mol(mol, bonds_to_break):
     
@@ -3087,6 +3136,9 @@ def make_spherical_kernel(radius_angstrom, spacing):
     return kernel
 
 
+
+
+
 def make_enclosure_grids_for_atom_types(
         sasa_mask,
         spacing,
@@ -3132,18 +3184,19 @@ def make_enclosure_grids_for_atom_types(
         kernel = make_spherical_kernel(radius_angstrom=r_vdw, spacing=spacing)
 
         # Convolve base (either 1 per SASA voxel, or hydrophobic field)
-        enc = ndimage.convolve(
+        enc = signal.convolve(
             base,
             kernel,
-            mode="constant",
-            cval=0.0
+            mode="same",
+            method="fft",
         ).astype(np.float32)
+        
 
         # Force outside-SASA to zero so it's only meaningful where ligand can go
         enc[~sasa_mask] = 0.0
 
         enclosure_grids[atype] = enc
-
+    
     return enclosure_grids
 
 
@@ -3697,7 +3750,7 @@ def final_sasa_mask_standalone(
         box_center,
         box_size,
     )
-
+    '''
     delta_sasa_generic = build_delta_sasa_generic_grid(
         sasa_mask=sub_map,
         spacing=grid_spacing,
@@ -3711,11 +3764,12 @@ def final_sasa_mask_standalone(
         delta_sasa_generic,
         3.0
     )
+    '''
 
     rt = time.perf_counter() - t1
     print("final_sasa_mask:", rt)
 
-    return bulk_solvent_mask, protein_mask, sasa_mask, delta_sasa_generic_map
+    return bulk_solvent_mask, protein_mask, sasa_mask#, delta_sasa_generic_map
 
 
 def final_solvent_depth_mask_standalone(
@@ -3827,7 +3881,7 @@ def smooth_env_index_standalone(env_index, sasa_mask, n_iter=10):
     """
     return smooth_env_map_diffusion(env_index, sasa_mask, n_iter=n_iter)
 
-
+@profile
 def final_hydrophobic_grid_standalone(
     *,
     positions,
@@ -3879,7 +3933,7 @@ def final_hydrophobic_grid_standalone(
         vdw_radii_by_type=vdw_radii_by_type,
         weight_grid=hydro_field_xlogp,
     )
-
+    
     # Your original code loops keys but ends up storing only one grid.
     # We keep that behavior: last grid in dict order wins.
     hydro_enc_grid = None
@@ -4061,7 +4115,7 @@ def final_desolvation_grid_standalone(
 
     return desolv_polar_grid, desolv_hphob_grid
 
-
+@profile
 def build_site_maps_standalone(
     *,
     # geometry / atoms
@@ -4104,7 +4158,8 @@ def build_site_maps_standalone(
     """
     
     # 1) SASA / delta SASA
-    bulk_solvent_mask, protein_mask, sasa_mask, delta_sasa_map = final_sasa_mask_standalone(
+    #bulk_solvent_mask, protein_mask, sasa_mask, delta_sasa_map 
+    bulk_solvent_mask, protein_mask, sasa_mask = final_sasa_mask_standalone(
         positions=positions,
         atom_radii=atom_radii,
         grid_origin=grid_origin,
@@ -4150,6 +4205,7 @@ def build_site_maps_standalone(
         env_index_smooth=env_index_smooth,
     )
     
+    
     # 5) electrostatics (sub-box)
     (
         sub_env_index_smooth,
@@ -4169,18 +4225,7 @@ def build_site_maps_standalone(
         electro_cutoff=electro_cutoff,
     )
     
-
-    # 6) desolvation grids
-    desolv_polar_grid, desolv_hphob_grid = final_desolvation_grid_standalone(
-        hydro_field_xlogp=hydro_field_xlogp,
-        hphob_sub_sasa_mask=hphob_sub_sasa_mask,
-        hphob_sub_env_norm=hphob_sub_env_norm,
-        cpp_electrostatics=cpp_electrostatics,
-        sub_sasa_mask=sub_sasa_mask,
-        sub_env_index_smooth=sub_env_index_smooth,
-    )
-
-    # 7) package EMMaps
+    
     env_scaled_map = EMMap(
         grid_origin,
         (grid_spacing, grid_spacing, grid_spacing),
@@ -4208,25 +4253,12 @@ def build_site_maps_standalone(
         hydro_field_xlogp,
         3.0
     )
-
+    
+    
     hydrophob_enc_map = EMMap(
         hphob_sub_origin,
         (grid_spacing, grid_spacing, grid_spacing),
         hydro_enc_grid,
-        3.0
-    )
-
-    desolvation_polar_map = EMMap(
-        sub_elc_origin,
-        (grid_spacing, grid_spacing, grid_spacing),
-        desolv_polar_grid,
-        3.0
-    )
-
-    desolv_hphob_map = EMMap(
-        hphob_sub_origin,
-        (grid_spacing, grid_spacing, grid_spacing),
-        desolv_hphob_grid,
         3.0
     )
 
@@ -4236,9 +4268,7 @@ def build_site_maps_standalone(
         "electro_raw_map": electro_raw_map,
         "hydrophob_raw_map": hydrophob_raw_map,
         "hydrophob_enc_map": hydrophob_enc_map,
-        "desolvation_polar_grid": desolvation_polar_map,
-        "desolv_hphob_grid": desolv_hphob_map,
-        "delta_sasa_map": delta_sasa_map,
+        
     }
 
     return site_maps

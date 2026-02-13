@@ -10,6 +10,7 @@
 #include <iomanip>
 
 #include "GeometryUtils.h"
+#include "DensityUtils.h"
 
 namespace {
 
@@ -614,7 +615,9 @@ namespace {
     }
 }
 
-double ECHOScore::score(const RDKit::Conformer &conf, double rep_max) const {
+double ECHOScore::score(const RDKit::Conformer &conf, double rep_max, double use_map_score) const {
+    
+    
     Terms terms;
 
     // setup
@@ -623,7 +626,7 @@ double ECHOScore::score(const RDKit::Conformer &conf, double rep_max) const {
     const auto &cfg = pre.config();
     const auto &hb = pre.hbond();
     const auto &ls = pre.ligand_score();
-
+    
     const int n_prot_atoms = prot.positions.rows();
     const int heavy_end = static_cast<int>(lig.heavy_end_idx);
     const int n_heavy = heavy_end + 1;
@@ -660,9 +663,56 @@ double ECHOScore::score(const RDKit::Conformer &conf, double rep_max) const {
                         lig, pre.environment_grid());
                         
     compute_constraint(terms, scratch.ligXYZ, ls);
-    //get score
+    //get map score 
     double total_linear = apply_weights(terms, weights);
-    double total = -total_linear + terms.bias + terms.constraint;
+    
+    double map_score = 0.0;
+    //refactor this
+    if (!cfg.no_map){
+    
+        const auto &dm = pre.density_grid();
+        const auto &dd = pre.density_data();
+        const auto &sci0 = pre.sci_grid();
+        const auto &sci1 = pre.sci_first_derivative_grid();
+        const auto &sci2 = pre.sci_second_derivative_grid();
+        
+        if (use_map_score == 0){
+        
+            auto sim_map = DensityUtils::simulate_density_map(
+                dm.origin,
+                dm.apix,
+                dm.nz, dm.ny, dm.nx,
+                scratch.ligXYZ,           
+                dd.atom_masses,       // std::vector<double> (N)
+                dd.resolution,
+                dd.sigma_coeff,
+                dd.normalise,
+                lig.n_heavy
+            );
+            
+            map_score = DensityUtils::calc_mutual_information(dm.data, sim_map, dd.nbins);
+            map_score *= dd.mi_weight;
+            
+        } else if( use_map_score == 1) {
+            //do sci score
+            map_score = DensityUtils::score_sci_fast(scratch.ligXYZ,
+                                                     dm.origin,
+                                                     dm.apix,
+                                                     dm.nx, dm.ny, dm.nz,
+                                                     sci0.data,
+                                                     sci1.data,
+                                                     sci2.data,
+                                                     lig.n_heavy
+                                                     );
+            map_score *= dd.sci_weight;
+            
+        
+                                                     
+
+        }
+    }
+    
+    double total = -(total_linear + map_score) + terms.bias + terms.constraint;
     
     //debug_print_terms(terms, total_linear, total, weights);
     return total;

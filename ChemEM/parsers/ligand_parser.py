@@ -89,7 +89,8 @@ class LigandParser:
             print(f"\nChemEM Fatal Error: No valid ligands loaded from {ligand_input}")
             if not _no_exit:
                 sys.exit()
-
+        #import pdb 
+        #pdb.set_trace()
         return ligands
 
     @staticmethod

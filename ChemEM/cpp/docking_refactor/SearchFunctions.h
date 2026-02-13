@@ -136,14 +136,17 @@ private:
     // Refine a discrete solution in real space using NM, using an injected scorer + rep cap.
     SplitNmResult refinePoseSplitNmFromDiscrete(const std::vector<double>& discSol,
                                                const ECHOScore& scorer,
-                                               double rep_max) const;
+                                               double rep_max,
+                                               double map_score_function
+                                               ) const;
     
     std::pair<double, RDKit::ROMol> runLocalNelderMeadFromSeeds(
         const Eigen::RowVector3d &ini_trans_xyz,
         const Eigen::Vector3d    &ini_rot_deg,
         const std::vector<double> &ini_tors_deg,
         const ECHOScore &scorer,
-        double rep_max
+        double rep_max,
+        double map_score_function
     ) const;
 
 

@@ -15,14 +15,11 @@ import mrcfile
 from scipy.fftpack import fftn, ifftn
 from scipy.ndimage import fourier_gaussian
 
-from ChemEM.tools.density import MapTools
-
-
 class EMMap:
     def __init__(self, origin, apix, density_map, resolution):
         self.origin = origin              # (x,y,z) Å
         self.apix = apix                  # (ax,ay,az) Å/px
-        self.density_map = density_map    # np.ndarray shape (z,y,x)
+        self.density_map = density_map    # np.ndarray
         self.resolution = resolution
         self.map_contour = 0.0
 
@@ -104,6 +101,74 @@ class EMMap:
 
         com_real = np.array(self.origin, dtype=float) + np.array(self.apix, dtype=float) * com_grid_xyz
         return tuple(com_real)
+    
+    def submap(self, origin, box_size, *, pad_value=0.0):
+        """
+        Return a new EMMap that is a sub-volume of this map.
+
+        Parameters
+        ----------
+        origin : (x,y,z)
+            World-space origin (Å) of the requested sub-box corner.
+        box_size : (bz,by,bx)
+            Requested size in voxels in (z,y,x) order (same as EMMap.box_size).
+        pad_value : float
+            Fill value if requested box extends outside the map.
+
+        Returns
+        -------
+        EMMap
+            New EMMap with:
+              - origin = requested origin (Å)
+              - apix = same as parent
+              - resolution = same as parent
+              - density_map shape = (bz,by,bx) in (z,y,x)
+        """
+        if not isinstance(self.density_map, np.ndarray) or self.density_map.ndim != 3:
+            raise ValueError("density_map must be a 3D NumPy array.")
+        if len(origin) != 3:
+            raise ValueError("origin must be length-3 (x,y,z) in Å.")
+        if len(box_size) != 3:
+            raise ValueError("box_size must be length-3 (bz,by,bx) in voxels (z,y,x).")
+
+        bz, by, bx = (int(box_size[0]), int(box_size[1]), int(box_size[2]))
+        if bx <= 0 or by <= 0 or bz <= 0:
+            raise ValueError("box_size entries must be positive integers.")
+
+        origin = np.asarray(origin, dtype=float)
+        map_origin = np.asarray(self.origin, dtype=float)
+        apix = np.asarray(self.apix, dtype=float)
+
+        # world -> voxel corner indices (x,y,z)
+        start_xyz = np.rint((origin - map_origin) / apix).astype(int)
+        sx, sy, sz = int(start_xyz[0]), int(start_xyz[1]), int(start_xyz[2])
+
+        # requested voxel ranges in voxel coords (x,y,z)
+        ex, ey, ez = sx + bx, sy + by, sz + bz
+
+        nx, ny, nz = self.x_size, self.y_size, self.z_size  # sizes in voxel coords (x,y,z)
+
+        # overlap with map bounds
+        ix0, ix1 = max(0, sx), min(nx, ex)
+        iy0, iy1 = max(0, sy), min(ny, ey)
+        iz0, iz1 = max(0, sz), min(nz, ez)
+
+        sub = np.full((bz, by, bx), pad_value, dtype=self.density_map.dtype)
+
+        if ix1 > ix0 and iy1 > iy0 and iz1 > iz0:
+            # where to paste in output (x,y,z offsets)
+            ox0 = ix0 - sx
+            oy0 = iy0 - sy
+            oz0 = iz0 - sz
+
+            ox1 = ox0 + (ix1 - ix0)
+            oy1 = oy0 + (iy1 - iy0)
+            oz1 = oz0 + (iz1 - iz0)
+
+            # src/dst are both (z,y,x)
+            sub[oz0:oz1, oy0:oy1, ox0:ox1] = self.density_map[iz0:iz1, iy0:iy1, ix0:ix1]
+
+        return EMMap(tuple(origin.tolist()), tuple(float(a) for a in self.apix), sub, self.resolution)
 
     def write_mrc(self, outfile):
         if not outfile.endswith(".mrc"):
@@ -172,8 +237,8 @@ class EMMap:
         emap = cls(origin, apix, data, resolution)
 
         # Prepare atomic input
-        prot = MapTools._prepare_molmap_input(mol)
-        overlay_map = MapTools.make_atom_overlay_map(emap, prot)
+        prot = _prepare_molmap_input(mol)
+        overlay_map = _make_atom_overlay_map(emap, prot)
 
         sigma = sigma_coeff * resolution
         fou = fourier_gaussian(fftn(overlay_map.density_map), sigma)
@@ -183,3 +248,51 @@ class EMMap:
             emap.normalise()
 
         return emap
+
+def _prepare_molmap_input(mol, n_conf: int = 0):
+    molmap_input = []
+    atm_coords = mol.GetConformers()[n_conf].GetPositions()
+    atom_props = mol.GetAtoms()
+
+    for coord, prop in zip(atm_coords, atom_props):
+        x = float(coord[0])
+        y = float(coord[1])
+        z = float(coord[2])
+        atm_type = prop.GetSymbol()
+        mass = float(prop.GetMass())
+        atom_input = [atm_type, x, y, z, mass]
+        molmap_input.append(atom_input)
+    return molmap_input
+
+
+def _make_atom_overlay_map(densMap, prot):
+    densMap = densMap.copy()
+    for atom in prot:
+        pos = _map_grid_position(densMap, atom)
+        if pos:
+            densMap.density_map[pos[2]][pos[1]][pos[0]] += pos[3]
+    return densMap
+
+def _map_grid_position(densMap, atom):
+    origin = densMap.origin
+    apix = _as_xyz(densMap.apix)
+    box_size = densMap.box_size
+
+    x_pos = int(round((atom[1] - origin[0]) / apix[0], 0))
+    y_pos = int(round((atom[2] - origin[1]) / apix[1], 0))
+    z_pos = int(round((atom[3] - origin[2]) / apix[2], 0))
+
+    if (
+        (box_size[2] > x_pos >= 0)
+        and (box_size[1] > y_pos >= 0)
+        and (box_size[0] > z_pos >= 0)
+    ):
+        return x_pos, y_pos, z_pos, atom[4]
+    return 0
+
+def _as_xyz(v) -> np.ndarray:
+    v = np.asarray(v, dtype=np.float64)
+    if v.size == 1:
+        return np.array([float(v), float(v), float(v)], dtype=np.float64)
+    return v
+
