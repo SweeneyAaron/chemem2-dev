@@ -87,7 +87,7 @@ from rdkit.Chem import rdMolDescriptors
 from scipy.ndimage import gaussian_filter
 from scipy.ndimage import distance_transform_edt, binary_dilation
 from scipy import signal
-from line_profiler import profile
+
 
 def _attach_attributes(dst, src, *, prefix: str = "") -> None:
     """
