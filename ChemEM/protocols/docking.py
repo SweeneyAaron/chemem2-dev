@@ -138,24 +138,29 @@ class Docking:
     def run(self):
         
         t0 = time.perf_counter()
-        
+        print(1)
         self._run_started = time.time()
+        print(2)
         self.system.log(Messages.create_centered_box("Molecular Docking"))
+        print(3)
         ligands = self._precomupt_ligand_objects()
+        print(4)
         
         for site_id, binding_site in self._iter_sites():
-            
+            print(5)
             precomp_site = PreCompDataProtein(
                 binding_site,
                 self.system,
                 bias_radius=self.system.options.bias_radius,
                 split_site=self.system.options.split_site,
             )
-            
+            print(6)
             t1 = time.perf_counter()
             self._dock_site(site_id, precomp_site, ligands)
+            print(7)
             
             rt = time.perf_counter() - t1
+            print(8)
             self._site_runtimes_s[str(site_id)] = float(rt)
             self.system.log(f"Docking site {site_id} runtime {rt}.")
 
@@ -246,7 +251,7 @@ class Docking:
         self.debug_prints = []
 
         for lig_idx, (ligand, precomp_lig) in enumerate(ligands):
-            
+            print(f'dock ligand {lig_idx}')
             combined = precomp_site + precomp_lig
             block = self._molblock_with_fallback(ligand, combined)
             
@@ -280,6 +285,7 @@ class Docking:
             self._site_results.append(
                 SiteResult(site_id=site_id, ligand_idx=lig_idx, ligand=ligand, poses=poses)
             )
+            print(f'finish dock ligand {lig_idx}')
 
     
     def _minimize_and_rescore(self, site_id, precomp_site, mol, poses):
