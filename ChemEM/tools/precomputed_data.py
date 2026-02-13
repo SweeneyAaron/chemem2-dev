@@ -3881,7 +3881,7 @@ def smooth_env_index_standalone(env_index, sasa_mask, n_iter=10):
     """
     return smooth_env_map_diffusion(env_index, sasa_mask, n_iter=n_iter)
 
-@profile
+
 def final_hydrophobic_grid_standalone(
     *,
     positions,
@@ -4115,7 +4115,6 @@ def final_desolvation_grid_standalone(
 
     return desolv_polar_grid, desolv_hphob_grid
 
-@profile
 def build_site_maps_standalone(
     *,
     # geometry / atoms
