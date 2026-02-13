@@ -951,7 +951,8 @@ AntColonyOptimizer::SplitNmResult
 AntColonyOptimizer::refinePoseSplitNmFromDiscrete(
     const std::vector<double> &discSol,
     const ECHOScore &scorer,
-    double rep_max
+    double rep_max,
+    double map_score_function
 ) const {
     Eigen::RowVector3d ini_trans_xyz;
     Eigen::Vector3d    ini_rot_deg;
@@ -992,7 +993,7 @@ AntColonyOptimizer::refinePoseSplitNmFromDiscrete(
         clamp01_inplace(x_norm);
         restore_coords(conf, baseline_coords);
         applyNormalizedDeltasOnBaseline(pre, conf, x_norm, base_tors_deg);
-        return scorer.score(conf, rep_max);
+        return scorer.score(conf, rep_max, map_score_function);
     };
 
     std::vector<double> x_best_full(D, 0.5);
@@ -1080,7 +1081,7 @@ AntColonyOptimizer::refinePoseSplitNmFromDiscrete(
     for (int i = 0; i < 6; ++i) x_after_TR[i] = x_tr_best[i];
 
     // ------------------------------
-    // (2) Torsion-only staged NM — reduced budgets + early stop
+    //  Torsion-only staged NM — reduced budgets + early stop
     // ------------------------------
     std::vector<double> x_final = x_after_TR;
 
@@ -1093,7 +1094,7 @@ AntColonyOptimizer::refinePoseSplitNmFromDiscrete(
             return eval_full(x_tmp);
         };
 
-        // Keep your eps ladder, but reduce restarts/iters and loosen late ftol slightly for &&.
+        // Keep  eps ladder, but reduce restarts/iters and loosen late ftol slightly for &&.
         const double eps0 = manyTors ? 0.020  : 0.025;
         const double eps1 = manyTors ? 0.010  : 0.0125;
         const double eps2 = manyTors ? 0.005  : 0.00625;
@@ -1569,7 +1570,8 @@ AntColonyOptimizer::runLocalNelderMeadFromSeeds(
     const Eigen::Vector3d    &ini_rot_deg,
     const std::vector<double> &ini_tors_deg,
     const ECHOScore &scorer,
-    double rep_max
+    double rep_max,
+    double map_score_function
 ) const
 {
     const size_t nTors = ini_tors_deg.size();
@@ -1602,7 +1604,7 @@ AntColonyOptimizer::runLocalNelderMeadFromSeeds(
 
         restore_coords(conf, baseCoords);
         applyNormalizedSolution(pre, conf, x_norm, ini_trans_xyz, ini_rot_deg, ini_tors_deg);
-        return scorer.score(conf, rep_max);
+        return scorer.score(conf, rep_max, map_score_function);
     };
 
     // -----------------------------
@@ -1759,7 +1761,8 @@ py::list AntColonyOptimizer::optimize() {
     
     const auto &config = pre.config();//TODO!! do you still need this?
     
-    
+    const int inner_map_score = config.inner_map_score;
+    const int outer_map_score = config.outer_map_score;
     for (unsigned int iter = 0; iter < m_max_iterations; ++iter) {
         //set alpha value lower at the start to increase breath of search
         //need to pass this as its not being set anymore
@@ -1768,6 +1771,7 @@ py::list AntColonyOptimizer::optimize() {
         //cap on repulsion gets tighter as iteration increases
         double t = (m_max_iterations <= 1) ? 1.0 : static_cast<double>(iter) / (m_max_iterations - 1);
         double repCap_discrete = config.repCap0 + (config.repCap1 - config.repCap0) * (t * t);
+        
         //set num threads
         if (t > 0.75) {
             m_diversity_now = 1;
@@ -1794,7 +1798,7 @@ py::list AntColonyOptimizer::optimize() {
                 
                  RDKit::ROMol mol(m_original_mol); 
                  apply_ant_solution(mol.getConformer(), ant.sol);
-                 ant.score = scorer.score(mol.getConformer(), repCap_discrete);
+                 ant.score = scorer.score(mol.getConformer(), repCap_discrete, inner_map_score);
                  
              }
         }//end omp para 
@@ -1823,7 +1827,7 @@ py::list AntColonyOptimizer::optimize() {
             #pragma omp for schedule(dynamic,1)
             for (int k = 0; k < static_cast<int>(K); ++k) {
                 const auto& champ = m_ants_vec[k];
-                SplitNmResult res = refinePoseSplitNmFromDiscrete(champ.sol, scorer, config.repCap_inner_nm);
+                SplitNmResult res = refinePoseSplitNmFromDiscrete(champ.sol, scorer, config.repCap_inner_nm, inner_map_score);
         
                 refined[k].realScore = res.score;
                 refined[k].realMol   = std::move(res.mol);
@@ -1841,7 +1845,7 @@ py::list AntColonyOptimizer::optimize() {
                   });
 
         auto &best = refined[rorder[0]];
-        // 4a) Store top-K-per-iteration refined poses as seeds for the final return stage
+        //  Store top-K-per-iteration refined poses as seeds for the final return stage
         {
           const unsigned keepCount = std::min<unsigned>(m_diversity_now, (unsigned)rorder.size());
           for (unsigned i = 0; i < keepCount; ++i) {
@@ -1946,7 +1950,8 @@ py::list AntColonyOptimizer::optimize() {
             auto [nmScore, nmMol] = runLocalNelderMeadFromSeeds(
                 ini_trans_xyz, ini_rot_deg, ini_tors_deg,
                 scorer,
-                config.repCap_final_nm
+                config.repCap_final_nm,
+                outer_map_score
             );
             
             IterBest cand;

@@ -308,6 +308,11 @@ def create_binding_site_mask(density_shape, point, radii, apix, origin):
 # Alpha Shape / Delaunay Tools
 #---------------------------------------
 
+
+
+
+
+
 def compute_alpha_shape_pockets(
     positions: np.ndarray,
     probe_min: float,
@@ -316,7 +321,8 @@ def compute_alpha_shape_pockets(
     first_pass_min_size: int,
     second_pass_thr: float,
     third_pass_thr: float,
-    n_overlaps: int
+    n_overlaps: int,
+    return_delaunay
 ) -> Dict[int, List[int]]:
     """
     Computes binding site pockets using an alpha-shape (Delaunay triangulation) approach.
@@ -343,16 +349,16 @@ def compute_alpha_shape_pockets(
         e.g. {0: [[idx1, idx2, idx3, idx4], ...], ...}
     """
     
-    # 1. Delaunay Triangulation
+    
     delaunay = Delaunay(positions)
     tetrahedra = delaunay.simplices
     
-    # 2. Compute Circumspheres & Filter by Probe Size
+    
     candidate_indices = []
     candidate_centers = []
     
-    # Optimization: Vectorized circumsphere computation is preferred if possible, 
-    # but strictly adhering to provided helper `compute_circumsphere` which processes one by one.
+    # TODO! Vectorise circumsphere computation 
+
     for i, tetra in enumerate(tetrahedra):
         vertices = positions[tetra]
         center, radius = compute_circumsphere(vertices)
@@ -367,7 +373,7 @@ def compute_alpha_shape_pockets(
     candidate_centers = np.array(candidate_centers)
     candidate_tetrahedra = tetrahedra[candidate_indices] # Shape (M, 4)
     
-    # 3. First Pass Clustering
+    #
     # Cluster circumsphere centers to group nearby tetrahedra
     labels = fclusterdata(candidate_centers, t=first_pass_thr, criterion='distance')
     
@@ -384,8 +390,8 @@ def compute_alpha_shape_pockets(
     if not first_pass_clusters:
         return {}
 
-    # 4. Second Pass Clustering
-    # Cluster centroids of first-pass clusters
+    
+    #second pass cluster
     cluster_centroids = []
     old_labels = []
     
@@ -463,7 +469,10 @@ def compute_alpha_shape_pockets(
             original_label = ordered_labels[idx]
             merged_tetras.extend(second_pass_clusters[original_label])
         final_clusters[new_id] = merged_tetras
-        
+    
+    
+    if return_delaunay:
+        return final_clusters, delaunay
     return final_clusters
 
 #---------------------------------------
@@ -686,3 +695,266 @@ def density_and_distance_maps(
     volume = float(np.sum(densmap > density_cutoff) * (grid_spacing ** 3))
 
     return origin, box_size, densmap, distance_map, apix, volume
+
+#-----
+#manual binding site defintion
+#------
+
+def make_grid_and_origin(
+    box_size,
+    centroid,
+    grid_spacing,
+    *,
+    order="xyz",
+    dtype=np.float32,
+    ensure_odd=True,
+    pad_voxels=0,
+):
+    c = np.asarray(centroid, dtype=float).reshape(3)
+
+    if np.isscalar(box_size):
+        L = np.array([float(box_size)] * 3, dtype=float)
+    else:
+        L = np.asarray(box_size, dtype=float).reshape(3)
+
+    if grid_spacing <= 0:
+        raise ValueError("grid_spacing must be > 0")
+
+    n_xyz = np.ceil(L / float(grid_spacing)).astype(int)
+
+    if ensure_odd:
+        n_xyz += (n_xyz % 2 == 0).astype(int)
+
+    if pad_voxels:
+        n_xyz = n_xyz + 2 * int(pad_voxels)
+
+    nx, ny, nz = map(int, n_xyz)
+
+    half_extent = ((n_xyz - 1) * float(grid_spacing)) / 2.0
+    origin = c - half_extent  # voxel-center at index 0 (x,y,z)
+
+    if order == "zyx":
+        grid = np.zeros((nz, ny, nx), dtype=dtype)
+    elif order == "xyz":
+        grid = np.zeros((nx, ny, nz), dtype=dtype)
+    else:
+        raise ValueError("order must be 'zyx' or 'xyz'")
+
+    return grid, origin, (nx, ny, nz)
+
+
+def make_grid_and_origin_from_radius(
+    radius,
+    centroid,
+    grid_spacing,
+    *,
+    order="xyz",
+    dtype=np.float32,
+    ensure_odd=True,
+    pad_voxels=0,
+):
+    if radius <= 0:
+        raise ValueError("radius must be > 0")
+    if grid_spacing <= 0:
+        raise ValueError("grid_spacing must be > 0")
+
+    c = np.asarray(centroid, dtype=float).reshape(3)
+    r = float(radius)
+    s = float(grid_spacing)
+
+    n = int(np.ceil((2.0 * r) / s))
+    n_xyz = np.array([n, n, n], dtype=int)
+
+    if ensure_odd:
+        n_xyz += (n_xyz % 2 == 0).astype(int)
+
+    if pad_voxels:
+        n_xyz = n_xyz + 2 * int(pad_voxels)
+
+    nx, ny, nz = map(int, n_xyz)
+
+    half_extent = ((n_xyz - 1) * s) / 2.0
+    origin = c - half_extent  # (x,y,z)
+
+    if order == "zyx":
+        grid = np.zeros((nz, ny, nx), dtype=dtype)
+    elif order == "xyz":
+        grid = np.zeros((nx, ny, nz), dtype=dtype)
+    else:
+        raise ValueError("order must be 'zyx' or 'xyz'")
+
+    return grid, origin, (nx, ny, nz)
+
+
+def _centroid_to_index(centroid_xyz, origin_xyz, grid_spacing, shape_xyz, order="zyx"):
+    """Nearest voxel index to centroid (voxel centers)."""
+    c = np.asarray(centroid_xyz, float)
+    o = np.asarray(origin_xyz, float)
+    s = float(grid_spacing)
+    nx, ny, nz = map(int, shape_xyz)
+
+    i = int(np.rint((c[0] - o[0]) / s))
+    j = int(np.rint((c[1] - o[1]) / s))
+    k = int(np.rint((c[2] - o[2]) / s))
+
+    i = min(max(i, 0), nx - 1)
+    j = min(max(j, 0), ny - 1)
+    k = min(max(k, 0), nz - 1)
+
+    return (k, j, i) if order == "zyx" else (i, j, k)
+
+
+def _paint_excluded_spheres(excluded, origin_xyz, shape_xyz, grid_spacing, atom_positions, atom_radii, probe_radius, order="zyx"):
+    """
+    excluded: bool array (True = excluded)
+    Paint spheres of radius (atom_radii + probe_radius) onto excluded grid using bounded sub-boxes.
+    """
+    ox, oy, oz = map(float, origin_xyz)
+    nx, ny, nz = map(int, shape_xyz)
+    s = float(grid_spacing)
+
+    pos = np.asarray(atom_positions, dtype=float)
+    rad = np.asarray(atom_radii, dtype=float)
+    if pos.ndim != 2 or pos.shape[1] != 3:
+        raise ValueError("atom_positions must be shape (N,3)")
+    if rad.ndim != 1 or rad.shape[0] != pos.shape[0]:
+        raise ValueError("atom_radii must be shape (N,) matching atom_positions")
+
+    pr = float(probe_radius)
+
+    for (cx, cy, cz), r0 in zip(pos, rad):
+        r = float(r0) + pr
+        if not np.isfinite(r) or r <= 0:
+            continue
+
+        # xyz index bounds (voxel centers)
+        i0 = int(np.floor((cx - r - ox) / s))
+        i1 = int(np.ceil((cx + r - ox) / s))
+        j0 = int(np.floor((cy - r - oy) / s))
+        j1 = int(np.ceil((cy + r - oy) / s))
+        k0 = int(np.floor((cz - r - oz) / s))
+        k1 = int(np.ceil((cz + r - oz) / s))
+
+        # clamp
+        i0 = max(i0, 0); j0 = max(j0, 0); k0 = max(k0, 0)
+        i1 = min(i1, nx - 1); j1 = min(j1, ny - 1); k1 = min(k1, nz - 1)
+        if i1 < i0 or j1 < j0 or k1 < k0:
+            continue
+
+        xs = ox + np.arange(i0, i1 + 1, dtype=float) * s
+        ys = oy + np.arange(j0, j1 + 1, dtype=float) * s
+        zs = oz + np.arange(k0, k1 + 1, dtype=float) * s
+
+        r2 = r * r
+
+        if order == "zyx":
+            zz, yy, xx = np.meshgrid(zs, ys, xs, indexing="ij")  # (k,j,i)
+            mask = (xx - cx) ** 2 + (yy - cy) ** 2 + (zz - cz) ** 2 <= r2
+            sub = excluded[k0:k1 + 1, j0:j1 + 1, i0:i1 + 1]
+            sub[mask] = True
+        else:
+            xx, yy, zz = np.meshgrid(xs, ys, zs, indexing="ij")  # (i,j,k)
+            mask = (xx - cx) ** 2 + (yy - cy) ** 2 + (zz - cz) ** 2 <= r2
+            sub = excluded[i0:i1 + 1, j0:j1 + 1, k0:k1 + 1]
+            sub[mask] = True
+
+
+def sasa_accessible_component_mask(
+    *,
+    atom_positions: np.ndarray,
+    atom_radii: np.ndarray,
+    centroid: np.ndarray,
+    grid_spacing: float,
+    probe_radius: float = 1.4,   # water ~1.4 Å; set ~0.7 if you want "half water radius"
+    # one of these:
+    box_size=None,
+    radius=None,
+    # grid options
+    order: str = "zyx",
+    ensure_odd: bool = True,
+    pad_voxels: int = 0,
+    # component selection
+    connectivity: int = 1,  # 1->6N, 2->18N, 3->26N
+    keep_mode: str = "contains_or_closest",  # or "contains_only" / "closest_only"
+    return_labels: bool = False,
+):
+    """
+    Build probe-accessibility grid (excluded vs accessible), label accessible components,
+    and keep the component containing the centroid voxel (or closest if centroid is excluded).
+
+    Returns
+    -------
+    excluded : bool array
+        True where voxel center is within (atom_radius + probe_radius) of any atom.
+    accessible : bool array
+        ~excluded
+    kept : bool array
+        Selected connected component within accessible.
+    origin_xyz : (3,) float
+    shape_xyz : (nx,ny,nz)
+    (optional) labels, n_labels
+    """
+    if (box_size is None) == (radius is None):
+        raise ValueError("Provide exactly one of box_size or radius.")
+
+    centroid = np.asarray(centroid, dtype=float).reshape(3)
+
+    if box_size is not None:
+        _, origin, shape_xyz = make_grid_and_origin(
+            box_size, centroid, grid_spacing,
+            order=order, dtype=np.float32, ensure_odd=ensure_odd, pad_voxels=pad_voxels
+        )
+        # allocate excluded grid in chosen order
+        nx, ny, nz = shape_xyz
+        excluded = np.zeros((nz, ny, nx), dtype=bool) if order == "zyx" else np.zeros((nx, ny, nz), dtype=bool)
+    else:
+        _, origin, shape_xyz = make_grid_and_origin_from_radius(
+            radius, centroid, grid_spacing,
+            order=order, dtype=np.float32, ensure_odd=ensure_odd, pad_voxels=pad_voxels
+        )
+        nx, ny, nz = shape_xyz
+        excluded = np.zeros((nz, ny, nx), dtype=bool) if order == "zyx" else np.zeros((nx, ny, nz), dtype=bool)
+
+    # 1) paint excluded volume for probe centers
+    _paint_excluded_spheres(
+        excluded, origin, shape_xyz, grid_spacing,
+        atom_positions, atom_radii, probe_radius, order=order
+    )
+
+    # 2) accessible space and labeling
+    accessible = ~excluded
+
+    structure = generate_binary_structure(3, connectivity)
+    labels, nlab = label(accessible, structure=structure)
+
+    kept = np.zeros_like(accessible, dtype=bool)
+    if nlab == 0:
+        if return_labels:
+            return excluded, accessible, kept, origin, tuple(shape_xyz), labels, nlab
+        return excluded, accessible, kept, origin, tuple(shape_xyz)
+
+    c_idx = _centroid_to_index(centroid, origin, grid_spacing, shape_xyz, order=order)
+
+    # 3) choose component
+    chosen = 0
+    if keep_mode in ("contains_only", "contains_or_closest"):
+        chosen = int(labels[c_idx])
+
+    if chosen == 0 and keep_mode in ("closest_only", "contains_or_closest"):
+        # centroid lies in excluded (or in background): find nearest accessible voxel using distance transform
+        # distance_transform_edt computes distance to nearest zero for non-zero entries,
+        # so use excluded as input (excluded=True -> non-zero), nearest zero -> accessible voxel.
+        dist, inds = distance_transform_edt(excluded, return_indices=True)
+        nearest_idx = tuple(int(inds[d][c_idx]) for d in range(3))
+        chosen = int(labels[nearest_idx])
+
+    if chosen != 0:
+        kept = labels == chosen
+
+    if return_labels:
+        return excluded, accessible, kept, origin, tuple(shape_xyz), labels, nlab
+    return excluded, accessible, kept, origin, tuple(shape_xyz)
+
+
+
+

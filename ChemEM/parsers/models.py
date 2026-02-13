@@ -28,6 +28,7 @@ class Protein:
         self.complex_structure = complex_structure
         self.sse_groups, self.sse_codes = sse_groups_from_parmed(complex_structure)
         self.res_map = residue_map or {}
+        self.delaunay = None
 
     def get_residue_mapping(self, chain, res_num):
         key = (str(chain).strip(), str(res_num).strip())

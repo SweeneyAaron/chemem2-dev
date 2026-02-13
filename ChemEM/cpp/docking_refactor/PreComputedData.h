@@ -48,6 +48,7 @@ struct ProteinData{
 
 struct LigandData{
     //TODO!! find this automatically.
+    int n_heavy;
     std::size_t heavy_end_idx;
     VectorXi atom_types;
     std::vector<Eigen::VectorXi> hydrogen_idx;
@@ -111,6 +112,16 @@ struct ScoringWeights {
     double rms_cutoff = 1.0;
 };
 
+struct DensityData {
+    
+    int nbins;
+    double mi_weight;
+    double sci_weight;
+    double resolution;
+    double sigma_coeff;
+    std::vector<double> atom_masses;  
+    bool normalise = true; 
+};
 
 
 struct GridData {
@@ -213,6 +224,9 @@ struct AlgorithmConfig {
     std::vector<std::vector<double>> all_arrays;
     std::vector<std::vector<size_t>> adjacency;
     SpatialHash prot_hash; // The spatial lookup engine
+    bool no_map = false;
+    int inner_map_score = 1;
+    int outer_map_score = 0;
 };
 
 
@@ -239,10 +253,15 @@ public:
     const GridData& electro_grid_raw() const { return m_electro_grid_raw ;}
     const GridData& hydrohpobic_grid_raw() const { return m_hydrophobic_grid_raw ; }
     const GridData& hydrophobic_enclosure_grid() const { return m_hydrophobic_enclosure_grid ; }
-    const GridData& desolvation_polar_grid() const { return m_desolvation_polar_grid ; }
-    const GridData& desolvation_hydrophobic_grid() const { return m_desolvation_hydrohpobic_grid ; }
-    const GridData& delta_sasa_grid() const { return m_delta_sasa_grid ; }
+    //const GridData& desolvation_polar_grid() const { return m_desolvation_polar_grid ; }
+    //const GridData& desolvation_hydrophobic_grid() const { return m_desolvation_hydrohpobic_grid ; }
+    //const GridData& delta_sasa_grid() const { return m_delta_sasa_grid ; }
     const AromaticScorer& aromatic_scorer() const { return m_aromatic_scorer; }
+    const GridData& density_grid() const { return m_density_grid; }
+    const GridData& sci_grid() const {return m_sci_grid; }
+    const GridData& sci_first_derivative_grid() const { return m_sci_first_derivitive_grid; } 
+    const GridData& sci_second_derivative_grid() const { return m_sci_score_second_derivative_grid; } 
+    const DensityData& density_data() const { return m_density_data; }
     //const HalogenScorer&  halogen_scorer()  const { return m_halogen_scorer; }
     [[nodiscard]] inline int get_hbond_role(int atom_type) const noexcept {
         int mask = 0;
@@ -263,9 +282,9 @@ private:
     GridData m_electro_grid_raw;
     GridData m_hydrophobic_grid_raw;
     GridData m_hydrophobic_enclosure_grid;
-    GridData m_desolvation_polar_grid;
-    GridData m_desolvation_hydrohpobic_grid;
-    GridData m_delta_sasa_grid; 
+    //GridData m_desolvation_polar_grid;
+    //GridData m_desolvation_hydrohpobic_grid;
+    //GridData m_delta_sasa_grid; 
     HBondData m_hbond_score_data;
     AromaticData m_aromatic_score_data;
     LigandIntraData m_ligand_intra;
@@ -273,6 +292,11 @@ private:
     WaterData m_water_data;
     AlgorithmConfig m_config;
     AromaticScorer m_aromatic_scorer;
+    GridData m_density_grid;
+    GridData m_sci_grid;
+    GridData m_sci_first_derivitive_grid;
+    GridData m_sci_score_second_derivative_grid;
+    DensityData m_density_data;
     
     //HalogenScorer  m_halogen_scorer;
     void validate_protein_data();

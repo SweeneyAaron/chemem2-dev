@@ -1,84 +1,104 @@
 ## Local conda build + install (from this repo)
 
+This repo is for the development of  `ChemEM2`.
 These instructions build a local conda package from this source tree (including the compiled C++/pybind11 extensions), then install it into a fresh environment **with all runtime dependencies**.
 > Installation requires mamba, this is a development version, please report bugs to aaron sweeney ucbtasw@ucl.ac.uk
-> Important: do **not** install the `.conda` artifact by filename (e.g. `mamba install ./conda-dist/.../chemem-*.conda`).
-> Installing via an explicit package file path does not reliably resolve dependencies.  
-> Instead, build an indexed local channel and install **by package name**.
-
-### 1) Create a build environment
-
-```bash
-cd /path/to/ChemEM2_build
-
-mamba create -n chemem-build -c conda-forge python=3.11 conda-build conda-index
-conda activate chemem-build
-conda build . -c conda-forge --output-folder conda-dist
-
-
-#if conda-dist/noarch doesn't exist build it with:
-	mkdir -p conda-dist/noarch
-
-#index conda-dist as a local package
-python -m conda_index "$PWD/conda-dist"
-
-#check this file exists
-ls -l conda-dist/linux-64/repodata.json
-
-#check the local pacakge is visalbe to conda
-conda search -c "file://$PWD/conda-dist" chemem --info
-
-#you should see something like: chemem 2.0.0 ... url: file://.../conda-dist/...
-
-
-mamba create -n chemem -c conda-forge python=3.11
-mamba activate chemem
-
-#remove the build environment 
-conda remove chemem-build --all
-```
-
-### create a runtime environment 
-```bash
-mamba create -n chemem -c conda-forge python=3.11
-mamba activate chemem
-mamba install \
-  --override-channels \
-  --strict-channel-priority \
-  -c "file://$PWD/conda-dist" \
-  -c conda-forge \
-  "chemem=2.0.0"
-#verify package install
-chemem -h
-
-#end-to-end test (60 secs)
-chemem 7jjo_conf.txt --dock --no-map --minimize-docking --rescore
-
-```
-
-# ChemEM Docking CLI — Protocols & Options
-
-This document describes the **protocol pipeline** and the **command-line options** exposed by the `chemem` entrypoint.
+> Assumes you are in the repo root (the folder that contains `meta.yaml` and `CMakeLists.txt`).
 
 ---
 
-## Quickstart
+## 1) Build environment (conda/mamba)
 
-
-
-Run only binding-site preparation:
+Create a build env with the *host/build* requirements:
 
 ```bash
-chemem <conf_file> --binding-site
+mamba create -n chemem-build -c conda-forge \
+  python=3.11 \
+  cmake ninja scikit-build-core pip \
+  pybind11 eigen \
+  rdkit=2024.03.3 rdkit-dev=2024.03.3 \
+  "numpy>=1.19" \
+  boost-cpp \
+  llvm-openmp
 ```
 
-Run docking explicitly:
+Activate it:
 
 ```bash
-chemem <conf_file> --dock
+mamba activate chemem-build
+```
+
+Notes:
+- `llvm-openmp` is mainly for macOS. On Linux you can usually drop it.
+
+---
+
+## 2) Configure + build with CMake + Ninja
+
+From the repo root:
+
+```bash
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+```
+
+Build:
+
+```bash
+cmake --build build 
 ```
 
 ---
+
+## 3) Runtime environment (conda/mamba)
+
+Create a runtime env with the *run* requirements:
+
+```bash
+mamba create -n chemem -c conda-forge \
+  python=3.11 \
+  numpy=1.26.4 scipy \
+  rdkit=2024.03.3 \
+  "dimorphite-dl>=2.0.1" \
+  "spyrmsd>=0.8.0" \
+  ambertools=23.6 \
+  openff-toolkit=0.16.0 openff-toolkit-base=0.16.0 \
+  openff-amber-ff-ports=0.0.4 \
+  openff-forcefields=2024.09.0 \
+  openff-interchange=0.3.29 openff-interchange-base=0.3.29 \
+  openff-models=0.1.2 openff-units=0.2.2 openff-utilities=0.1.12 \
+  "pdbfixer>=1.11" "mrcfile>=1.5.0" \
+  scikit-image kneed mdtraj networkx tqdm scikit-learn grand \
+  boost-cpp \
+  llvm-openmp
+```
+
+Activate it:
+
+```bash
+mamba activate chemem
+```
+
+
+---
+
+## 4) Run ChemEM
+
+Run from inside the `chemem` env above the top level of the package root:
+
+```bash
+python -m ChemEM <conf_file> <options>
+```
+
+Example:
+
+```bash
+python -m ChemEM 7jjo_conf.txt --dock --no-map --minimize-docking --rescore
+```
+
+---
+
+
 
 
 ### Dependencies

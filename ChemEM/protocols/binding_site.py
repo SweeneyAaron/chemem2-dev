@@ -175,7 +175,7 @@ class BindingSite:
     
             # Optional debug output (kept explicit + separate path)
             dmap = EMMap(origin, apix, distance_map, 3.0)
-            dmap.write_mrc(distmap_path)
+            #dmap.write_mrc(distmap_path)
     
             data = {
                 "key": site_label,
@@ -210,6 +210,7 @@ class BindingSite:
                 lining_residues,
                 self.protein_openff_structure.positions,
                 pdb_path.replace(".pdb", "_lining.pdb"),
+                write=False
             )
     
             self.binding_sites[site_label] = BindingSiteModel.from_dict(data)
@@ -276,13 +277,13 @@ class BindingSite:
         self.set_grid_spacing()
         self.get_position_input()
         
-        if self.system.options.force_new_site:
+        if False:#self.system.options.force_new_site:
             #TODO!
             
             pass
         else:
             # Automated binding site segmentation
-            self.pockets = compute_alpha_shape_pockets(
+            self.pockets, delaunay = compute_alpha_shape_pockets(
                 positions=self.positions,
                 probe_min=self.system.options.probe_sphere_min,
                 probe_max=self.system.options.probe_sphere_max,
@@ -290,8 +291,11 @@ class BindingSite:
                 first_pass_min_size=self.system.options.fist_pass_cluster_size,
                 second_pass_thr=self.system.options.second_pass_thr,
                 third_pass_thr=self.system.options.third_pass_thr,
-                n_overlaps=self.system.options.n_overlaps
+                n_overlaps=self.system.options.n_overlaps,
+                return_delaunay=True
             )
+            
+            self.system.protein.delaunay = delaunay
             
             if (self.system.centroid is not None) and len(self.system.centroid):
                 self.get_centroid_binding_sites()

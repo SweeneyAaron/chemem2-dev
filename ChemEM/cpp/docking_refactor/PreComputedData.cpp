@@ -185,7 +185,7 @@ PreComputedData::PreComputedData(py::object py_pc){
     
     try {
     
-    
+        m_ligand_data.n_heavy = py_pc.attr("n_ligand_atoms").cast<int>();
         m_ligand_data.heavy_end_idx = py_pc.attr("ligand_heavy_end_index").cast<std::size_t>();
         m_ligand_data.atom_types = py_pc.attr("ligand_atom_types").cast<VectorXi>(); 
         m_ligand_data.hydrogen_idx = py_pc.attr("ligand_hydrogen_idx").cast<std::vector<Eigen::VectorXi>>();
@@ -249,6 +249,7 @@ PreComputedData::PreComputedData(py::object py_pc){
         throw std::runtime_error("[Error] PreComputedData hydrophob_enc data failed to initilise: " + std::string(e.what()));
     }
     
+    /*
     try {
         load_grid(m_desolvation_polar_grid, py_pc, "desolvation_polar");
     } catch (const std::exception &e) {
@@ -266,6 +267,7 @@ PreComputedData::PreComputedData(py::object py_pc){
      } catch (const std::exception &e) {
          throw std::runtime_error("[Error] PreComputedData delta_sasa data failed to initilise: " + std::string(e.what()));
      }
+     */
      //-----Score data-----
      //---Hbond score---
      
@@ -588,6 +590,56 @@ PreComputedData::PreComputedData(py::object py_pc){
             m_aromatic_scorer.load_from(py_pc);
         } catch (const std::exception &e){
             throw std::runtime_error("[Error] PreComputedData aromatic scorer failed to initlise.");
+        }
+        
+        //-----density-map-----
+        py::object ds_obj = py_pc.attr("binding_site_density_map_grid");
+        m_config.no_map = py_pc.attr("no_map").cast<bool>();
+        if (!ds_obj.is_none() && (!m_config.no_map)) {
+             //load raw density map
+             try {
+                 load_grid(m_density_grid, py_pc, "binding_site_density_map");
+             } catch (const std::exception &e) {
+                 throw std::runtime_error("[Error] PreComputedData binding_site_density_map_grid failed to initilise" + std::string(e.what()));
+             }
+             //load precomputed sci score data
+             try {
+                 load_grid(m_sci_grid, py_pc, "smoothed_map");
+             } catch (const std::exception &e) {
+                 throw std::runtime_error("[Error] PreComputedData smoothed_grid failed to initilise" + std::string(e.what()));
+             }
+             //first derivative map
+             try {
+                 load_grid(m_sci_first_derivitive_grid, py_pc, "grad_map");
+             } catch (const std::exception &e) {
+                 throw std::runtime_error("[Error] PreComputedData grad_mapngrid failed to initilise" + std::string(e.what()));
+             }
+             
+             //second derivative map
+             try {
+                 load_grid(m_sci_score_second_derivative_grid, py_pc, "laplacian_map");
+             } catch (const std::exception &e) {
+                 throw std::runtime_error("[Error] PreComputedData aplacian_map failed to initilise" + std::string(e.what()));
+             }
+             //load fast mi data
+             try {
+                 m_density_data.nbins = py_pc.attr("mi_bins").cast<int>();
+                 m_density_data.atom_masses = py_pc.attr("atom_masses").cast<std::vector<double>>();
+                 m_density_data.mi_weight = py_pc.attr("mi_weight").cast<double>();
+                 m_density_data.resolution = py_pc.attr("binding_site_density_map_resolution").cast<double>();
+                 m_density_data.sigma_coeff = py_pc.attr("binding_site_density_map_sigma_coeff").cast<double>();
+                 m_density_data.sci_weight  = py_pc.attr("sci_weight").cast<double>();
+                 
+                 
+
+             } catch (const std::exception &e) {
+                 throw std::runtime_error("[Error] PreComputedData mi_data failed to initilise" + std::string(e.what()));
+             }
+             
+             
+           
+            
+            
         }
         
         

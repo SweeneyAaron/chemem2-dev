@@ -246,13 +246,15 @@ class Docking:
         self.debug_prints = []
 
         for lig_idx, (ligand, precomp_lig) in enumerate(ligands):
+            
             combined = precomp_site + precomp_lig
             block = self._molblock_with_fallback(ligand, combined)
-
+            
             if self.system.options.split_site:
                 poses = self._dock_split_site(block, combined)
             else:
                 poses = self.dock(block, combined)
+                
 
             poses = self._post_process(ligand, poses)
 
@@ -285,12 +287,19 @@ class Docking:
             return poses
         
         binding_site = self.system.binding_sites[site_id]
+        binding_site_map = self.system.binding_sites[site_id]
         conf_map = getattr(self.system, "confidence_map", None)
+        densmap = None
+        if conf_map is not None:
+            densmap = conf_map.submap(origin=precomp_site.binding_site_density_map_origin,
+                                      box_size=precomp_site.binding_site_density_map_grid.shape)
+        
+        
         pm = PoseMinimiser(
             protein_structure=self.system.protein.complex_structure,
             ligand_structure=[mol.complex_structure],
             residues=binding_site.residues,
-            density_map=conf_map,
+            density_map=densmap,
             platform_name=getattr(self.system, 'platform', 'OpenCL'),
             protein_restraint='protein',
             pin_k=5000.0,
@@ -310,7 +319,8 @@ class Docking:
             min_pos_scored.append((score, pos))
         
         min_pos_scored = sorted(min_pos_scored, key=lambda x: x[0])
-        return self._post_process(mol, min_pos_scored)
+        #return self._post_process(mol, min_pos_scored)
+        return min_pos_scored
     
    
     def _molblock_with_fallback(self, ligand, combined):

@@ -1,0 +1,5 @@
+# --Added density map segemntation and docking protocols 
+
+--cpp scoring functions for sci score and mutual information were added 
+--new protocls include alphamask for ligand segmentation
+
