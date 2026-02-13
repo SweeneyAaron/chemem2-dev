@@ -463,7 +463,7 @@ class PreCompDataProtein:
         
         
         key = int(binding_site.key)
-        if len(system.centroid) <= key:
+        if system.centroid is None or len(system.centroid) <= key:
             translation_coords = covert_idx_to_coords(np.array(self.translation_points),
                                                       binding_site.origin,
                                                       binding_site.apix
@@ -797,10 +797,11 @@ class PreCompDataProtein:
         self.w_constraint = 1.0
         
         self.nb_cell = 4.5
-        self.no_map = system.options.no_map
+        
         #add maps 
         #-----Add the density map----
         if not system.options.no_map and hasattr(system,'binding_site_maps') :
+            self.no_map = False
             density_map = system.binding_site_maps[binding_site.key][0][0]
             
             self.binding_site_density_map_grid = density_map.density_map 
@@ -811,8 +812,8 @@ class PreCompDataProtein:
             self.mi_weight = system.options.mi_weight
             self.sci_weight = system.options.sci_weight
             
-       
         else:
+            self.no_map = True
            
             self.binding_site_density_map_grid = None
             self.binding_site_density_map_apix = None 
@@ -838,7 +839,6 @@ class PreCompDataProtein:
         if isinstance(other, PreCompDataLigand):
             
             merged = copy.deepcopy(self)
-           
             _attach_attributes(merged, other, prefix="")  
             merged.__post_init__()
             return merged

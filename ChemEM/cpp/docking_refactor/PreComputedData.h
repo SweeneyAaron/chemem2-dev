@@ -224,7 +224,7 @@ struct AlgorithmConfig {
     std::vector<std::vector<double>> all_arrays;
     std::vector<std::vector<size_t>> adjacency;
     SpatialHash prot_hash; // The spatial lookup engine
-    bool no_map = false;
+    bool no_map = true;
     int inner_map_score = 1;
     int outer_map_score = 0;
 };

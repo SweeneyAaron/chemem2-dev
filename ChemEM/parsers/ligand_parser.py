@@ -444,7 +444,8 @@ class LigandParser:
 
     @staticmethod
     def load_ligand_structure(molecule):
-        ligand_off_molecule = Molecule.from_rdkit(molecule)
+        #can remove  allow_undefined_stereo=True
+        ligand_off_molecule = Molecule.from_rdkit(molecule, allow_undefined_stereo=True)
         ligand_off_molecule.assign_partial_charges("mmff94")
 
         force_field = ForceField("openff_unconstrained-2.0.0.offxml")

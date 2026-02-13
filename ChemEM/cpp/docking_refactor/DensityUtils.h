@@ -92,9 +92,7 @@ namespace DensityUtils {
         if (nAtoms == 0 || nz <= 0 || ny <= 0 || nx <= 0) {
             return {};
         }
-        if (static_cast<int>(atom_masses.size()) != nAtoms) {
-            throw std::runtime_error("simulate_density_map: atom_masses.size() must match coords_xyz.rows()");
-        }
+        
         if (apix[0] == 0.0 || apix[1] == 0.0 || apix[2] == 0.0) {
             throw std::runtime_error("simulate_density_map: apix contains zero");
         }
