@@ -108,8 +108,8 @@ struct LigandIntraData {
 struct ScoringWeights {
     double nonbond, dsasa, hphob, electro, ligand_torsion, ligand_intra;
     double vdw, hbond, aromatic, halogen, hphob_enc, constraint;
-    double repCap_discrete, repCap_inner_nm, repCap_final_nm; // must be positive min 0.0
-    double rms_cutoff = 1.0;
+    
+    
 };
 
 struct DensityData {

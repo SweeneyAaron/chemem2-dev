@@ -1,5 +1,0 @@
-
-protein = /Users/aaron.sweeney/Documents/chemem2_build/ChemEM2_feb26/chemem2-dev/test/8y9g.pdb
-ligand = CC(C)C1C(=O)NC(=Cc2c[nH]cn2)C(=O)N1
-ligand = CC(=CCSP(=O)(O)OP(=O)(O)O)C
-output = /Users/aaron.sweeney/Documents/chemem2_build/ChemEM2_feb26/chemem2-dev/test/8y9g

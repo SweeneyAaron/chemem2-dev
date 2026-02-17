@@ -78,9 +78,9 @@ void PreComputedData::validate_weights() {
         }
     };
     
-    check_weights_and_clamp(m_weights.repCap_discrete , "repCap_discrete");
-    check_weights_and_clamp(m_weights.repCap_inner_nm , "repCap_inner_nm");
-    check_weights_and_clamp(m_weights.repCap_final_nm , "repCap_final_nm");
+    //check_weights_and_clamp(m_weights.repCap_discrete , "repCap_discrete");
+    //check_weights_and_clamp(m_weights.repCap_inner_nm , "repCap_inner_nm");
+    //check_weights_and_clamp(m_weights.repCap_final_nm , "repCap_final_nm");
     
     }
 
@@ -490,10 +490,6 @@ PreComputedData::PreComputedData(py::object py_pc){
          m_weights.halogen = py_pc.attr("w_halogen").cast<double>();
          m_weights.hphob_enc = py_pc.attr("w_hphob_enc").cast<double>();
          m_weights.constraint = py_pc.attr("w_constraint").cast<double>(); 
-         m_weights.repCap_discrete = py_pc.attr("repCap_discrete").cast<double>();
-         m_weights.repCap_inner_nm = py_pc.attr("repCap_inner_nm").cast<double>();
-         m_weights.repCap_final_nm = py_pc.attr("repCap_final_nm").cast<double>();
-         m_weights.rms_cutoff = py_pc.attr("rms_cutoff").cast<double>();
          validate_weights();
          
      } catch (const py::cast_error &e) {

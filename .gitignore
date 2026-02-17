@@ -27,5 +27,6 @@ cmake-build-*/
 .vscode/
 .idea/
 
-# --- OPTIONAL: ignore tests directory (uncomment if you really want this) ---
-# tests/
+# --- regression test stuff 
+test/
+7jjo_conf.txt

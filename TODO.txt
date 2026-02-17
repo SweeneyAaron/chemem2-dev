@@ -5,6 +5,12 @@ Parsing
 --fix the ring systems
 --fix flexible rings
 
+
+
+PACKAGE_MANAGEMENT
+
+-- in precomputed data.py setup tools and pkg_resources is used to laod data,
+    this is depreciated in setuptools versions >82, change this to use pytohn built it
 OutPUT 
 
 -- add a verbose output option so it only writes the requested analysis output by default

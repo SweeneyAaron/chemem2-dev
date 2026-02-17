@@ -228,8 +228,10 @@ class Docking:
         return pose_dic
 
     def _precomupt_ligand_objects(self):
+        
+        
         return [
-            (mol, PreCompDataLigand(mol, flexible_rings=self.system.options.flexible_rings))
+            (mol, PreCompDataLigand(mol,self.system.platform, flexible_rings=self.system.options.flexible_rings))
             for mol in self.system.ligand
         ]
 
@@ -306,7 +308,7 @@ class Docking:
             ligand_structure=[mol.complex_structure],
             residues=binding_site.residues,
             density_map=densmap,
-            platform_name=getattr(self.system, 'platform', 'OpenCL'),
+            platform_name=getattr(self.system, 'platform', 'CPU'),
             protein_restraint='protein',
             pin_k=5000.0,
             localise=True 
