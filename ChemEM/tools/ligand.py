@@ -155,9 +155,9 @@ def get_van_der_waals_radius(element_symbol):
     try:
         radius = periodic_table.GetRvdw(element_symbol)
         return radius
-    except ValueError:
-        print(f"Van der Waals radius for element symbol '{element_symbol}' is not available.")
-        return 1.8
+    except RuntimeError:
+        raise RuntimeError(f"Van der Waals radius for element symbol '{element_symbol}' is not available.")
+        
 
 
 

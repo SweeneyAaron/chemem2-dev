@@ -157,7 +157,7 @@ class PreCompDataLigand:
     '''
     
     
-    def __init__(self, ligand, flexible_rings = False):
+    def __init__(self, ligand, platform, flexible_rings = False):
         # ------------------------------------------------------------------ #
         # basic per-atom arrays                                              #
         # ------------------------------------------------------------------ #
@@ -177,7 +177,8 @@ class PreCompDataLigand:
         new_torsions = self.set_flexible_rings(ligand, flexible_rings)
         self.torsion_lists = get_torsion_lists(ligand.mol)
         self.end_torsions = len(self.torsion_lists)
-        self.ligand_torsion_profile = export_torsion_profile(ligand, self.torsion_lists)
+        
+        self.ligand_torsion_profile = export_torsion_profile(ligand, self.torsion_lists, platform)
         self.ligand_torsion_idxs = [i[1] for i in self.ligand_torsion_profile]
         self.ligand_torsion_scores = [i[2] for i in self.ligand_torsion_profile]
         new_torsions = [list(i) for i in new_torsions if list(i) not in self.ligand_torsion_idxs ]
@@ -378,17 +379,21 @@ class PreCompDataProtein:
         self.n_global_search = system.options.n_global_search 
         self.n_local_search = system.options.n_local_search 
         self.ncpu = os.cpu_count() - 2 
-        self.repCap0 = 2.0
-        self.repCap1 = 5.0
-        self.repCap_discrete = 5.0
-        self.repCap_inner_nm = 10.0 
-        self.repCap_final_nm = 15.0 
+        self.repCap0 = system.options.repulsion_cap_0
+        self.repCap1 = system.options.repulsion_cap_1
+        
+        self.repCap_inner_nm = system.options.repulsion_cap_nm
+        self.repCap_final_nm = system.options.repulsion_cap_polish
         self.rms_cutoff = 2.0
-        self.topN = 20 
+        self.topN = system.options.return_n
         self.a_lo = 0.25
         self.a_mid = 0.45
         self.a_hi = 0.70
-        self.iterations =0
+        self.iterations = system.options.max_iterations
+        
+        
+        
+
         
         #-----protein data------
         self.residues = binding_site.lining_residues
@@ -2320,7 +2325,7 @@ def get_force_energy(force, simulation):
 
 def export_torsion_profile(ligand,
                            torsion_lists,
-                           platform = 'OpenCL',
+                           platform,
                            output = './',
                            normalise = True,
                            write = False

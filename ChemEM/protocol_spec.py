@@ -102,6 +102,12 @@ def add_dock_args(p):
                    help="scaling factor for the SCI score when docking with a density map")
     g.add_argument("--mi-weight", type=float, default=100.0,
                    help="scaling factor for the MIscore when docking with a density map")
+    g.add_argument("--repulsion-cap-0", type=float, default=2.0)
+    g.add_argument("--repulsion-cap-1", type=float, default=5.0)
+    g.add_argument("--repulsion-cap-nm", type=float, default = 10.0)
+    g.add_argument("--repulsion-cap-polish", type=float, default=15.0)
+    g.add_argument("--return-n", type=int, default=20)
+    g.add_argument("--max-iterations", type=int, default=0)
     
 
 
