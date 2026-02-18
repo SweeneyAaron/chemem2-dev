@@ -78,6 +78,9 @@ class PoseMinimiser:
         self.log = ProgressLogger()
         self.density_map = density_map
         
+        print("bond_types:", len(protein_structure.bond_types), "bonds:", len(protein_structure.bonds))
+        print("any bond.type None:", any(b.type is None for b in protein_structure.bonds))
+
         # 1. Structure Prep
         if residues is not None:
             protein_structure = create_structure_subset(protein_structure, residues)
@@ -85,7 +88,7 @@ class PoseMinimiser:
         self.complex_structure, self.complex_system = self._create_system(
             protein_structure, ligand_structure, solvent
         )
-       
+        
         # 2. Identify Indices
         self._identify_indices()
         
@@ -113,8 +116,6 @@ class PoseMinimiser:
         )
         
         self.simulation.context.setPositions(self.complex_structure.positions)
-        
-        
         self.restraint_config = {
             'mode': protein_restraint, 
             'sse_groups': sse_groups, 
@@ -124,11 +125,27 @@ class PoseMinimiser:
         }
         
         self.setup_protein_restraints()
-        
+    
+    @staticmethod
+    def first_missing_params(struct):
+        for b in struct.bonds:
+            if b.type is None:
+                return ("bond", [b.atom1, b.atom2])
+        for a in struct.angles:
+            if a.type is None:
+                return ("angle", [a.atom1, a.atom2, a.atom3])
+        for d in struct.dihedrals:
+            if d.type is None:
+                return ("dihedral", [d.atom1, d.atom2, d.atom3, d.atom4])
+        for i in getattr(struct, "impropers", []):
+            if i.type is None:
+                return ("improper", [i.atom1, i.atom2, i.atom3, i.atom4])
+        return None
 
     def _create_system(self, protein, ligand_list, solvent):
         """Merges structures and builds OpenMM system."""
         # Ensure list
+        
         if not isinstance(ligand_list, list):
             ligand_list = [ligand_list]
 
@@ -153,7 +170,17 @@ class PoseMinimiser:
             kwargs['implicitSolvent'] = solvent
         else:
             kwargs['rigidWater'] = True
-
+        
+        
+        miss = PoseMinimiser.first_missing_params(complex_struc)
+        if miss:
+            kind, atoms = miss
+            print(kind, "missing for:")
+            for at in atoms:
+                print(f"  {at.residue.name}:{at.name} (idx {at.idx})")
+        else:
+            print("No missing valence params found (issue may be nonbonded or elsewhere).")
+        
         system = complex_struc.createSystem(**kwargs)
         return complex_struc, system
 

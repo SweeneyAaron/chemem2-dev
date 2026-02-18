@@ -77,11 +77,13 @@ class BindingSite:
         ligand_binding_clusters = {}
         
         for num, centroid in enumerate(self.system.centroid):
+            
             centroid = np.array(centroid)
             centroid_to_clusters = []
             
             # self.pockets contains {label: [ [atom_idx1, atom_idx2...], ... ] }
             for cluster_label, tetras in self.pockets.items():
+                
                 site_centers = []
                 site_radii = []
                 for tetra in tetras:
@@ -92,11 +94,13 @@ class BindingSite:
                 
                 site_centers = np.array(site_centers)
                 site_radii = np.array(site_radii)
+               
                 
                 centroid_reshaped = centroid.reshape(1, -1)
                 distances = cdist(centroid_reshaped, site_centers)
                 contacts = distances < site_radii[np.newaxis, :]
                 centroid_indices, _ = np.where(contacts)
+                
                 if len(centroid_indices) > 0:
                     centroid_to_clusters += tetras
             
@@ -119,6 +123,7 @@ class BindingSite:
                     grid_spacing=self.grid_spacing,
                     fall_back_radius=self.fall_back_radius
                 )
+                print(5.10)
                 
                 if fallback_site:
                     self.binding_sites[centroid_key] = fallback_site
@@ -271,6 +276,7 @@ class BindingSite:
         self.system.log(full_message)
     
     def run(self):
+        
         self.system.log(Messages.create_centered_box('Binding Site Segmentation'))
         
         self.get_protein_structure()
@@ -281,7 +287,9 @@ class BindingSite:
             #TODO!
             
             pass
+        
         else:
+            
             # Automated binding site segmentation
             self.pockets, delaunay = compute_alpha_shape_pockets(
                 positions=self.positions,
@@ -296,14 +304,17 @@ class BindingSite:
             )
             
             self.system.protein.delaunay = delaunay
-            
+           
             if (self.system.centroid is not None) and len(self.system.centroid):
+                
                 self.get_centroid_binding_sites()
             else:
+                
                 self.ligand_binding_clusters = self.pockets
         
+       
         self.get_binding_sites()
-        
+       
         self.system.binding_sites = self.binding_sites
         self.log()
         
