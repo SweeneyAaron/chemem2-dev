@@ -138,29 +138,28 @@ class Docking:
     def run(self):
         
         t0 = time.perf_counter()
-        print(1)
+        
         self._run_started = time.time()
-        print(2)
+        
         self.system.log(Messages.create_centered_box("Molecular Docking"))
-        print(3)
+        
         ligands = self._precomupt_ligand_objects()
-        print(4)
+        
         
         for site_id, binding_site in self._iter_sites():
-            print(5)
+            
             precomp_site = PreCompDataProtein(
                 binding_site,
                 self.system,
                 bias_radius=self.system.options.bias_radius,
                 split_site=self.system.options.split_site,
             )
-            print(6)
+            
             t1 = time.perf_counter()
             self._dock_site(site_id, precomp_site, ligands)
-            print(7)
+            
             
             rt = time.perf_counter() - t1
-            print(8)
             self._site_runtimes_s[str(site_id)] = float(rt)
             self.system.log(f"Docking site {site_id} runtime {rt}.")
 
@@ -301,7 +300,7 @@ class Docking:
         if conf_map is not None:
             densmap = conf_map.submap(origin=precomp_site.binding_site_density_map_origin,
                                       box_size=precomp_site.binding_site_density_map_grid.shape)
-        
+            
        
         pm = PoseMinimiser(
             protein_structure=self.system.protein.complex_structure,
@@ -311,7 +310,8 @@ class Docking:
             platform_name=getattr(self.system, 'platform', 'CPU'),
             protein_restraint='protein',
             pin_k=5000.0,
-            localise=True 
+            localise=False,
+            do_biased_md=self.system.options.do_biased_md
         )
         
         

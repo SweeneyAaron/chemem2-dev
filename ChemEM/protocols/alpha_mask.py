@@ -28,7 +28,8 @@ from ChemEM.tools.density import (MapTools,
                                   extract_min_bounding_box,
                                   get_map_features,
                                   extract_subvolume_from_grid,
-                                  site_from_densmap)
+                                  site_from_densmap,
+                                  get_feature_distance)
 from ChemEM.data.binding_site_model import BindingSiteModel
 from ChemEM.tools.biomolecule import write_residues_to_pdb
 
@@ -349,11 +350,44 @@ class AlphaMask:
             # write bbox map + record centroid
             centroids[out_name] = sub_centroid
             #sub_map.write_mrc(os.path.join(self.output, out_name))
-    
+            
             feat = self._compute_feature_stats(num=num, densmap=densmap, apix=apix)
             feat["feature_id"] = num
     
             if binding_site_key is not None:
+                
+                #here we can seperate features by how far appart they are
+                if self.system.options.sep_features: #add option
+                    new_map = extract_subvolume_from_grid(
+                        base_origin,
+                        apix,
+                        densmap,
+                        binding_site_values.box_size,
+                        grid_origin=binding_site_values.origin,
+                        resolution=self.masked_density.resolution,
+                    )
+                    
+                    existing = system_sites.get(binding_site_key, [])
+                    
+                    if not get_feature_distance(new_map, 
+                                                existing, 
+                                                self.system.options.sep_features_dist,
+                                                mode=self.system.options.sep_features_mode):
+                        # split: clone binding site under a new key and attach this feature there
+                        new_key = site_id
+                        site_id += 1
+                
+                        site_copy = binding_site_values.copy(new_key=new_key, copy_grids=False)
+                        # optional: make the clone's centroid follow this feature
+                        try:
+                            site_copy.binding_site_centroid = np.asarray(new_map.center_of_mass(), dtype=float)
+                        except Exception:
+                            pass
+                
+                        new_binding_sites[new_key] = site_copy
+                        system_sites[new_key] = [(new_map, feat)]
+                        continue
+            
                 self._add_feature_to_existing_site(
                     system_sites=system_sites,
                     binding_site_key=binding_site_key,
@@ -363,6 +397,7 @@ class AlphaMask:
                     apix=apix,
                     base_origin=base_origin,
                 )
+                
             else:
                 binding_site, resampled_density = self._create_new_site_from_submap(
                     site_id=site_id,

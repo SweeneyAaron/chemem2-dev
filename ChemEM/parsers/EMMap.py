@@ -13,7 +13,7 @@ import numpy as np
 import mrcfile
 
 from scipy.fftpack import fftn, ifftn
-from scipy.ndimage import fourier_gaussian
+from scipy.ndimage import fourier_gaussian, map_coordinates
 
 class EMMap:
     def __init__(self, origin, apix, density_map, resolution):
@@ -169,7 +169,107 @@ class EMMap:
             sub[oz0:oz1, oy0:oy1, ox0:ox1] = self.density_map[iz0:iz1, iy0:iy1, ix0:ix1]
 
         return EMMap(tuple(origin.tolist()), tuple(float(a) for a in self.apix), sub, self.resolution)
-
+    
+    
+    def resample_to_apix(self, new_apix, *, order=1, mode="nearest", cval=0.0):
+        """
+        Return a new EMMap resampled/interpolated to a new voxel size (apix).
+    
+        Parameters
+        ----------
+        new_apix : float or iterable of 3 floats
+            New voxel spacing in Å/px. If a scalar is provided, isotropic spacing
+            is used: (a, a, a).
+        order : int, optional
+            Interpolation order passed to scipy.ndimage.map_coordinates.
+            0=nearest, 1=linear (default), 3=cubic, ...
+        mode : str, optional
+            Boundary mode for scipy.ndimage.map_coordinates.
+            Default is 'nearest' to avoid edge-zero artifacts.
+        cval : float, optional
+            Constant fill value if mode='constant'.
+    
+        Returns
+        -------
+        EMMap
+            A new EMMap instance with interpolated density_map and updated apix.
+            Origin and resolution are preserved.
+    
+        Notes
+        -----
+        - The output shape is chosen to approximately preserve the sampled map extent
+          (using center-based voxel coordinates).
+        - Axis conventions:
+            * self.apix is (x, y, z)
+            * density_map shape is (z, y, x)
+        """
+        if not isinstance(self.density_map, np.ndarray) or self.density_map.ndim != 3:
+            raise ValueError("density_map must be a 3D NumPy array.")
+    
+        def _coerce_apix3(a):
+            arr = np.asarray(a, dtype=float).reshape(-1)
+            if arr.size == 1:
+                arr = np.repeat(arr, 3)
+            if arr.size != 3:
+                raise ValueError("apix must be a float or an iterable of 3 floats (x,y,z).")
+            if np.any(arr <= 0):
+                raise ValueError("apix values must be > 0.")
+            return arr
+    
+        old_apix = _coerce_apix3(self.apix)      # (x,y,z)
+        new_apix = _coerce_apix3(new_apix)       # (x,y,z)
+    
+        # If effectively unchanged, return a deep copy
+        if np.allclose(old_apix, new_apix, rtol=1e-12, atol=1e-12):
+            return self.copy()
+    
+        # Current shape in (x,y,z), source density is stored as (z,y,x)
+        old_shape_xyz = np.array([self.x_size, self.y_size, self.z_size], dtype=int)
+    
+        # Choose new shape to preserve the same sampled span approximately:
+        # span ≈ (n-1) * apix  (center-to-center extent)
+        # new_n ≈ round(span / new_apix) + 1
+        new_shape_xyz = np.maximum(
+            1,
+            np.rint(((old_shape_xyz - 1) * old_apix) / new_apix).astype(int) + 1
+        )
+    
+        bx, by, bz = (int(new_shape_xyz[0]), int(new_shape_xyz[1]), int(new_shape_xyz[2]))
+        new_shape_zyx = (bz, by, bx)
+    
+        # Build target voxel index grid in output coordinates (z,y,x)
+        z_idx, y_idx, x_idx = np.meshgrid(
+            np.arange(bz, dtype=float),
+            np.arange(by, dtype=float),
+            np.arange(bx, dtype=float),
+            indexing="ij",
+        )
+    
+        # Convert target voxel indices -> source voxel indices (continuous)
+        # origin is unchanged, so only scaling by apix ratio is needed.
+        x_src = x_idx * (new_apix[0] / old_apix[0])
+        y_src = y_idx * (new_apix[1] / old_apix[1])
+        z_src = z_idx * (new_apix[2] / old_apix[2])
+    
+        src = np.asarray(self.density_map, dtype=float)
+    
+        new_density = map_coordinates(
+            src,
+            [z_src, y_src, x_src],   # source coords must be in array axis order (z,y,x)
+            order=int(order),
+            mode=mode,
+            cval=float(cval),
+            prefilter=(order > 1),
+        )
+    
+        out = self.copy()
+        out.apix = tuple(float(v) for v in new_apix)
+        # keep float density (avoid accidental int truncation)
+        out.density_map = new_density.astype(np.float32 if not np.issubdtype(self.density_map.dtype, np.floating)
+                                             else self.density_map.dtype, copy=False)
+        return out
+    
+    
     def write_mrc(self, outfile):
         if not outfile.endswith(".mrc"):
             outfile += ".mrc"

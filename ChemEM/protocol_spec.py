@@ -108,6 +108,7 @@ def add_dock_args(p):
     g.add_argument("--repulsion-cap-polish", type=float, default=15.0)
     g.add_argument("--return-n", type=int, default=20)
     g.add_argument("--max-iterations", type=int, default=0)
+    g.add_argument("--do_biased_md", action="store_true")
     
 
 
@@ -146,7 +147,10 @@ def add_alpha_mask_args(p):
                    help="Sigma coefficient used when blurring simulated densities")
     g.add_argument("--segment-binding-sites", action="store_true",
                    help="Limit density segmentation to binding sites only")
-
+    
+    g.add_argument("--sep-features", action="store_true")
+    g.add_argument("--sep-features-dist", type=float, default=4.0)
+    g.add_argument("--sepf-features-mode", type=str, default="voxels", help="options: voxels | com ")
     # --- Significant feature filters ---
     g = p.add_argument_group("Alpha mask: feature filters")
     g.add_argument("--sf-amp-frac", type=float, default=0.8,

@@ -29,7 +29,7 @@ class ForceBuilder:
     """Helper class to construct OpenMM Force objects."""
 
     @staticmethod
-    def create_continuous_3d_function(density_map_obj, blur=0.0):
+    def create_continuous_3d_function(density_map_obj, blur=0.0, normalise= False):
         """
         Builds a Continuous3DFunction from a density map object safely.
         """
@@ -42,15 +42,21 @@ class ForceBuilder:
         c_level = getattr(density_map_obj, "map_contour", None)
         if c_level is not None:
              vol_zyx = vol_zyx * (vol_zyx >= float(c_level))
-
-        vmax = float(np.max(np.abs(vol_zyx))) or 1.0
-        vol_zyx = (vol_zyx / vmax).astype(np.float32, copy=False)
+        
+        if normalise:
+            vmax = float(np.max(np.abs(vol_zyx))) or 1.0
+            vol_zyx = (vol_zyx / vmax).astype(np.float32, copy=False)
 
         # Flatten in C-order (z,y,x) -> (x fastest)
         vol_c = np.ascontiguousarray(vol_zyx)
         nz, ny, nx = vol_c.shape
         values = vol_c.ravel(order="C")
+        
+        #debug 
+        density_map_obj.density_map = vol_zyx 
+        density_map_obj.write_mrc("/Users/aaron.sweeney/Documents/chemem2_build/ChemEM2_feb26/chemem2-dev/test/fragment_screen/debug_map.mrc")    
 
+        
         # Coordinate bounds (Angstrom to Nanometer)
         ox, oy, oz = map(float, density_map_obj.origin)
         ax, ay, az = map(float, density_map_obj.apix)
@@ -68,9 +74,31 @@ class ForceBuilder:
         )
 
     @staticmethod
-    def create_map_potential(density_map_obj, global_k: float, force_group: int = 7):
+    def create_map_potential(density_map_obj,
+                             global_k: float,
+                             smooth_sigma_vox: float = 0.0,
+                             smooth_sigma_A: float = 1.0,
+                             normalise: bool = True,
+                             force_group: int = 7):
+        
         """Creates the grid-based map potential force."""
-        func = ForceBuilder.create_continuous_3d_function(density_map_obj)
+        
+        blur_vox = 0.0
+        if smooth_sigma_A and float(smooth_sigma_A) > 0.0:
+            ax, ay, az = map(float, density_map_obj.apix)
+            # Convert Angstrom to voxel sigma per axis, then average for a single sigma.
+            # (ndimage.gaussian_filter supports per-axis sigmas too; see note below.)
+            sig_x = float(smooth_sigma_A) / max(ax, 1e-8)
+            sig_y = float(smooth_sigma_A) / max(ay, 1e-8)
+            sig_z = float(smooth_sigma_A) / max(az, 1e-8)
+            blur_vox = (sig_x + sig_y + sig_z) / 3.0
+        elif smooth_sigma_vox and float(smooth_sigma_vox) > 0.0:
+            blur_vox = float(smooth_sigma_vox)
+        
+        
+        func = ForceBuilder.create_continuous_3d_function(density_map_obj, 
+                                                          blur=blur_vox,
+                                                          normalise= normalise)
         cf = CustomCompoundBondForce(1, "")
         cf.addTabulatedFunction("map_potential", func)
         cf.addGlobalParameter("global_k", float(global_k))

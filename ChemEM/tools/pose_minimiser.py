@@ -26,6 +26,8 @@ from openmm.app import NoCutoff, HBonds, PDBFile
 from ChemEM.tools.forces import ForceBuilder
 from ChemEM.tools.biomolecule import select_atoms, find_atoms_outside_ligand, create_structure_subset
 
+from openmm import CustomExternalForce
+
 
 class ProgressLogger:
     @staticmethod
@@ -72,11 +74,27 @@ class PoseMinimiser:
         sse_groups: Optional[List[List[int]]] = None,
         sse_k: float = 50.0,
         pin_k: float = 5000.0,
-        localise: bool = True
+        localise: bool = True,
+        global_k : float = 75.0,
+        smooth_sigma_A : float = 1.0,
+        do_biased_md : bool = True,
     ):
         
         self.log = ProgressLogger()
+        
         self.density_map = density_map
+        self.global_k = global_k
+        self.smooth_sigma_A = smooth_sigma_A
+        self.do_biased_md = do_biased_md
+        
+        self.md_pre_min_iters = 0
+        self.md_ps = 5.0
+        self.dt_ps = 0.001
+        self.md_temp_K = 150.0
+
+        self.md_report_ps = 5.0
+
+        self.md_seed = 1
         
         print("bond_types:", len(protein_structure.bond_types), "bonds:", len(protein_structure.bonds))
         print("any bond.type None:", any(b.type is None for b in protein_structure.bonds))
@@ -207,21 +225,128 @@ class PoseMinimiser:
     def _setup_density_map(self, protein_struc, padding):
         """Crops density map and adds force to system."""
         print("Processing Density Map...")
-        # (Logic for cropping map - simplified here for brevity, keep original logic if specific)
-        # Note: In a full refactor, cropping logic should move to force_builder or a MapUtils class
-        
-        # Calculate global_k dynamic default
-        res = getattr(self.density_map, 'resolution', 3.0)
-        global_k = 75.0 if res < 3.0 else 25.0
-        
-        map_force = ForceBuilder.create_map_potential(self.density_map, global_k)
+       
+        print('-- Global k:', self.global_k)
+        map_force = ForceBuilder.create_map_potential(self.density_map, 
+                                                      self.global_k,
+                                                      smooth_sigma_vox=1) #smaller blur
+                                                      #smooth_sigma_A = 0.5)
         
         # Apply to all atoms
         for _ in self.complex_structure.atoms:
             map_force.addBond([_.idx])
             
         self.complex_system.addForce(map_force)
+    
+    def _set_ligand_flatbottom_tether(self, ref_pos_nm, *, r0_A=0.1, k_kcal_per_mol_A2=0.2):
+        """
+        ref_pos_nm: full system positions in nm (N_atoms x 3)
+        r0_A: flat bottom radius in Å
+        k_kcal_per_mol_A2: spring outside r0, in kcal/mol/Å^2
+        """
+        self._ensure_ligand_flatbottom_tether()
+    
+        # Unit conversions:
+        # r0: Å -> nm
+        r0_nm = float(r0_A) * 0.1
+    
+        # k: kcal/mol/Å^2 -> kJ/mol/nm^2  (× 418.4)
+        k_kj_per_mol_nm2 = float(k_kcal_per_mol_A2) * 418.4
+    
+        f = self._lig_fb_tether
+        for p, atom_idx in enumerate(self._lig_fb_atoms):
+            x0, y0, z0 = map(float, ref_pos_nm[int(atom_idx)])
+            f.setParticleParameters(p, int(atom_idx), [x0, y0, z0])
+    
+        # Push updated per-particle params into the existing Context.
+        # (Docs: changes have “no effect… unless you call updateParametersInContext().”) :contentReference[oaicite:1]{index=1}
+        f.updateParametersInContext(self.simulation.context)
+    
+        self.simulation.context.setParameter("r0", r0_nm)
+        self.simulation.context.setParameter("k_tether", k_kj_per_mol_nm2)
+    
+    def _clear_ligand_flatbottom_tether(self):
+        if hasattr(self, "_lig_fb_tether"):
+            self.simulation.context.setParameter("k_tether", 0.0)
 
+
+    def _ensure_ligand_flatbottom_tether(self):
+        """Per-atom flat-bottom tether for ligand heavy atoms. Initially OFF."""
+        if hasattr(self, "_lig_fb_tether"):
+            return
+    
+        # r = distance from reference position (x0,y0,z0)
+        # Energy = 0 inside r0, harmonic outside r0
+        dist = "sqrt((x-x0)*(x-x0) + (y-y0)*(y-y0) + (z-z0)*(z-z0))"
+        expr = f"0.5*k_tether*step({dist}-r0)*({dist}-r0)^2"
+        f = CustomExternalForce(expr)
+
+        f.addGlobalParameter("k_tether", 0.0)  # kJ/mol/nm^2
+        f.addGlobalParameter("r0", 0.0)        # nm
+        f.addPerParticleParameter("x0")
+        f.addPerParticleParameter("y0")
+        f.addPerParticleParameter("z0")
+    
+        self._lig_fb_atoms = list(self.ligand_heavy_indices)
+        for atom_idx in self._lig_fb_atoms:
+            f.addParticle(int(atom_idx), [0.0, 0.0, 0.0])
+    
+        self.complex_system.addForce(f)
+        self._lig_fb_tether = f
+        self.simulation.context.reinitialize(preserveState=True)
+        print("FLATBOTTOM THETHER ACTIVE")
+
+    
+    def _set_ligand_tether(self, ref_pos_nm: np.ndarray, k_kcal_per_mol_A2: float):
+        """
+        ref_pos_nm: full system positions in nm (N_atoms x 3)
+        k_kcal_per_mol_A2: spring constant in kcal/mol/Å^2 (more intuitive)
+        """
+        self._ensure_ligand_tether_force()
+    
+        # Convert kcal/mol/Å^2 -> kJ/mol/nm^2
+        # 1 kcal = 4.184 kJ, 1 Å^2 = 0.01 nm^2 => multiply by 4.184*100 = 418.4
+        k_kj_per_mol_nm2 = float(k_kcal_per_mol_A2) * 418.4
+    
+        f = self._lig_tether_force
+        for p, atom_idx in enumerate(self._lig_tether_atoms):
+            x0, y0, z0 = map(float, ref_pos_nm[int(atom_idx)])
+            f.setParticleParameters(p, int(atom_idx), [x0, y0, z0])
+    
+        # Push updated per-particle params into the live Context
+        f.updateParametersInContext(self.simulation.context)  # required :contentReference[oaicite:2]{index=2}
+        self.simulation.context.setParameter("k_tether", k_kj_per_mol_nm2)
+    
+    def _clear_ligand_tether(self):
+        """Turn off tether without removing it."""
+        if hasattr(self, "_lig_tether_force"):
+            self.simulation.context.setParameter("k_tether", 0.0)
+
+
+    def _ensure_ligand_tether_force(self):
+        """Create a per-atom harmonic tether for ligand heavy atoms (initially off)."""
+        if hasattr(self, "_lig_tether_force"):
+            return
+    
+        f = CustomExternalForce("0.5*k_tether*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
+        f.addGlobalParameter("k_tether", 0.0)  # kJ/mol/nm^2
+        f.addPerParticleParameter("x0")
+        f.addPerParticleParameter("y0")
+        f.addPerParticleParameter("z0")
+    
+        # Store the order so we can update per-particle params later
+        self._lig_tether_atoms = list(self.ligand_heavy_indices)
+    
+        for atom_idx in self._lig_tether_atoms:
+            f.addParticle(int(atom_idx), [0.0, 0.0, 0.0])
+    
+        self.complex_system.addForce(f)
+        self._lig_tether_force = f
+    
+        # new Force added -> reinitialize Context to include it
+        self.simulation.context.reinitialize(preserveState=True)
+    
+        
     def setup_protein_restraints(self):
         """Applies SSE or Pinning restraints."""
         mode = self.restraint_config['mode']
@@ -286,8 +411,38 @@ class PoseMinimiser:
     # ------------------------------------------------------------------
     # Minimization Logic
     # ------------------------------------------------------------------
+    
+    def _debug_min_state(self, tag: str, intended_lig_nm=None):
+        st = self.simulation.context.getState(getEnergy=True, getPositions=True, getForces=True)
+        E = st.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
+    
+        pos = st.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+        frc = st.getForces(asNumpy=True).value_in_unit(unit.kilojoule_per_mole/unit.nanometer)
+    
+        lig_idx = np.array(self.all_ligand_indices, dtype=int)
+        lig_f = frc[lig_idx]
+        lig_f_norm = np.linalg.norm(lig_f, axis=1)
+        max_f = float(lig_f_norm.max()) if lig_f_norm.size else 0.0
+        rms_f = float(np.sqrt(np.mean(lig_f_norm**2))) if lig_f_norm.size else 0.0
+    
+        msg = f"[{tag}] E={E:.2f} kcal/mol | ligand max|F|={max_f:.3g} kJ/mol/nm | ligand rms|F|={rms_f:.3g}"
+        if intended_lig_nm is not None:
+            d = pos[lig_idx] - intended_lig_nm
+            dA = np.linalg.norm(d, axis=1) * 10.0
+            msg += f" | ligand rms disp vs intended={float(np.sqrt(np.mean(dA**2))):.3f} Å | max={float(dA.max()):.3f} Å"
+    
+        # Print key parameters if they exist
+        for pname in ("k_static_pin", "k_stage_heavy", "k_stage_bb", "global_k"):
+            try:
+                msg += f" | {pname}={self.simulation.context.getParameter(pname)}"
+            except Exception:
+                pass
+    
+        print(msg)
 
-    def minimize_pose_list(self, ligand_poses_angstrom, max_iters=0):
+    
+    
+    def minimize_pose_list_(self, ligand_poses_angstrom, max_iters=0):
         """Minimizes a list of ligand poses sequentially."""
         results = []
         print(f"Minimizing {len(ligand_poses_angstrom)} poses...")
@@ -301,28 +456,281 @@ class PoseMinimiser:
             
             # Reset System
             self.simulation.context.setPositions(initial_pos)
+            try:
+                self.simulation.context.applyConstraints(1e-6)  # tolerance
+            except Exception:
+                pass
             
             # Update Ligand Positions
             curr_pos_nm = np.array(initial_pos.value_in_unit(unit.nanometer))
             pose_nm = pose_ang / 10.0
             curr_pos_nm[self.all_ligand_indices] = pose_nm
             
+            #zdebug
             self.simulation.context.setPositions(curr_pos_nm)
-            
+            intended_lig_nm = np.array(curr_pos_nm)[self.all_ligand_indices]
+            self._debug_min_state(f"pose {i+1} PRE", intended_lig_nm=intended_lig_nm)
             # Run
-            self.simulation.minimizeEnergy(maxIterations=max_iters)
+            self._set_ligand_flatbottom_tether(curr_pos_nm, r0_A=0.4, k_kcal_per_mol_A2=0.2)
+            if self.do_biased_md and self.md_ps and self.md_ps > 0:
+                
+                self.run_biased_md(pose_index=i + 1,
+                                intended_lig_nm=intended_lig_nm,
+                                md_ps=self.md_ps,
+                                dt_ps=self.dt_ps,
+                                md_temp_K=self.md_temp_K,
+                                md_seed=self.md_seed,
+                                md_pre_min_iters=self.md_pre_min_iters,
+                                md_report_ps=self.md_report_ps,
+                            )
             
+            self.simulation.minimizeEnergy(maxIterations=max_iters)
+            self._clear_ligand_flatbottom_tether()
+            
+            
+            #debug
+            self._debug_min_state(f"pose {i+1} POST", intended_lig_nm=intended_lig_nm)
             # Collect
+            
             state = self.simulation.context.getState(getPositions=True, getEnergy=True)
+            
+            from openmm.app import PDBFile
+
+            # Get positions specifically
+            positions = state.getPositions()
+            
+            # Write to a PDB file
+            with open(f'/Users/aaron.sweeney/Documents/chemem2_build/ChemEM2_feb26/chemem2-dev/test/fragment_screen/debug_struct_{i}.pdb', 'w') as f:
+                PDBFile.writeFile(self.simulation.topology, positions, f)
+            
             final_pos = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+            
+            #debug 
+            dA = np.linalg.norm(final_pos[self.all_ligand_indices] - intended_lig_nm, axis=1) * 10.0
+            print(f" pose {i+1} ligand move: rms={np.sqrt(np.mean(dA**2)):.3f} Å max={dA.max():.3f} Å")
+            
             final_lig = final_pos[self.all_ligand_indices] * 10.0
             
             energy = state.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
             results.append(final_lig)
-            
+            #write the protein file !!!
             print(f" Pose {i+1}: {time.perf_counter() - t_start:.2f}s | E: {energy:.2f} kcal/mol")
 
         return results
+    
+    def minimize_pose_list(self, ligand_poses_angstrom, max_iters=0):
+        results = []
+        print(f"Minimizing {len(ligand_poses_angstrom)} poses...")
+    
+        initial_pos = self.simulation.context.getState(getPositions=True).getPositions()
+    
+        for i, pose_ang in enumerate(ligand_poses_angstrom):
+            t_start = time.perf_counter()
+            print(f"\n--- Pose {i+1} ---")
+    
+            try:
+                # Reset
+                self.simulation.context.setPositions(initial_pos)
+    
+                # Update ligand
+                curr_pos_nm = np.array(initial_pos.value_in_unit(unit.nanometer), copy=True)
+                curr_pos_nm[self.all_ligand_indices] = pose_ang / 10.0
+    
+                # IMPORTANT: set with units
+                self.simulation.context.setPositions(curr_pos_nm * unit.nanometer)
+    
+                # Enforce constraints after setPositions (OpenMM recommends this)
+                try:
+                    self.simulation.context.applyConstraints(1e-6)
+                except Exception:
+                    pass
+    
+                intended_lig_nm = np.array(curr_pos_nm)[self.all_ligand_indices]
+                self._debug_min_state(f"pose {i+1} PRE", intended_lig_nm=intended_lig_nm)
+    
+                # Pre-flight reject if forces are crazy
+                bad, reason = self._pose_is_bad(
+                    max_force_kj_per_mol_nm=2e5,
+                    rms_force_kj_per_mol_nm=5e4,
+                )
+                if bad:
+                    print(f"[pose {i+1}] SKIP (pre-check): {reason}")
+                    continue
+    
+                # Local tether (keep it local)
+                self._set_ligand_flatbottom_tether(curr_pos_nm, r0_A=0.4, k_kcal_per_mol_A2=0.2)
+    
+                # Optional biased MD
+                if self.do_biased_md and self.md_ps and self.md_ps > 0:
+                    self.run_biased_md(
+                        pose_index=i + 1,
+                        intended_lig_nm=intended_lig_nm,
+                        md_ps=self.md_ps,
+                        dt_ps=self.dt_ps,
+                        md_temp_K=self.md_temp_K,
+                        md_seed=self.md_seed,
+                        md_pre_min_iters=self.md_pre_min_iters,
+                        md_report_ps=self.md_report_ps,
+                    )
+    
+                    # Post-MD sanity check
+                    bad, reason = self._pose_is_bad(
+                        max_force_kj_per_mol_nm=3e5,
+                        rms_force_kj_per_mol_nm=8e4,
+                    )
+                    if bad:
+                        print(f"[pose {i+1}] SKIP (post-MD): {reason}")
+                        continue
+    
+                # Final minimize (this is where it can get stuck if NaNs appear)
+                self.simulation.minimizeEnergy(maxIterations=max_iters)
+    
+                # Post-min sanity check
+                bad, reason = self._pose_is_bad(
+                    max_force_kj_per_mol_nm=3e5,
+                    rms_force_kj_per_mol_nm=8e4,
+                )
+                if bad:
+                    print(f"[pose {i+1}] SKIP (post-min): {reason}")
+                    continue
+    
+                self._debug_min_state(f"pose {i+1} POST", intended_lig_nm=intended_lig_nm)
+    
+                # Collect
+                state = self.simulation.context.getState(getPositions=True, getEnergy=True)
+                final_pos = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+    
+                dA = np.linalg.norm(final_pos[self.all_ligand_indices] - intended_lig_nm, axis=1) * 10.0
+                print(f" pose {i+1} ligand move: rms={np.sqrt(np.mean(dA**2)):.3f} Å max={dA.max():.3f} Å")
+    
+                final_lig = final_pos[self.all_ligand_indices] * 10.0
+                energy = state.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
+                results.append(final_lig)
+    
+                print(f" Pose {i+1}: {time.perf_counter() - t_start:.2f}s | E: {energy:.2f} kcal/mol")
+    
+            except FloatingPointError as e:
+                print(f"[pose {i+1}] SKIP (non-finite): {e}")
+    
+            except Exception as e:
+                print(f"[pose {i+1}] SKIP (exception): {type(e).__name__}: {e}")
+    
+            finally:
+                # Always clear tether so one bad pose doesn't poison the next
+                try:
+                    self._clear_ligand_flatbottom_tether()
+                except Exception:
+                    pass
+    
+        return results
+
+
+    def _pose_is_bad(
+        self,
+        *,
+        max_force_kj_per_mol_nm: float = 2e5,
+        rms_force_kj_per_mol_nm: float = 5e4,
+        abs_energy_kcal: float = 1e7,
+    ):
+        """
+        Return (is_bad, reason).
+        Uses current Context state (so call it after setting positions).
+        """
+        st = self.simulation.context.getState(getEnergy=True, getForces=True)
+        E = st.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
+    
+        if not np.isfinite(E) or abs(E) > abs_energy_kcal:
+            return True, f"bad energy: {E}"
+    
+        frc = st.getForces(asNumpy=True).value_in_unit(unit.kilojoule_per_mole/unit.nanometer)
+        lig_idx = np.array(self.all_ligand_indices, dtype=int)
+        lig_f = frc[lig_idx]
+        lig_norm = np.linalg.norm(lig_f, axis=1)
+        fmax = float(lig_norm.max()) if lig_norm.size else 0.0
+        frms = float(np.sqrt(np.mean(lig_norm**2))) if lig_norm.size else 0.0
+    
+        if (not np.isfinite(fmax)) or (not np.isfinite(frms)):
+            return True, f"non-finite force: max={fmax}, rms={frms}"
+    
+        if fmax > max_force_kj_per_mol_nm or frms > rms_force_kj_per_mol_nm:
+            return True, f"too-large force: max={fmax:.3g}, rms={frms:.3g}"
+    
+        return False, "ok"
+
+    
+    def run_biased_md(self,
+                      pose_index,
+                      intended_lig_nm,
+                      md_ps: float,
+                      dt_ps: float,
+                      md_pre_min_iters : int = 0,
+                      md_temp_K :float = 150,
+                      md_seed: int = 1,
+                      md_report_ps: float = 0.0):
+        
+        """
+        Run a short biased MD burst (bias comes from whatever forces are in the System,
+        e.g. your map potential with a fixed global_k).
+
+        Parameters
+        ----------
+        pose_index : int
+            1-based pose index for logging.
+        intended_lig_nm : np.ndarray
+            Ligand coordinates (N_lig x 3) in nm used as reference for displacement logs.
+        md_ps : float
+            Total MD time in ps.
+        dt_ps : float
+            Integrator timestep in ps.
+        md_temp_K : float
+            Temperature for velocity initialization.
+        md_seed : int
+            Base seed; actual seed is md_seed + (pose_index-1).
+        md_pre_min_iters : int
+            Small pre-minimization iterations to tame huge forces before dynamics.
+        md_report_ps : float
+            If >0, print a progress line every md_report_ps ps.
+        """
+        
+        
+        
+        self.simulation.minimizeEnergy(maxIterations=int(md_pre_min_iters))
+        
+        try:
+            self.simulation.context.setVelocitiesToTemperature(
+                md_temp_K * unit.kelvin,
+                int(md_seed + (pose_index - 1)),
+            )
+        except TypeError:
+            # Older signatures differ slightly; fall back without seed
+            self.simulation.context.setVelocitiesToTemperature(md_temp_K * unit.kelvin)
+        
+        nsteps = int(round(float(md_ps) / float(dt_ps)))
+        if nsteps < 1:
+            nsteps = 1
+        
+        if md_report_ps and md_report_ps > 0:
+            chunk = max(1, int(round(float(md_report_ps) / float(dt_ps))))
+            done = 0
+            while done < nsteps:
+                step_now = min(chunk, nsteps - done)
+                self.simulation.step(step_now)
+                done += step_now
+
+                # light debug (forces are expensive; reuse your helper if you want full force info)
+                st = self.simulation.context.getState(getEnergy=True, getPositions=True)
+                E = st.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
+                pos = st.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+
+                dA = np.linalg.norm(pos[self.all_ligand_indices] - intended_lig_nm, axis=1) * 10.0
+                print(
+                    f"  [pose {pose_index} MD {done*dt_ps:.1f} ps] E={E:.2f} kcal/mol | "
+                    f"lig rmsΔ={np.sqrt(np.mean(dA**2)):.3f} Å maxΔ={dA.max():.3f} Å"
+                )
+        else:
+            self.simulation.step(nsteps)
+        
+
 
     def run_simulated_annealing(self, config: AnnealingConfig, write_pdb=None):
         """Runs the staged minimization and annealing protocol."""
