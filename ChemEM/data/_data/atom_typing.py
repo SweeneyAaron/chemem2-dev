@@ -276,15 +276,301 @@ class AtomType(Enum):
     @staticmethod
     def from_id(res_name, atom_name):
         try:
-            atom_type = protein_atom_data[res_name][atom_name]
+            atom_type = atom_data[res_name][atom_name]
             return atom_type
         except KeyError:
+            import pdb 
+            pdb.set_trace()
             print(f"Warning: Could not find type for atom '{atom_name}' in residue '{res_name}'.")
             return None
 
 
+# Nucleic acid residue -> atom name -> AtomType
+# Notes:
+#  - Includes both prime (') and legacy asterisk (*) sugar atom aliases (e.g. "C1'" and "C1*")
+#  - Includes both OPn and OnP phosphate aliases (e.g. OP1 and O1P)
+#  - Phosphate non-bridging oxygens (OP1/OP2) are mapped to CHARGE_OXYGEN (common in polymer context)
+#  - O3'/O5' are mapped as OXYGEN_BONDED (bridging/ether-like); termini may differ if you care about OH vs ester
 
-protein_atom_data = {'HOH':{'O': AtomType.WATER},
+
+nucleic_atom_data = {
+    # ----------------
+    # RNA linking: A,C,G,U
+    # ----------------
+    "A": {
+        # phosphate / backbone
+        "P": AtomType.PHOSPHORUS,
+        "OP1": AtomType.CHARGE_OXYGEN, "O1P": AtomType.CHARGE_OXYGEN,
+        "OP2": AtomType.CHARGE_OXYGEN, "O2P": AtomType.CHARGE_OXYGEN,
+        "OP3": AtomType.CHARGE_OXYGEN, "O3P": AtomType.CHARGE_OXYGEN,  # seen in monophosphate defs / termini
+
+        "O5'": AtomType.OXYGEN_BONDED, "O5*": AtomType.OXYGEN_BONDED,
+        "C5'": AtomType.CARBON_BONDED_1, "C5*": AtomType.CARBON_BONDED_1,
+        "C4'": AtomType.CARBON_BONDED_2, "C4*": AtomType.CARBON_BONDED_2,
+        "O4'": AtomType.OXYGEN_BONDED,  "O4*": AtomType.OXYGEN_BONDED,
+        "C3'": AtomType.CARBON_BONDED_2, "C3*": AtomType.CARBON_BONDED_2,
+        "O3'": AtomType.OXYGEN_BONDED,  "O3*": AtomType.OXYGEN_BONDED,
+        "C2'": AtomType.CARBON_BONDED_2, "C2*": AtomType.CARBON_BONDED_2,
+        "O2'": AtomType.OXYGEN,         "O2*": AtomType.OXYGEN,
+        "C1'": AtomType.CARBON_BONDED_2, "C1*": AtomType.CARBON_BONDED_2,
+
+        # base (adenine)
+        "N9": AtomType.NITROGEN_AROMATIC,
+        "C8": AtomType.CARBON_AROMATIC,
+        "N7": AtomType.NITROGEN_AROMATIC,
+        "C5": AtomType.CARBON_AROMATIC,
+        "C6": AtomType.CARBON_AROMATIC,
+        "N6": AtomType.NITROGEN,  # exocyclic amino
+        "N1": AtomType.NITROGEN_AROMATIC,
+        "C2": AtomType.CARBON_AROMATIC,
+        "N3": AtomType.NITROGEN_AROMATIC,
+        "C4": AtomType.CARBON_AROMATIC,
+    },
+
+    "G": {
+        # phosphate / backbone
+        "P": AtomType.PHOSPHORUS,
+        "OP1": AtomType.CHARGE_OXYGEN, "O1P": AtomType.CHARGE_OXYGEN,
+        "OP2": AtomType.CHARGE_OXYGEN, "O2P": AtomType.CHARGE_OXYGEN,
+        "OP3": AtomType.CHARGE_OXYGEN, "O3P": AtomType.CHARGE_OXYGEN,
+
+        "O5'": AtomType.OXYGEN_BONDED, "O5*": AtomType.OXYGEN_BONDED,
+        "C5'": AtomType.CARBON_BONDED_1, "C5*": AtomType.CARBON_BONDED_1,
+        "C4'": AtomType.CARBON_BONDED_2, "C4*": AtomType.CARBON_BONDED_2,
+        "O4'": AtomType.OXYGEN_BONDED,  "O4*": AtomType.OXYGEN_BONDED,
+        "C3'": AtomType.CARBON_BONDED_2, "C3*": AtomType.CARBON_BONDED_2,
+        "O3'": AtomType.OXYGEN_BONDED,  "O3*": AtomType.OXYGEN_BONDED,
+        "C2'": AtomType.CARBON_BONDED_2, "C2*": AtomType.CARBON_BONDED_2,
+        "O2'": AtomType.OXYGEN,         "O2*": AtomType.OXYGEN,
+        "C1'": AtomType.CARBON_BONDED_2, "C1*": AtomType.CARBON_BONDED_2,
+
+        # base (guanine)
+        "N9": AtomType.NITROGEN_AROMATIC,
+        "C8": AtomType.CARBON_AROMATIC,
+        "N7": AtomType.NITROGEN_AROMATIC,
+        "C5": AtomType.CARBON_AROMATIC,
+
+        "C6": AtomType.CARBON_BONDED_5_DOUBLE_BOND,  # carbonyl carbon
+        "O6": AtomType.OXYGEN_DOUBLE_BOND,            # carbonyl oxygen
+
+        "N1": AtomType.NITROGEN_AROMATIC,
+        "C2": AtomType.CARBON_AROMATIC,
+        "N2": AtomType.NITROGEN,  # exocyclic amino
+        "N3": AtomType.NITROGEN_AROMATIC,
+        "C4": AtomType.CARBON_AROMATIC,
+    },
+
+    "C": {
+        # phosphate / backbone
+        "P": AtomType.PHOSPHORUS,
+        "OP1": AtomType.CHARGE_OXYGEN, "O1P": AtomType.CHARGE_OXYGEN,
+        "OP2": AtomType.CHARGE_OXYGEN, "O2P": AtomType.CHARGE_OXYGEN,
+        "OP3": AtomType.CHARGE_OXYGEN, "O3P": AtomType.CHARGE_OXYGEN,
+
+        "O5'": AtomType.OXYGEN_BONDED, "O5*": AtomType.OXYGEN_BONDED,
+        "C5'": AtomType.CARBON_BONDED_1, "C5*": AtomType.CARBON_BONDED_1,
+        "C4'": AtomType.CARBON_BONDED_2, "C4*": AtomType.CARBON_BONDED_2,
+        "O4'": AtomType.OXYGEN_BONDED,  "O4*": AtomType.OXYGEN_BONDED,
+        "C3'": AtomType.CARBON_BONDED_2, "C3*": AtomType.CARBON_BONDED_2,
+        "O3'": AtomType.OXYGEN_BONDED,  "O3*": AtomType.OXYGEN_BONDED,
+        "C2'": AtomType.CARBON_BONDED_2, "C2*": AtomType.CARBON_BONDED_2,
+        "O2'": AtomType.OXYGEN,         "O2*": AtomType.OXYGEN,
+        "C1'": AtomType.CARBON_BONDED_2, "C1*": AtomType.CARBON_BONDED_2,
+
+        # base (cytosine)
+        "N1": AtomType.NITROGEN_AROMATIC,
+        "C2": AtomType.CARBON_BONDED_5_DOUBLE_BOND,  # carbonyl carbon
+        "O2": AtomType.OXYGEN_DOUBLE_BOND,
+        "N3": AtomType.NITROGEN_AROMATIC,
+        "C4": AtomType.CARBON_AROMATIC,
+        "N4": AtomType.NITROGEN,  # exocyclic amino
+        "C5": AtomType.CARBON_AROMATIC,
+        "C6": AtomType.CARBON_AROMATIC,
+    },
+
+    "U": {
+        # phosphate / backbone
+        "P": AtomType.PHOSPHORUS,
+        "OP1": AtomType.CHARGE_OXYGEN, "O1P": AtomType.CHARGE_OXYGEN,
+        "OP2": AtomType.CHARGE_OXYGEN, "O2P": AtomType.CHARGE_OXYGEN,
+        "OP3": AtomType.CHARGE_OXYGEN, "O3P": AtomType.CHARGE_OXYGEN,
+
+        "O5'": AtomType.OXYGEN_BONDED, "O5*": AtomType.OXYGEN_BONDED,
+        "C5'": AtomType.CARBON_BONDED_1, "C5*": AtomType.CARBON_BONDED_1,
+        "C4'": AtomType.CARBON_BONDED_2, "C4*": AtomType.CARBON_BONDED_2,
+        "O4'": AtomType.OXYGEN_BONDED,  "O4*": AtomType.OXYGEN_BONDED,
+        "C3'": AtomType.CARBON_BONDED_2, "C3*": AtomType.CARBON_BONDED_2,
+        "O3'": AtomType.OXYGEN_BONDED,  "O3*": AtomType.OXYGEN_BONDED,
+        "C2'": AtomType.CARBON_BONDED_2, "C2*": AtomType.CARBON_BONDED_2,
+        "O2'": AtomType.OXYGEN,         "O2*": AtomType.OXYGEN,
+        "C1'": AtomType.CARBON_BONDED_2, "C1*": AtomType.CARBON_BONDED_2,
+
+        # base (uracil)
+        "N1": AtomType.NITROGEN_AROMATIC,
+        "C2": AtomType.CARBON_BONDED_5_DOUBLE_BOND,
+        "O2": AtomType.OXYGEN_DOUBLE_BOND,
+        "N3": AtomType.NITROGEN_AROMATIC,
+        "C4": AtomType.CARBON_BONDED_5_DOUBLE_BOND,
+        "O4": AtomType.OXYGEN_DOUBLE_BOND,
+        "C5": AtomType.CARBON_AROMATIC,
+        "C6": AtomType.CARBON_AROMATIC,
+    },
+
+    # ----------------
+    # DNA linking: DA,DC,DG,DT (+DI optional)
+    # ----------------
+    "DA": {
+        "P": AtomType.PHOSPHORUS,
+        "OP1": AtomType.CHARGE_OXYGEN, "O1P": AtomType.CHARGE_OXYGEN,
+        "OP2": AtomType.CHARGE_OXYGEN, "O2P": AtomType.CHARGE_OXYGEN,
+        "OP3": AtomType.CHARGE_OXYGEN, "O3P": AtomType.CHARGE_OXYGEN,
+
+        "O5'": AtomType.OXYGEN_BONDED, "O5*": AtomType.OXYGEN_BONDED,
+        "C5'": AtomType.CARBON_BONDED_1, "C5*": AtomType.CARBON_BONDED_1,
+        "C4'": AtomType.CARBON_BONDED_2, "C4*": AtomType.CARBON_BONDED_2,
+        "O4'": AtomType.OXYGEN_BONDED,  "O4*": AtomType.OXYGEN_BONDED,
+        "C3'": AtomType.CARBON_BONDED_2, "C3*": AtomType.CARBON_BONDED_2,
+        "O3'": AtomType.OXYGEN_BONDED,  "O3*": AtomType.OXYGEN_BONDED,
+
+        # deoxy: no O2'
+        "C2'": AtomType.CARBON_BONDED_1, "C2*": AtomType.CARBON_BONDED_1,
+        "C1'": AtomType.CARBON_BONDED_2, "C1*": AtomType.CARBON_BONDED_2,
+
+        # base (adenine)
+        "N9": AtomType.NITROGEN_AROMATIC,
+        "C8": AtomType.CARBON_AROMATIC,
+        "N7": AtomType.NITROGEN_AROMATIC,
+        "C5": AtomType.CARBON_AROMATIC,
+        "C6": AtomType.CARBON_AROMATIC,
+        "N6": AtomType.NITROGEN,
+        "N1": AtomType.NITROGEN_AROMATIC,
+        "C2": AtomType.CARBON_AROMATIC,
+        "N3": AtomType.NITROGEN_AROMATIC,
+        "C4": AtomType.CARBON_AROMATIC,
+    },
+
+    "DC": {
+        "P": AtomType.PHOSPHORUS,
+        "OP1": AtomType.CHARGE_OXYGEN, "O1P": AtomType.CHARGE_OXYGEN,
+        "OP2": AtomType.CHARGE_OXYGEN, "O2P": AtomType.CHARGE_OXYGEN,
+        "OP3": AtomType.CHARGE_OXYGEN, "O3P": AtomType.CHARGE_OXYGEN,
+
+        "O5'": AtomType.OXYGEN_BONDED, "O5*": AtomType.OXYGEN_BONDED,
+        "C5'": AtomType.CARBON_BONDED_1, "C5*": AtomType.CARBON_BONDED_1,
+        "C4'": AtomType.CARBON_BONDED_2, "C4*": AtomType.CARBON_BONDED_2,
+        "O4'": AtomType.OXYGEN_BONDED,  "O4*": AtomType.OXYGEN_BONDED,
+        "C3'": AtomType.CARBON_BONDED_2, "C3*": AtomType.CARBON_BONDED_2,
+        "O3'": AtomType.OXYGEN_BONDED,  "O3*": AtomType.OXYGEN_BONDED,
+        "C2'": AtomType.CARBON_BONDED_1, "C2*": AtomType.CARBON_BONDED_1,
+        "C1'": AtomType.CARBON_BONDED_2, "C1*": AtomType.CARBON_BONDED_2,
+
+        # base (cytosine)
+        "N1": AtomType.NITROGEN_AROMATIC,
+        "C2": AtomType.CARBON_BONDED_5_DOUBLE_BOND,
+        "O2": AtomType.OXYGEN_DOUBLE_BOND,
+        "N3": AtomType.NITROGEN_AROMATIC,
+        "C4": AtomType.CARBON_AROMATIC,
+        "N4": AtomType.NITROGEN,
+        "C5": AtomType.CARBON_AROMATIC,
+        "C6": AtomType.CARBON_AROMATIC,
+    },
+
+    "DG": {
+        "P": AtomType.PHOSPHORUS,
+        "OP1": AtomType.CHARGE_OXYGEN, "O1P": AtomType.CHARGE_OXYGEN,
+        "OP2": AtomType.CHARGE_OXYGEN, "O2P": AtomType.CHARGE_OXYGEN,
+        "OP3": AtomType.CHARGE_OXYGEN, "O3P": AtomType.CHARGE_OXYGEN,
+
+        "O5'": AtomType.OXYGEN_BONDED, "O5*": AtomType.OXYGEN_BONDED,
+        "C5'": AtomType.CARBON_BONDED_1, "C5*": AtomType.CARBON_BONDED_1,
+        "C4'": AtomType.CARBON_BONDED_2, "C4*": AtomType.CARBON_BONDED_2,
+        "O4'": AtomType.OXYGEN_BONDED,  "O4*": AtomType.OXYGEN_BONDED,
+        "C3'": AtomType.CARBON_BONDED_2, "C3*": AtomType.CARBON_BONDED_2,
+        "O3'": AtomType.OXYGEN_BONDED,  "O3*": AtomType.OXYGEN_BONDED,
+        "C2'": AtomType.CARBON_BONDED_1, "C2*": AtomType.CARBON_BONDED_1,
+        "C1'": AtomType.CARBON_BONDED_2, "C1*": AtomType.CARBON_BONDED_2,
+
+        # base (guanine)
+        "N9": AtomType.NITROGEN_AROMATIC,
+        "C8": AtomType.CARBON_AROMATIC,
+        "N7": AtomType.NITROGEN_AROMATIC,
+        "C5": AtomType.CARBON_AROMATIC,
+        "C6": AtomType.CARBON_BONDED_5_DOUBLE_BOND,
+        "O6": AtomType.OXYGEN_DOUBLE_BOND,
+        "N1": AtomType.NITROGEN_AROMATIC,
+        "C2": AtomType.CARBON_AROMATIC,
+        "N2": AtomType.NITROGEN,
+        "N3": AtomType.NITROGEN_AROMATIC,
+        "C4": AtomType.CARBON_AROMATIC,
+    },
+
+    "DT": {
+        "P": AtomType.PHOSPHORUS,
+        "OP1": AtomType.CHARGE_OXYGEN, "O1P": AtomType.CHARGE_OXYGEN,
+        "OP2": AtomType.CHARGE_OXYGEN, "O2P": AtomType.CHARGE_OXYGEN,
+        "OP3": AtomType.CHARGE_OXYGEN, "O3P": AtomType.CHARGE_OXYGEN,
+
+        "O5'": AtomType.OXYGEN_BONDED, "O5*": AtomType.OXYGEN_BONDED,
+        "C5'": AtomType.CARBON_BONDED_1, "C5*": AtomType.CARBON_BONDED_1,
+        "C4'": AtomType.CARBON_BONDED_2, "C4*": AtomType.CARBON_BONDED_2,
+        "O4'": AtomType.OXYGEN_BONDED,  "O4*": AtomType.OXYGEN_BONDED,
+        "C3'": AtomType.CARBON_BONDED_2, "C3*": AtomType.CARBON_BONDED_2,
+        "O3'": AtomType.OXYGEN_BONDED,  "O3*": AtomType.OXYGEN_BONDED,
+        "C2'": AtomType.CARBON_BONDED_1, "C2*": AtomType.CARBON_BONDED_1,
+        "C1'": AtomType.CARBON_BONDED_2, "C1*": AtomType.CARBON_BONDED_2,
+
+        # base (thymine)
+        "N1": AtomType.NITROGEN_AROMATIC,
+        "C2": AtomType.CARBON_BONDED_5_DOUBLE_BOND,
+        "O2": AtomType.OXYGEN_DOUBLE_BOND,
+        "N3": AtomType.NITROGEN_AROMATIC,
+        "C4": AtomType.CARBON_BONDED_5_DOUBLE_BOND,
+        "O4": AtomType.OXYGEN_DOUBLE_BOND,
+        "C5": AtomType.CARBON_AROMATIC,
+        "C6": AtomType.CARBON_AROMATIC,
+        "C7": AtomType.CARBON_CH3,  # methyl (C5M in some alt naming)
+        "C5M": AtomType.CARBON_CH3,  # alt atom id seen in CCD
+    },
+
+    # optional: deoxyinosine (DNA linking)
+    "DI": {
+        "P": AtomType.PHOSPHORUS,
+        "OP1": AtomType.CHARGE_OXYGEN, "O1P": AtomType.CHARGE_OXYGEN,
+        "OP2": AtomType.CHARGE_OXYGEN, "O2P": AtomType.CHARGE_OXYGEN,
+        "OP3": AtomType.CHARGE_OXYGEN, "O3P": AtomType.CHARGE_OXYGEN,
+
+        "O5'": AtomType.OXYGEN_BONDED, "O5*": AtomType.OXYGEN_BONDED,
+        "C5'": AtomType.CARBON_BONDED_1, "C5*": AtomType.CARBON_BONDED_1,
+        "C4'": AtomType.CARBON_BONDED_2, "C4*": AtomType.CARBON_BONDED_2,
+        "O4'": AtomType.OXYGEN_BONDED,  "O4*": AtomType.OXYGEN_BONDED,
+        "C3'": AtomType.CARBON_BONDED_2, "C3*": AtomType.CARBON_BONDED_2,
+        "O3'": AtomType.OXYGEN_BONDED,  "O3*": AtomType.OXYGEN_BONDED,
+        "C2'": AtomType.CARBON_BONDED_1, "C2*": AtomType.CARBON_BONDED_1,
+        "C1'": AtomType.CARBON_BONDED_2, "C1*": AtomType.CARBON_BONDED_2,
+
+        # base (inosine ~= hypoxanthine)
+        "N9": AtomType.NITROGEN_AROMATIC,
+        "C8": AtomType.CARBON_AROMATIC,
+        "N7": AtomType.NITROGEN_AROMATIC,
+        "C5": AtomType.CARBON_AROMATIC,
+        "C6": AtomType.CARBON_BONDED_5_DOUBLE_BOND,
+        "O6": AtomType.OXYGEN_DOUBLE_BOND,
+        "N1": AtomType.NITROGEN_AROMATIC,
+        "C2": AtomType.CARBON_AROMATIC,
+        "N3": AtomType.NITROGEN_AROMATIC,
+        "C4": AtomType.CARBON_AROMATIC,
+    },
+}
+
+# If you want a single lookup dict:
+# atom_data = {**protein_atom_data, **nucleic_atom_data}
+
+# And in AtomType.from_id you can use atom_data instead of protein_atom_data.
+
+
+protein_atom_data = { 
+    
+    'HOH':{'O': AtomType.WATER},
                      'GLY': {'C': AtomType.CARBON_BONDED_5_DOUBLE_BOND,
                              'O': AtomType.PEPTIDE_O,
                              'OXT':AtomType.PEPTIDE_O,
@@ -493,6 +779,7 @@ protein_atom_data = {'HOH':{'O': AtomType.WATER},
         'CD':AtomType.CARBON_BONDED_1}
 }
 
+atom_data = {**protein_atom_data, **nucleic_atom_data}
 
 class AtomType_ori(Enum):
     '''

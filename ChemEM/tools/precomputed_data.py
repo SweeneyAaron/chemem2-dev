@@ -523,6 +523,36 @@ class PreCompDataProtein:
                 # optional tuning knobs to keep your old behavior adjustable
                 crop_box_size=(30, 30, 30),
                 electro_cutoff=12.0)
+            
+            
+            
+            
+            '''
+            from ChemEM.protocols._docking.precomputed_data.site_map_factory import SiteMapFactory
+            sm = SiteMapFactory()
+            site_maps2 = sm.build(
+               
+                # geometry / atoms
+                positions=positions,
+                atom_radii=atom_radii,
+                atoms=atoms,
+
+                # grid
+                grid_origin=zero_grid_origin,
+                grid_spacing=grid_spacing,
+                grid=zero_grid,  # used for shape
+
+                # things that used to be from self.system
+                system_centroid=self.binding_site_centroid,
+                protein_complex_structure=system.protein.complex_structure,
+                protein_complex_system=system.protein.complex_system)
+            
+            for key, m in site_maps2.items():
+                m.write_mrc(os.path.join(system.output, f'{key}_refact.mrc'))
+            '''
+                
+            
+            
         
         
 
@@ -2968,9 +2998,6 @@ def compute_bond_distances(mol, heavy_atom_indices):
                     bond_distances[start_row, idx_map[nbr]] = curr_dist + 1
                     bond_distances[idx_map[nbr], start_row] = curr_dist + 1
     return bond_distances
-
-
-
 
 
 def compute_electrostatic_grid_cutoff_cpp(

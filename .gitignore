@@ -30,3 +30,4 @@ cmake-build-*/
 # --- regression test stuff 
 test/
 7jjo_conf.txt
+Binding_site_prediction/

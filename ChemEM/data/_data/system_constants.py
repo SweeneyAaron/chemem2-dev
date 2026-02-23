@@ -23,7 +23,55 @@ RESIDUE_NAMES = ['CYS','MET','GLY','ASP','ALA','VAL','PRO','PHE','ASN','THR',
 PROTEIN_RINGS = {"TRP": [("Benzene", ("CD2", "CE2", "CE3", "CZ2", "CZ3", "CH2")), ("Pyrrole",("CG", "CD1", "NE1", "CD2", "CE2") )],
                  "PHE": [("Benzene", ("CG", "CD1", "CD2", "CE1", "CE2", "CZ"))],
                  "TYR": [("Benzene", ("CG", "CD1", "CD2", "CE1", "CE2", "CZ"))],
-                 "HIS": [("Imidazole", ("CG", "CD2", "ND1", "CE1", "NE2"))]}
+                 "HIS": [("Imidazole", ("CG", "CD2", "ND1", "CE1", "NE2"))],
+                 }
+
+
+
+# Base-ring atoms use standard PDB atom IDs (no sugar primes). Purines are split into
+# 6-member (pyrimidine) + 5-member (imidazole) rings; shared fusion atoms appear in both.
+NUCLEIC_RINGS = {
+    # -----------------
+    # RNA (A, G, C, U)
+    # -----------------
+    "A": [  # adenylate
+        ("Pyridine", ("N1", "C2", "N3", "C4", "C5", "C6")),
+        ("Imidazole",  ("N9", "C8", "N7", "C5", "C4")),
+    ],
+    "G": [  # guanylate
+        ("Pyridine", ("N1", "C2", "N3", "C4", "C5", "C6")),
+        ("Imidazole",  ("N9", "C8", "N7", "C5", "C4")),
+    ],
+    "C": [  # cytidylate
+        ("Pyridine", ("N1", "C2", "N3", "C4", "C5", "C6")),
+    ],
+    "U": [  # uridylate
+        ("Pyridine", ("N1", "C2", "N3", "C4", "C5", "C6")),
+    ],
+
+    # -----------------
+    # DNA (DA, DG, DC, DT)
+    # -----------------
+    "DA": [
+        ("Pyridine", ("N1", "C2", "N3", "C4", "C5", "C6")),
+        ("Imidazole",  ("N9", "C8", "N7", "C5", "C4")),
+    ],
+    "DG": [
+        ("Pyridine", ("N1", "C2", "N3", "C4", "C5", "C6")),
+        ("Imidazole",  ("N9", "C8", "N7", "C5", "C4")),
+    ],
+    "DC": [
+        ("Pyridine", ("N1", "C2", "N3", "C4", "C5", "C6")),
+    ],
+    "DT": [
+        ("Pyridine", ("N1", "C2", "N3", "C4", "C5", "C6")),
+    ],
+}
+
+# (Optional) if you want to be robust to legacy/alt residue naming:
+# NUCLEIC_RINGS["T"] = NUCLEIC_RINGS["DT"]   # DT.cif indicates it replaces "T"
+
+PROTEIN_RINGS = PROTEIN_RINGS | NUCLEIC_RINGS
 
 PROTEIN_DONOR_ATOM_IDS = {
     # Non-polar, aliphatic

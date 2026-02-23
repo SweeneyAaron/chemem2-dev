@@ -2127,8 +2127,213 @@ def estimate_background_stats(density_map, protein_mask):
     bg_mean = np.mean(outside_voxels)
     bg_std = np.std(outside_voxels)
     return bg_mean, bg_std
-    
-    
 
 
-        
+
+def _ensure_apix3(apix) -> np.ndarray:
+    """
+    Return apix as (3,) float array in (ax, ay, az) Å/px.
+    Accepts scalar or length-3.
+    """
+    a = np.asarray(apix, dtype=float).reshape(-1)
+    if a.size == 1:
+        return np.repeat(a, 3)
+    if a.size != 3:
+        raise ValueError(f"apix must be scalar or length-3, got shape {a.shape}")
+    return a
+
+
+def _origin3(origin) -> np.ndarray:
+    o = np.asarray(origin, dtype=float).reshape(-1)
+    if o.size != 3:
+        raise ValueError(f"origin must be length-3, got shape {o.shape}")
+    return o
+
+
+def _map_nonzero_xyz(mp: "EMMap", thr: float = 0.0) -> np.ndarray:
+    """
+    mp is an EMMap. Convert voxels with density > thr from (z,y,x) indices to xyz (Å).
+    """
+    grid = np.asarray(mp.density_map)
+    zyx = np.argwhere(grid > thr)
+    if zyx.size == 0:
+        return np.empty((0, 3), dtype=float)
+
+    origin = _origin3(mp.origin)
+    apix = _ensure_apix3(mp.apix)  # (ax,ay,az)
+
+    xyz_idx = zyx[:, ::-1].astype(float)  # (x,y,z) from (z,y,x)
+    return origin[None, :] + xyz_idx * apix[None, :]
+
+
+def _center_of_mass_xyz(mp: "EMMap", thr: float = 0.0, *, weighted: bool = True) -> np.ndarray:
+    """
+    Center of mass in xyz (Å). If weighted=True, uses density values as weights (clipped to >=0).
+    Falls back to unweighted COM if weights sum to 0.
+    """
+    grid = np.asarray(mp.density_map, dtype=float)
+    mask = grid > thr
+    if not np.any(mask):
+        return np.full(3, np.nan, dtype=float)
+
+    zyx = np.argwhere(mask)  # (N,3) in (z,y,x)
+    x = zyx[:, 2].astype(float)
+    y = zyx[:, 1].astype(float)
+    z = zyx[:, 0].astype(float)
+
+    if weighted:
+        w = grid[mask]
+        w = np.maximum(w, 0.0)
+        ws = float(w.sum())
+        if ws > 0.0:
+            cx = float((x * w).sum() / ws)
+            cy = float((y * w).sum() / ws)
+            cz = float((z * w).sum() / ws)
+        else:
+            cx, cy, cz = float(x.mean()), float(y.mean()), float(z.mean())
+    else:
+        cx, cy, cz = float(x.mean()), float(y.mean()), float(z.mean())
+
+    origin = _origin3(mp.origin)
+    apix = _ensure_apix3(mp.apix)
+    return origin + apix * np.array([cx, cy, cz], dtype=float)
+
+
+def _feature_distance_com(mp_a: "EMMap", mp_b: "EMMap", thr: float = 0.0) -> float:
+    ca = _center_of_mass_xyz(mp_a, thr=thr, weighted=True)
+    cb = _center_of_mass_xyz(mp_b, thr=thr, weighted=True)
+    if np.any(np.isnan(ca)) or np.any(np.isnan(cb)):
+        return float("inf")
+    return float(np.linalg.norm(ca - cb))
+
+
+def _feature_distance_voxels(mp_a: "EMMap", mp_b: "EMMap", thr: float = 0.0) -> float:
+    A = _map_nonzero_xyz(mp_a, thr=thr)
+    B = _map_nonzero_xyz(mp_b, thr=thr)
+    if A.shape[0] == 0 or B.shape[0] == 0:
+        return float("inf")
+
+    # Build tree on the larger set, query the smaller set (usually a bit faster)
+    if A.shape[0] <= B.shape[0]:
+        tree = cKDTree(B)
+        d, _ = tree.query(A, k=1, workers=-1)
+    else:
+        tree = cKDTree(A)
+        d, _ = tree.query(B, k=1, workers=-1)
+
+    return float(np.min(d))
+
+
+def get_feature_distance(
+    new_map: "EMMap",
+    existing_maps,  # e.g. List[Tuple[EMMap, dict]] in your code
+    max_dist: float,
+    mode: str = "com", #opts "voxels" and "com"
+    thr: float = 0.0,
+) -> bool:
+    """
+    existing_maps is your system_sites[site_key] list: [(EMMap, feat_dict), ...]
+    """
+    if not existing_maps:
+        return True  # first feature always goes into the site
+
+    for (mp, _) in existing_maps:
+        if mode == "com":
+            d = _feature_distance_com(new_map, mp, thr=thr)
+        elif mode == "voxels":
+            d = _feature_distance_voxels(new_map, mp, thr=thr)
+        else:
+            raise ValueError(f"Unknown mode={mode!r}")
+
+        if d <= float(max_dist):
+            return True
+    return False
+
+def crop_map_around_point(
+    full_map: np.ndarray,
+    origin: np.ndarray,
+    apix,
+    center: np.ndarray,
+    box_size: np.ndarray,
+):
+    """
+    Crop a 3D map around a central point (in Å) to a box of given size (in Å),
+    and return the cropped map and its new origin.
+
+    Parameters
+    ----------
+    full_map : (nz,ny,nx) array-like
+        Full 3D map (e.g. density, SASA mask, etc.).
+        Axis order: [Z, Y, X].
+    origin : (3,) array-like
+        [x0, y0, z0] Å coordinates for grid index (0,0,0).
+    apix : float or (3,) array-like
+        Grid spacing in Å. If scalar, assumed isotropic.
+        If array-like, [ax, ay, az].
+    center : (3,) array-like
+        [cx, cy, cz] Å, central point around which to crop.
+    box_size : float or (3,) array-like
+        Desired box size in Å along X, Y, Z.
+        If scalar, same size in all three directions.
+
+    Returns
+    -------
+    sub_map : np.ndarray, shape (nz_sub, ny_sub, nx_sub)
+        Cropped 3D submap, axis order [Z, Y, X].
+    new_origin : np.ndarray, shape (3,)
+        [x0_sub, y0_sub, z0_sub] Å for index (0,0,0) in the cropped map.
+    """
+    full_map = np.asarray(full_map)
+    origin = np.asarray(origin, dtype=float)
+    center = np.asarray(center, dtype=float)
+
+    # Handle apix as scalar or 3-vector
+    apix = np.asarray(apix, dtype=float)
+    if apix.size == 1:
+        ax = ay = az = float(apix)
+    else:
+        ax, ay, az = float(apix[0]), float(apix[1]), float(apix[2])
+
+    # Handle box_size as scalar or 3-vector
+    box_size = np.asarray(box_size, dtype=float)
+    if box_size.size == 1:
+        Lx = Ly = Lz = float(box_size)
+    else:
+        Lx, Ly, Lz = float(box_size[0]), float(box_size[1]), float(box_size[2])
+
+    nz, ny, nx = full_map.shape
+
+    # Center indices (nearest voxel to the requested Å position)
+    ix_c = int(round((center[0] - origin[0]) / ax))
+    iy_c = int(round((center[1] - origin[1]) / ay))
+    iz_c = int(round((center[2] - origin[2]) / az))
+
+    if not (0 <= ix_c < nx and 0 <= iy_c < ny and 0 <= iz_c < nz):
+        raise ValueError("Center is outside the map bounds.")
+
+    # Half-lengths in voxels (round to nearest)
+    hx = int(round((Lx / 2.0) / ax))
+    hy = int(round((Ly / 2.0) / ay))
+    hz = int(round((Lz / 2.0) / az))
+
+    # Index bounds (inclusive)
+    ix_min = max(ix_c - hx, 0)
+    ix_max = min(ix_c + hx, nx - 1)
+    iy_min = max(iy_c - hy, 0)
+    iy_max = min(iy_c + hy, ny - 1)
+    iz_min = max(iz_c - hz, 0)
+    iz_max = min(iz_c + hz, nz - 1)
+
+    # Slice the map: [Z, Y, X]
+    sub_map = full_map[iz_min:iz_max + 1,
+                       iy_min:iy_max + 1,
+                       ix_min:ix_max + 1].copy()
+
+    # New origin in Å for the cropped box (index 0,0,0)
+    new_origin = origin + np.array([
+        ix_min * ax,
+        iy_min * ay,
+        iz_min * az,
+    ], dtype=float)
+
+    return sub_map, new_origin

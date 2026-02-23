@@ -4,25 +4,27 @@ Parsing
 -- Add neuclotide models
 --fix the ring systems
 --fix flexible rings
-
-
+--add Charmm force family
+--platofrm cpu is not working
 
 PACKAGE_MANAGEMENT
 
 -- in precomputed data.py setup tools and pkg_resources is used to laod data,
     this is depreciated in setuptools versions >82, change this to use pytohn built it
-OutPUT 
+
+OUTPUT 
 
 -- add a verbose output option so it only writes the requested analysis output by default
 
---alphamask 
+ALPHAMASK
 
-work out which stage is slow and refactor
+Cluster density within
 
 
 --resample subsite 
 
 Binding site
+
 --binding-site add a manual site pathway.
 
 

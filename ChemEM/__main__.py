@@ -110,8 +110,9 @@ def resolve_protocol_order(selected: list[str], args: argparse.Namespace) -> lis
 def apply_overrides(system, args: argparse.Namespace) -> None:
     # Keep this as the only place you mutate the System from CLI
     if args.platform is not None:
+        print(f"[COFIG] overriding platform {system.platform } with {args.platform}")
         system.platform = args.platform
-
+        
     if getattr(args, "no_map", False):
         # only do this if your System supports it
         system.density_map = None
