@@ -133,7 +133,13 @@ class AtomType(Enum):
     CHARGED_NITROGEN_AROMATIC = (43, 'N', [BondType.AROMATIC, BondType.AROMATIC,BondType.SINGLE], 1)
     #No matching AtomType for symbol=S, bonds=[rdkit.Chem.rdchem.BondType.SINGLE, rdkit.Chem.rdchem.BondType.SINGLE, rdkit.Chem.rdchem.BondType.DOUBLE], H=0
     SULPHUR_SULPONATE_GENERAL = ( 27, 'S', [BondType.SINGLE, BondType.SINGLE, BondType.DOUBLE, BondType.DOUBLE], 0 )
-
+    MG = (44, 'Mg', [],0)
+    CA = (44, 'Ca', [],0)
+    MN = (44, 'Mn', [],0)
+    FE = (44, 'Fe', [],0)
+    CU = (44, 'Cu', [],0)
+    ZN = (44, 'Zn', [],0)
+    
     @staticmethod
     def has_single_bonded_carbon(atom, skip_atom=None):
         for nbr in atom.GetNeighbors():
@@ -279,8 +285,7 @@ class AtomType(Enum):
             atom_type = atom_data[res_name][atom_name]
             return atom_type
         except KeyError:
-            import pdb 
-            pdb.set_trace()
+            
             print(f"Warning: Could not find type for atom '{atom_name}' in residue '{res_name}'.")
             return None
 
@@ -562,10 +567,6 @@ nucleic_atom_data = {
     },
 }
 
-# If you want a single lookup dict:
-# atom_data = {**protein_atom_data, **nucleic_atom_data}
-
-# And in AtomType.from_id you can use atom_data instead of protein_atom_data.
 
 
 protein_atom_data = { 
@@ -779,89 +780,17 @@ protein_atom_data = {
         'CD':AtomType.CARBON_BONDED_1}
 }
 
-atom_data = {**protein_atom_data, **nucleic_atom_data}
-
-class AtomType_ori(Enum):
-    '''
-    Atom type identifiers for ChemDock2
-    '''
-    def __init__(self, idx, symbol, bonds, hydrogens):
-        self.idx = idx
-        self.symbol = symbol
-        self.bonds = bonds
-        self.hydrogens = hydrogens
-
-    BROMINE = (0,'Br',[BondType.SINGLE], 0)
-    CHLORINE = (1, 'Cl', [BondType.SINGLE], 0)
-    FLUORINE = (2,'F', [BondType.SINGLE], 0)
-    IODINE = (3, 'I', [BondType.SINGLE], 0)
-    CARBON_CH3 = (4, 'C', [BondType.SINGLE] * 4, 3)
-    #CARBON_AROMATIC = (5, 'C', [BondType.AROMATIC, BondType.AROMATIC, BondType.SINGLE], 1) #need one withour hydrogens
-    CARBON_AROMATIC = (8, 'C', [BondType.AROMATIC, BondType.AROMATIC, BondType.SINGLE], 1) #need one withour hydrogens
-    CARBON_CH2 = (6, 'C', [BondType.DOUBLE, BondType.SINGLE, BondType.SINGLE], 2)
-    CARBON_BONDED_1 = (7,'C', [BondType.SINGLE] * 4, 2)
-    CARBON_BONDED_1_DOUBLE_BOND = (8, 'C', [BondType.DOUBLE, BondType.SINGLE, BondType.SINGLE], 1)
-    CARBON_BONDED_2 = (9,'C', [BondType.SINGLE] * 4, 1)
-    CARBON_BONDED_3 = (10, 'C', [BondType.SINGLE] * 4, 0)
-    CARBON_TRIPLE_BOND = (11, 'C', [BondType.TRIPLE, BondType.SINGLE], 1)
-    CARBON_TRIPLE_BOND_BONDED = (12, 'C', [BondType.TRIPLE, BondType.SINGLE], 0)#new same as 10
-    NITROGEN = (13, 'N', [BondType.SINGLE] * 3, 2)
-    NITROGEN_AROMATIC = (14, 'N', [BondType.AROMATIC, BondType.AROMATIC], 0)
-    NITROGEN_BONDED_1 = (15, 'N', [BondType.SINGLE] * 3, 1)
-    NITROGEN_DOUBLE_BOND = (16, 'N', [BondType.DOUBLE, BondType.SINGLE], 1) #new same as 14
-    NITROGEN_TRIPLE_BOND = (17, 'N', [BondType.TRIPLE], 0)
-    NITROGEN_BONDED_3 = (18, 'N', [BondType.SINGLE] * 3, 0)
-    OXYGEN = (19, 'O', [BondType.SINGLE] * 2, 1)
-    OXYGEN_AROMATIC = (20, 'O', [BondType.AROMATIC] * 2, 0)
-    OXYGEN_DOUBLE_BOND = (21, 'O', [BondType.DOUBLE], 0)
-    OXYGEN_BONDED = (22, 'O', [BondType.SINGLE] * 2, 0)
-    PHOSPHORUS = (23, 'P', [None], None) # specil means just assign it to atom
-    SULPHUR = (24, 'S', [BondType.SINGLE] * 2, 1)
-    SULPHUR_AROMATIC = (25, 'S', [BondType.AROMATIC] * 2, 0)
-    SULPHUR_DOUBLE_BOND = (26, 'S', [BondType.DOUBLE], 0)
-    SULPHUR_BONDED = (27, 'S', [BondType.SINGLE] * 2, 0)
-    WATER = (28, 'O', [BondType.SINGLE] * 2, 2)
-    NITROGEN_DOUBLE_BOND_BONDED = (29, 'N', [BondType.SINGLE, BondType.DOUBLE], 0)
-    CARBON_BONDED_4_DOUBLE_BOND = (30, 'C', [BondType.DOUBLE, BondType.DOUBLE], 0) #should be same as 8
-    CARBON_BONDED_5_DOUBLE_BOND = (31, 'C', [BondType.DOUBLE, BondType.SINGLE, BondType.SINGLE], 0) #same as 8
-    CHARGED_NITROGEN_1 = (32, 'N', [BondType.SINGLE] * 4, 1) #same as 13 for now.
-    CHARGED_NITROGEN_2 = (33, 'N', [BondType.SINGLE] * 4, 2) #same as 13 for now.
-    CHARGED_NITROGEN_3 = (34, 'N', [BondType.SINGLE] * 4, 3) #same as 13 for now.
-    CHARGED_NITROGEN_4 = (35, 'N', [BondType.SINGLE, BondType.SINGLE, BondType.DOUBLE], 3) #same as 13 for now.
-    CHARGE_OXYGEN = (36, 'O', [BondType.SINGLE], 0) #same as 19
-
-    #new types that go over other types!!
-    AMIDE_N = (37, 'N', [BondType.SINGLE] * 3, 1)
-    AMIDE_O = (38, 'O',[BondType.DOUBLE], 0)
-    PEPTIDE_O = (39, 'O',[BondType.DOUBLE], 0)
-    PEPTIDE_N = (40, 'N', [BondType.SINGLE] * 3, 1)
-    PO4_OXYGEN_DOUBLE_BOND = (41, 'O',[BondType.DOUBLE], 0)
-    PO4_OXYGEN_DONOR = (42, 'O', [BondType.SINGLE] * 2, 1)
-
-    @staticmethod
-    def from_atom(atom):
-        element = atom.GetSymbol()
-        bonds = sorted([i.GetBondType() for i in atom.GetBonds()])
-        num_hydrogens = sum(1 for neighbor in atom.GetNeighbors() if neighbor.GetSymbol() == 'H')
-        atom_is_aromatic = atom.GetIsAromatic()
-
-        for atom_type in AtomType:
-            if (atom_type.symbol == element and
-                len(atom_type.bonds) == len(bonds) and
-                all(b1 == b2 for b1, b2 in zip(sorted(atom_type.bonds), bonds)) and
-                atom_type.hydrogens == num_hydrogens):
-                return atom_type
-
-            elif atom_type.symbol == element and atom_is_aromatic:
-                if BondType.AROMATIC in atom_type.bonds:
-                    return atom_type
-            elif atom_type.symbol == 'P':
-                return AtomType.PHOSPHORUS
-
-       
-        
-        raise RuntimeError(f"[Error] No matching AtomType for symbol={element}, bonds={bonds}, hydrogens={num_hydrogens}")
-        
+ion_atom_data = {'MG': {'MG' : AtomType.MG},
+                'CA': {'CA' : AtomType.CA},
+                'ZN': {'ZN' : AtomType.ZN},
+                'MN': {'MN' : AtomType.MN},
+                'FE': {'FE' : AtomType.FE},
+                'CU': {'CU' : AtomType.CU}
+                }
+                
+                
+                
+atom_data = {**protein_atom_data, **nucleic_atom_data, **ion_atom_data}
 
 
 # ---- RD_PROTEIN_SMILES  ----

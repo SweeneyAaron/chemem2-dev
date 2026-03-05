@@ -190,6 +190,7 @@ pybind11_add_module(docking
 target_include_directories(docking PRIVATE
   ${PROJ_SRC_DIR}
   ${PROJ_DOCK_DIR}
+  ${PROJ_DOCK_DIR}/LBFGSpp/include
   ${EIGEN3_INCLUDE_DIRS}
   ${Python_INCLUDE_DIRS}
   ${Python_NumPy_INCLUDE_DIRS}

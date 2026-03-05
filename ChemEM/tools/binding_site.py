@@ -66,6 +66,7 @@ def analyze_site_from_mask(
     
     # Use a KDTree for efficient nearest-neighbor search.
     print("Finding bounding residues using KDTree...")
+    
     kdtree = cKDTree(site_voxel_coords_xyz)
     distances_to_site, _ = kdtree.query(protein_coords_xyz)
     
@@ -98,6 +99,7 @@ def analyze_site_from_mask(
     data['distance_map'] = distance_map
     
     binding_site = BindingSiteModel.from_dict(data)
+    print('made it here')
     
     return binding_site
 
@@ -550,41 +552,37 @@ def ses_ray_trace_binding_site(
         contact_cutoff_A=6.0
     )
     
+    
     # 6. Write Output Files (PDBs)
     pdb_path = os.path.join(system_output_dir, f'site_{centroid_key}.pdb')
     rdkit_mol = write_residues_to_pdb(
-        site_data['residues'], 
+        site_data.residues, 
         protein_openff_structure.positions, 
         pdb_path
     )
     
     pdb_lining_path = os.path.join(system_output_dir, f'site_lining_residues_{centroid_key}.pdb')
     rdkit_lining_mol = write_residues_to_pdb(
-        site_data['lining_residues'], 
+        site_data.lining_residues, 
         protein_openff_structure.positions, 
         pdb_lining_path
     )
     
     # 7. Finalize Data Dictionary
-    site_data['rdkit_mol'] = rdkit_mol
-    site_data['lining_mol'] = rdkit_lining_mol
+    site_data.rdkit_mol = rdkit_mol
+    site_data.lining_mol = rdkit_lining_mol
     
     # Add grid metadata
-    site_data['origin'] = grid_origin 
-    site_data['box_size'] = final_pocket_mask.shape 
-    site_data['densmap'] = final_pocket_mask 
-    site_data['apix'] = (grid_spacing, grid_spacing, grid_spacing)
-    site_data['key'] = centroid_key
+    site_data.origin = grid_origin 
+    site_data.box_size = final_pocket_mask.shape 
+    site_data.densmap = final_pocket_mask 
+    site_data.apix = (grid_spacing, grid_spacing, grid_spacing)
+    site_data.key = centroid_key
     
-    # Create Model
-    binding_site_model = BindingSiteModel.from_dict(site_data)
     
-    # Write fallback tag
-    source_tag = os.path.join(system_output_dir, 'fallback.tag')
-    with open(source_tag, 'w') as f:
-        f.write('')
+    
         
-    return binding_site_model
+    return site_data
 
 
 

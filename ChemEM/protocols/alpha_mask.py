@@ -356,6 +356,10 @@ class AlphaMask:
     
             if binding_site_key is not None:
                 
+                #debug
+                
+                #debug
+                
                 #here we can seperate features by how far appart they are
                 if self.system.options.sep_features: #add option
                     new_map = extract_subvolume_from_grid(

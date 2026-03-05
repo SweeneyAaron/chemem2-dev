@@ -20,13 +20,13 @@ from rdkit import Chem
 
 from ChemEM import docking
 from ChemEM.messages import Messages
-from ChemEM.parsers.models import Ligand
-from ChemEM.tools.mmgbsa_score import MMGBSAScore
-from ChemEM.tools.precomputed_data import PreCompDataLigand, PreCompDataProtein
-from ChemEM.tools.docking import energy_cutoff, write_results, dock_worker
-from ChemEM.tools.ligand import  mol_with_positions
-from ChemEM.tools.geometry import rmsd_cluster
-from ChemEM.tools.pose_minimiser import PoseMinimiser
+from ChemEM.parsers.models import Ligand #stay
+from ChemEM.tools.mmgbsa_score import MMGBSAScore #move
+from ChemEM.tools.precomputed_data import PreCompDataLigand, PreCompDataProtein #move 
+from ChemEM.tools.docking import energy_cutoff, write_results, dock_worker#move
+from ChemEM.tools.ligand import  mol_with_positions #stay
+from ChemEM.tools.geometry import rmsd_cluster #stay
+from ChemEM.tools.pose_minimiser import PoseMinimiser #move
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@
 #include <thread>
 #include <iostream>
 #include <iomanip>
-
+#include <LBFGSB.h>
 #include "GeometryUtils.h"
 #include "DensityUtils.h"
 
@@ -31,6 +31,7 @@ struct Terms {
     double unsat_polar = 0.0;
     double bias = 0.0;
     double constraint = 0.0;
+    double ions = 0.0;
 };
 
 inline double apply_weights(const Terms& t, const ECHOWeights& w) {
@@ -48,7 +49,8 @@ inline double apply_weights(const Terms& t, const ECHOWeights& w) {
         w.ligand_intra * t.ligand_intra +
         w.nonbond * t.nonbond +
         w.hbond_raw * t.hbond_raw +
-        w.aromatic * t.aromatic;
+        w.aromatic * t.aromatic +
+        w.ions * t.ions;
 }
 
 
@@ -223,6 +225,7 @@ inline void compute_nonbond_hbond_salt(
     constexpr double salt_rmin   = 2.0;
     const double salt_cutoff_strict = 4.0;
     const double hbond_cutoff_strict = 3.5;
+    const std::vector<int> ion_ref = pre.protein().ion_mask;
 
     for (int ai = 0; ai < n_heavy; ++ai) {
         const Eigen::RowVector3d lp(ligXYZ(ai,0), ligXYZ(ai,1), ligXYZ(ai,2));
@@ -376,13 +379,22 @@ inline void compute_nonbond_hbond_salt(
                 const double x = val / rep_max;
                 contrib = rep_max * std::tanh(x);
             }
-
+            
             if (is_hbond) {
                 // attractive hbonds already counted in hbond_raw; keep only repulsive in nonbond
                 if (contrib > 0.0) t.nonbond += contrib;
+            } else if (ion_ref[pi]) {
+                
+                if (contrib < 0.0){ 
+                    t.ions += val;
+                } else {
+                    t.nonbond += contrib;
+                }
             } else {
                 t.nonbond += contrib;
             }
+            
+            
         }
     }
 }

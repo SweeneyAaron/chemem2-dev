@@ -30,3 +30,11 @@ Binding site
 
 TOOLS
 
+ANALYSIS 
+
+--find out how good docking and refinement is alone,
+--double check everything works e.g. mi is getting the correct grid orientation ect...
+--add the stage for flexible linker refinement.
+
+
+--what is going on with the minimiser moveing phospohates away from map.

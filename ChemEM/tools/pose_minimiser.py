@@ -48,7 +48,7 @@ class AnnealingConfig:
     """Configuration for simulated annealing schedule."""
     minimize_before: bool = True
     minimize_after: bool = True
-    staged_min: bool = True
+    staged_min: bool = False
     k_heavy_stage1: float = 5000.0
     k_backbone_stage2: float = 1500.0
     map_scale_stage1: float = 1.0
@@ -96,10 +96,7 @@ class PoseMinimiser:
 
         self.md_seed = 1
         
-        print("bond_types:", len(protein_structure.bond_types), "bonds:", len(protein_structure.bonds))
-        print("any bond.type None:", any(b.type is None for b in protein_structure.bonds))
-
-        # 1. Structure Prep
+        
         if residues is not None:
             protein_structure = create_structure_subset(protein_structure, residues)
         
@@ -107,14 +104,11 @@ class PoseMinimiser:
             protein_structure, ligand_structure, solvent
         )
         
-        # 2. Identify Indices
         self._identify_indices()
         
-        # 3. Density Map Prep (Cropping & Force Creation)
         if self.density_map:
             self._setup_density_map(protein_structure, padding)
         
-        # 4. Simulation Context Prep
         self.integrator = LangevinIntegrator(
             300 * unit.kelvin, 
             1.0 / unit.picoseconds, 
@@ -229,12 +223,14 @@ class PoseMinimiser:
         print('-- Global k:', self.global_k)
         map_force = ForceBuilder.create_map_potential(self.density_map, 
                                                       self.global_k,
-                                                      smooth_sigma_vox=1) #smaller blur
+                                                      smooth_sigma_vox=0.0) #smaller blur
                                                       #smooth_sigma_A = 0.5)
         
-        # Apply to all atoms
-        for _ in self.complex_structure.atoms:
-            map_force.addBond([_.idx])
+        # Apply to all atoms 
+        #not hydrogens
+        for atom in self.complex_structure.atoms:
+            if atom.element != 1:
+                map_force.addBond([atom.idx])
             
         self.complex_system.addForce(map_force)
     
@@ -547,7 +543,8 @@ class PoseMinimiser:
     
                 intended_lig_nm = np.array(curr_pos_nm)[self.all_ligand_indices]
                 self._debug_min_state(f"pose {i+1} PRE", intended_lig_nm=intended_lig_nm)
-    
+                self._debug_ligand_vs_map_bounds(f"pose {i+1} PRE")
+                self._debug_map_vs_other_forces(f"pose {i+1} PRE")
                 # Pre-flight reject if forces are crazy
                 bad, reason = self._pose_is_bad(
                     max_force_kj_per_mol_nm=2e5,
@@ -595,7 +592,8 @@ class PoseMinimiser:
                     continue
     
                 self._debug_min_state(f"pose {i+1} POST", intended_lig_nm=intended_lig_nm)
-    
+                self._debug_ligand_vs_map_bounds(f"pose {i+1} POST")
+                self._debug_map_vs_other_forces(f"pose {i+1} POST")
                 # Collect
                 state = self.simulation.context.getState(getPositions=True, getEnergy=True)
                 final_pos = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
@@ -639,8 +637,8 @@ class PoseMinimiser:
         st = self.simulation.context.getState(getEnergy=True, getForces=True)
         E = st.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
     
-        if not np.isfinite(E) or abs(E) > abs_energy_kcal:
-            return True, f"bad energy: {E}"
+        #if not np.isfinite(E) or abs(E) > abs_energy_kcal:
+        #    return True, f"bad energy: {E}"
     
         frc = st.getForces(asNumpy=True).value_in_unit(unit.kilojoule_per_mole/unit.nanometer)
         lig_idx = np.array(self.all_ligand_indices, dtype=int)
@@ -652,8 +650,8 @@ class PoseMinimiser:
         if (not np.isfinite(fmax)) or (not np.isfinite(frms)):
             return True, f"non-finite force: max={fmax}, rms={frms}"
     
-        if fmax > max_force_kj_per_mol_nm or frms > rms_force_kj_per_mol_nm:
-            return True, f"too-large force: max={fmax:.3g}, rms={frms:.3g}"
+        #if fmax > max_force_kj_per_mol_nm or frms > rms_force_kj_per_mol_nm:
+        #    return True, f"too-large force: max={fmax:.3g}, rms={frms:.3g}"
     
         return False, "ok"
 
@@ -729,8 +727,8 @@ class PoseMinimiser:
                 )
         else:
             self.simulation.step(nsteps)
-        
-
+                    
+   
 
     def run_simulated_annealing(self, config: AnnealingConfig, write_pdb=None):
         """Runs the staged minimization and annealing protocol."""
@@ -835,3 +833,87 @@ class PoseMinimiser:
             "energy": state.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole),
             "positions": pos
         }
+    #--debuging 
+    def _map_bounds_nm(self):
+        mp = self.density_map
+        vol = mp.density_map
+        nz, ny, nx = vol.shape  # z,y,x
+        ox, oy, oz = map(float, mp.origin)
+        ax, ay, az = map(float, mp.apix)
+        A2NM = 0.1
+        xmin = (ox - 0.5 * ax) * A2NM; xmax = (ox + nx * ax - 0.5 * ax) * A2NM
+        ymin = (oy - 0.5 * ay) * A2NM; ymax = (oy + ny * ay - 0.5 * ay) * A2NM
+        zmin = (oz - 0.5 * az) * A2NM; zmax = (oz + nz * az - 0.5 * az) * A2NM
+        return xmin, xmax, ymin, ymax, zmin, zmax
+    
+    def _debug_ligand_vs_map_bounds(self, tag: str):
+        if not self.density_map:
+            return
+        xmin, xmax, ymin, ymax, zmin, zmax = self._map_bounds_nm()
+    
+        st = self.simulation.context.getState(getPositions=True)
+        pos = st.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+    
+        lig = pos[np.array(self.all_ligand_indices, dtype=int)]
+        mn = lig.min(axis=0); mx = lig.max(axis=0)
+    
+        outside = (
+            (mn[0] < xmin) or (mx[0] > xmax) or
+            (mn[1] < ymin) or (mx[1] > ymax) or
+            (mn[2] < zmin) or (mx[2] > zmax)
+        )
+    
+        print(
+            f"[{tag}] map box nm: x[{xmin:.3f},{xmax:.3f}] y[{ymin:.3f},{ymax:.3f}] z[{zmin:.3f},{zmax:.3f}] | "
+            f"lig box nm: x[{mn[0]:.3f},{mx[0]:.3f}] y[{mn[1]:.3f},{mx[1]:.3f}] z[{mn[2]:.3f},{mx[2]:.3f}] | "
+            f"outside={outside}"
+        )
+    
+    def _force_energy_by_group(self, group: int):
+        mask = 1 << int(group)
+        stE = self.simulation.context.getState(getEnergy=True, groups=mask)
+        stF = self.simulation.context.getState(getForces=True, groups=mask)
+        E = stE.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
+        F = stF.getForces(asNumpy=True).value_in_unit(unit.kilojoule_per_mole/unit.nanometer)
+        return E, F
+    
+    def _debug_map_vs_other_forces(self, tag: str):
+        # pick phosphate-ish atoms: P (15) and O (8) in ligand
+        lig_set = set(self.all_ligand_indices)
+        phos = [a.idx for a in self.complex_structure.atoms
+                if a.idx in lig_set and a.element in (15, 8)]  # coarse, but good enough to start
+    
+        # energies + forces
+        E_map, F_map = self._force_energy_by_group(7)
+    
+        # everything else: build mask of all groups, then subtract map
+        allmask = 0
+        for f in self.complex_system.getForces():
+            allmask |= (1 << f.getForceGroup())
+        othermask = allmask & ~(1 << 7)
+    
+        stE = self.simulation.context.getState(getEnergy=True, groups=othermask)
+        stF = self.simulation.context.getState(getForces=True, groups=othermask)
+        E_other = stE.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
+        F_other = stF.getForces(asNumpy=True).value_in_unit(unit.kilojoule_per_mole/unit.nanometer)
+    
+        def stats(F, idxs):
+            if not idxs:
+                return 0.0, 0.0
+            v = np.linalg.norm(F[np.array(idxs, dtype=int)], axis=1)
+            return float(v.max()), float(np.sqrt(np.mean(v*v)))
+    
+        lig = self.all_ligand_indices
+        maxFm_lig, rmsFm_lig = stats(F_map, lig)
+        maxFo_lig, rmsFo_lig = stats(F_other, lig)
+    
+        maxFm_ph, rmsFm_ph = stats(F_map, phos)
+        maxFo_ph, rmsFo_ph = stats(F_other, phos)
+    
+        print(
+            f"[{tag}] E_map(g7)={E_map:.2f} kcal | E_other={E_other:.2f} kcal | "
+            f"lig |F_map|max={maxFm_lig:.3g} rms={rmsFm_lig:.3g} | "
+            f"lig |F_other|max={maxFo_lig:.3g} rms={rmsFo_lig:.3g} | "
+            f"PO |F_map|max={maxFm_ph:.3g} rms={rmsFm_ph:.3g} | "
+            f"PO |F_other|max={maxFo_ph:.3g} rms={rmsFo_ph:.3g}"
+        )

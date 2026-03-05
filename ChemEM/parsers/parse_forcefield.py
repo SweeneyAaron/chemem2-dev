@@ -94,10 +94,10 @@ class AMBER_FF:
         if rep.glycans:
             ff.append(cls.get_supported_forcefeild(forcefeild, cls.supported_glycam, cls.default_glycam))
         
-        if rep.waters:
+        if rep.waters or rep.ions:
             ff.append(cls.get_supported_forcefeild(forcefeild, cls.supported_explicit, cls.default_explicit))
         
-        if request_implicit or (rep.ions and not rep.waters):
+        if request_implicit :
             ff.append(cls.get_supported_forcefeild(forcefeild, cls.supported_implicit, cls.default_implicit))
         
         if not ff:

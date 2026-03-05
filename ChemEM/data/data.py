@@ -40,7 +40,6 @@ from ._data.tables import (
 from ._data.atom_typing import (
     RingType,
     AtomType,
-    AtomType_ori,
     protein_atom_data,
     RD_PROTEIN_SMILES,
     INTRA_RESIDUE_BOND_DATA,
@@ -67,7 +66,7 @@ __all__ = [
     "HALOGEN_DONOR_ATOM_IDXS", "HALOGEN_ACCEPTOR_ATOM_IDXS",
 
     # typing / mapping
-    "RingType", "AtomType", "AtomType_ori",
+    "RingType", "AtomType", 
     "protein_atom_data", "RD_PROTEIN_SMILES","INTRA_RESIDUE_BOND_DATA",
     "INTER_RESIDUE_BOND_DATA",
     

@@ -82,6 +82,8 @@ class BindingSite:
             centroid_to_clusters = []
             
             # self.pockets contains {label: [ [atom_idx1, atom_idx2...], ... ] }
+            
+        
             for cluster_label, tetras in self.pockets.items():
                 
                 site_centers = []
@@ -91,7 +93,7 @@ class BindingSite:
                     center, radius = compute_circumsphere(vertices)
                     site_centers.append(center)
                     site_radii.append(radius)
-                
+               
                 site_centers = np.array(site_centers)
                 site_radii = np.array(site_radii)
                
@@ -103,6 +105,7 @@ class BindingSite:
                 
                 if len(centroid_indices) > 0:
                     centroid_to_clusters += tetras
+                
             
             centroid_key = num 
             
@@ -123,7 +126,7 @@ class BindingSite:
                     grid_spacing=self.grid_spacing,
                     fall_back_radius=self.fall_back_radius
                 )
-                print(5.10)
+               
                 
                 if fallback_site:
                     self.binding_sites[centroid_key] = fallback_site
@@ -134,7 +137,7 @@ class BindingSite:
         """
         For each binding site, identify bounding/lining residues and compute properties.
         """
-    
+        
         for site_label, tetras in self.ligand_binding_clusters.items():
             if not tetras:
                 continue
@@ -312,9 +315,8 @@ class BindingSite:
                 
                 self.ligand_binding_clusters = self.pockets
         
-       
+        
         self.get_binding_sites()
-       
         self.system.binding_sites = self.binding_sites
         self.log()
         
