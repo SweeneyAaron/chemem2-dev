@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h> 
 #include <pybind11/numpy.h>
 #include <pybind11/eigen.h>
+#include <pybind11/stl.h>
 #include <string>
 #include <stdexcept>
 #include <iostream>
@@ -155,6 +156,7 @@ PreComputedData::PreComputedData(py::object py_pc){
         m_protein_data.formal_charge = py_pc.attr("protein_formal_charge").cast<Eigen::VectorXd>(); 
         m_protein_data.halogen_acceptors = py_pc.attr("halogen_bond_acceptor_indices").cast<std::vector<int>>();
         m_protein_data.halogen_acceptor_roots = py_pc.attr("halogen_bond_acceptor_root_indices").cast<std::vector<int>>();
+        m_protein_data.ion_mask = py_pc.attr("protein_ion_mask").cast<std::vector<int>>();
         /** * Build fast-lookup maps for halogen acceptor geometry.
          * Creates an O(1) direct-mapped vector for roots and a set for quick filtering,
          * allowing the scorer to instantly identify acceptors and their parent atoms.
@@ -465,7 +467,58 @@ PreComputedData::PreComputedData(py::object py_pc){
                           [](const auto& a, const auto& b){ return a.first < b.first; });
             }
         }
+        // -------------------------
+        // Tail torsion windows (indices into ligand_torsion_idxs)
+        // py_pc.tail_windows_idx: sequence of windows, each window is length <= 4 (we pad with -1)
+        // -------------------------
+        m_ligand_intra.ligand_torsion_windows = py_pc.attr("tail_windows_idx").cast<std::vector<std::vector<int>>>();
+        m_ligand_intra.n_torsion_windows = static_cast<int>(m_ligand_intra.ligand_torsion_windows.size());
+        /*
+        m_ligand_intra.ligand_torsion_windows.clear();
+        m_ligand_intra.n_torsion_windows = 0;
         
+        if (py::hasattr(py_pc, "tail_windows_idx")) {
+            const py::sequence py_wins = py_pc.attr("tail_windows_idx").cast<py::sequence>();
+            m_ligand_intra.n_torsion_windows = static_cast<int>(py_wins.size());
+            m_ligand_intra.ligand_torsion_windows.resize(m_ligand_intra.n_torsion_windows);
+        
+            for (int w = 0; w < m_ligand_intra.n_torsion_windows; ++w) {
+                std::array<int,4> arr = { -1, -1, -1, -1 };
+        
+                // Accept either a numpy array([..]) or a python list/tuple
+                if (py::isinstance<py::array>(py_wins[w])) {
+                    auto win_arr = py_wins[w].cast<py::array_t<int, py::array::c_style | py::array::forcecast>>();
+                    if (win_arr.ndim() != 1) {
+                        throw std::runtime_error("tail_windows_idx[w] must be 1D");
+                    }
+                    const auto L = static_cast<int>(win_arr.shape(0));
+                    if (L > 4) {
+                        throw std::runtime_error("tail_windows_idx[w] length must be <= 4");
+                    }
+                    auto iv = win_arr.unchecked<1>();
+                    for (int k = 0; k < L; ++k) arr[k] = iv(k);
+                } else {
+                    const py::sequence win_seq = py_wins[w].cast<py::sequence>();
+                    const int L = static_cast<int>(win_seq.size());
+                    if (L > 4) {
+                        throw std::runtime_error("tail_windows_idx[w] length must be <= 4");
+                    }
+                    for (int k = 0; k < L; ++k) arr[k] = win_seq[k].cast<int>();
+                }
+        
+                // Optional: validate indices are in range [0, n_torsions)
+                for (int k = 0; k < 4; ++k) {
+                    const int tidx = arr[k];
+                    if (tidx == -1) continue;
+                    if (tidx < 0 || tidx >= m_ligand_intra.n_torsions) {
+                        throw std::runtime_error("tail_windows_idx contains out-of-range torsion index");
+                    }
+                }
+        
+                m_ligand_intra.ligand_torsion_windows[w] = arr;
+            }
+        }
+        */
         //TODO! validate ligand score data
         
      } catch (const py::cast_error &e){
@@ -520,6 +573,9 @@ PreComputedData::PreComputedData(py::object py_pc){
          m_config.bias_radius = py_pc.attr("bias_radius").cast<double>(); 
          m_config.binding_site_centroid = py_pc.attr("binding_site_centroid").cast<Eigen::RowVector3d>();
          m_config.nb_cell = py_pc.attr("nb_cell").cast<double>(); 
+         m_config.inner_map_score = py_pc.attr("inner_map_score").cast<int>();
+         m_config.outer_map_score = py_pc.attr("outer_map_score").cast<int>();
+         
          
          auto py_all = py_pc.attr("all_arrays").cast<py::list>();
          m_config.translation_points.clear();

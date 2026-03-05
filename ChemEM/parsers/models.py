@@ -69,7 +69,16 @@ class Ligand:
         for idx, charge in ligand_charges:
             self.ligand_charge_idx.append(idx)
             self.ligand_charge.append(charge)
-
+    
+    @property 
+    def ligand_id(self):
+        return self.complex_structure.residues[0].name 
+    @property 
+    def ligand_int(self):
+        _id = self.complex_structure.residues[0].name 
+        if _id.startswith("LIG"):
+            return int(_id.strip("LIG"))
+    
     def set_positions(self, coords: np.ndarray, conf_id: int = 0) -> None:
         """
         coords shape (n_atoms,3) in Å

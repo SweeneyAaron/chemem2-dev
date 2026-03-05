@@ -146,7 +146,7 @@ def main() -> None:
         order = resolve_protocol_order(selected, args)
 
         build_pipeline(system, order)
-    
+        
         system.run()
         system.write_log()
         #TODO! write log file

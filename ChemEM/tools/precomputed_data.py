@@ -390,7 +390,8 @@ class PreCompDataProtein:
         self.a_mid = 0.45
         self.a_hi = 0.70
         self.iterations = system.options.max_iterations
-        
+        self.inner_map_score = system.options.inner_map_score
+        self.outer_map_score = system.options.outer_map_score
         
         
 
@@ -451,6 +452,15 @@ class PreCompDataProtein:
         self.protein_ring_type_ints= np.array([i.idx for i in self.protein_ring_types], dtype=np.int32)
         #has lining mol change
         self.halogen_bond_acceptor_indices, self.halogen_bond_acceptor_root_indices = compute_halogen_bond_data(binding_site.rdkit_lining_mol, self.protein_atom_types, HALOGEN_ACCEPTOR_ATOM_IDXS)
+        
+        
+        self.protein_ion_mask = np.array(self.protein_atom_types == 44).astype(np.int32)
+        if 44 in self.protein_ion_mask:
+            print('[DEBUG] HAS IONS IN SITE')
+        
+        #needed but should remove
+        self.tail_windows_idx = []
+        
         
         #-----binding site data------
         

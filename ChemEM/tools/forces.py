@@ -52,10 +52,7 @@ class ForceBuilder:
         nz, ny, nx = vol_c.shape
         values = vol_c.ravel(order="C")
         
-        #debug 
-        density_map_obj.density_map = vol_zyx 
-        density_map_obj.write_mrc("/Users/aaron.sweeney/Documents/chemem2_build/ChemEM2_feb26/chemem2-dev/test/fragment_screen/debug_map.mrc")    
-
+        
         
         # Coordinate bounds (Angstrom to Nanometer)
         ox, oy, oz = map(float, density_map_obj.origin)
@@ -77,7 +74,7 @@ class ForceBuilder:
     def create_map_potential(density_map_obj,
                              global_k: float,
                              smooth_sigma_vox: float = 0.0,
-                             smooth_sigma_A: float = 1.0,
+                             smooth_sigma_A: float = 0.0,
                              normalise: bool = True,
                              force_group: int = 7):
         

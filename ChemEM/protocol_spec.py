@@ -37,10 +37,12 @@ Adding a new protocol
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from ChemEM.protocols.docking import Docking
+from ChemEM.protocols._docking.docking import Docking
 from ChemEM.protocols.binding_site import BindingSite
 from ChemEM.protocols.alpha_mask import AlphaMask
 from ChemEM.protocols.confidence_map import ConfidenceMap
+from ChemEM.protocols.post_processing import PostProcess
+
 
 @dataclass(frozen=True)
 class ProtocolSpec:
@@ -77,7 +79,7 @@ def confidence_map_deps(args):
     return tuple() 
 
 def add_confidence_map_args(p):
-    return
+    return tuple()
 
 def dock_deps(args):
     # Dock always needs binding_site first 
@@ -90,25 +92,28 @@ def add_dock_args(p):
     g.add_argument("-fr", "--flexible-rings", action="store_true")
     g.add_argument("-ss", "--split-site", action="store_true")
     g.add_argument("-np", "--no-para", action="store_true")
-    g.add_argument("--n-global-search", type=int, default=1000)
-    g.add_argument("--n-local-search", type=int, default=10)
+    g.add_argument("--n-global-search", type=int, default=2000) #8000
+    g.add_argument("--n-local-search", type=int, default=20) #change here
     g.add_argument("-br", "--bias-radius", type=float, default=12.0)
-    g.add_argument("--cluster-docking", type=float, default=2.0)
+    g.add_argument("--cluster-docking", type=float, default=1.0)
     g.add_argument("--energy-cutoff", type=float, default=1.0)
     g.add_argument("--minimize-docking", action="store_true")
+    g.add_argument("--refine-to-diff-map",action="store_true")
     g.add_argument("--aggregate-sites", action="store_true")
     g.add_argument("--water-refine", action="store_true")
     g.add_argument("--sci-weight", type=float, default=2.5,
                    help="scaling factor for the SCI score when docking with a density map")
     g.add_argument("--mi-weight", type=float, default=100.0,
                    help="scaling factor for the MIscore when docking with a density map")
-    g.add_argument("--repulsion-cap-0", type=float, default=2.0)
-    g.add_argument("--repulsion-cap-1", type=float, default=5.0)
-    g.add_argument("--repulsion-cap-nm", type=float, default = 10.0)
-    g.add_argument("--repulsion-cap-polish", type=float, default=15.0)
+    g.add_argument("--repulsion-cap-0", type=float, default=2.0) #from 2 #new 1
+    g.add_argument("--repulsion-cap-1", type=float, default=5.0)#from 5
+    g.add_argument("--repulsion-cap-nm", type=float, default = 10.0) #from 10 #new is 30.0
+    g.add_argument("--repulsion-cap-polish", type=float, default=15.0) #from 15 #new is 30.0
     g.add_argument("--return-n", type=int, default=20)
     g.add_argument("--max-iterations", type=int, default=0)
-    g.add_argument("--do_biased_md", action="store_true")
+    g.add_argument("--do-biased-md", action="store_true")
+    g.add_argument("--inner-map-score", type=int, default=1)
+    g.add_argument("--outer-map-score", type=int, default=0)
     
 
 
@@ -162,12 +167,28 @@ def add_alpha_mask_args(p):
     g.add_argument("--sf-sigma-thr", type=float, default=2.0, metavar="STD",
                    help="Sigma threshold for feature inclusion")
 
+
+def refine_deps(args):
+    # Dock always needs binding_site first 
+    return ("confidence_map",)
+
+def add_refine_args(p):
+    g = p.add_argument_group("Density Refinement")
+
+    g.add_argument('--pp-local-sites', type=str, default = 'global')
+    g.add_argument('--md-restraints', type=str, default = 'sse')
+    g.add_argument("--restrain-sidechains", action="store_true",
+                   help="")
+    
+    g.add_argument("--global-k", type=float, default=75.0,
+                   help="")
     
 
 SHORT_ALIASES = {
     "binding_site": "-b",
     "dock": "-d",
     "alpha_mask" : "-am",
+    
 }
 
 
@@ -203,4 +224,10 @@ REGISTRY = {
         add_args=add_dock_args,
         help="Dock ligands into the binding site",
     ),
+    "refine": ProtocolSpec(
+        name="refine",
+        cls=PostProcess,
+        deps=refine_deps,
+        add_args=add_refine_args,
+        help="MD-Refine ligand to density map")
 }
