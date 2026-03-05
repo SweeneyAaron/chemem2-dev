@@ -38,3 +38,4 @@ dependencies:
   - boost-cpp
   - pytest
   - pytest-cov
+  - setuptools<81
