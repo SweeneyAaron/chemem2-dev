@@ -1,0 +1,36 @@
+name: ChemEM CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # CRITICAL: This tells GitHub to run commands inside the activated Conda environment
+    defaults:
+      run:
+        shell: bash -el {0}
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v4
+
+    
+    - name: Set up Conda Environment
+      uses: mamba-org/setup-micromamba@v1
+      with:
+        environment-file: environment-dev.yml
+        environment-name: chem111
+        cache-environment: true # Massively speeds up future runs!
+
+    - name: Install ChemEM
+      run: | 
+        pip install -e . --no-build-isolation
+
+    - name: Run Pytest
+      run: |
+        python -m pytest -v

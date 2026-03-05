@@ -93,3 +93,28 @@ class Ligand:
             conf.SetAtomPosition(idx, Point3D(x, y, z))
 
         self.complex_structure.positions = (coords * unit.angstrom)
+    
+    def get_atom_positons(self):
+        positions = []
+        #check it has conformers 
+        if not self.mol.GetNumConformers():
+            return np.array(positions)
+        
+        for conf in self.mol.GetConformers():
+            positions.append(conf.GetPositions())
+        
+        return np.array(positions)
+    
+    def get_heavy_atom_positions(self):
+        positions = []
+        #check it has conformers 
+        n_heavy = self.mol.GetNumHeavyAtoms()
+        if not self.mol.GetNumConformers():
+            return np.array(positions)
+        
+        for conf in self.mol.GetConformers():
+            positions.append(conf.GetPositions()[:n_heavy])
+        
+        return np.array(positions)
+    
+    

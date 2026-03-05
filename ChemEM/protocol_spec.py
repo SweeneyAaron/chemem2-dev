@@ -42,7 +42,7 @@ from ChemEM.protocols.binding_site import BindingSite
 from ChemEM.protocols.alpha_mask import AlphaMask
 from ChemEM.protocols.confidence_map import ConfidenceMap
 from ChemEM.protocols.post_processing import PostProcess
-
+from ChemEM.protocols.mapQ_score.mapQ_score import ScoreMapQ
 
 @dataclass(frozen=True)
 class ProtocolSpec:
@@ -183,6 +183,13 @@ def add_refine_args(p):
     g.add_argument("--global-k", type=float, default=75.0,
                    help="")
     
+def mapq_score_deps(args):
+    return tuple() 
+
+def add_mapq_score_args(p):
+    g = p.add_argument_group("MapQ Score")
+    g.add_argument("--sigma-ref", type=float, default = 0.6)
+    p.add_argument("--per-atom", action="store_true", help="Get per atom MapQ scores")
 
 SHORT_ALIASES = {
     "binding_site": "-b",
@@ -229,5 +236,13 @@ REGISTRY = {
         cls=PostProcess,
         deps=refine_deps,
         add_args=add_refine_args,
-        help="MD-Refine ligand to density map")
+        help="MD-Refine ligand to density map"),
+    
+    "mapq_score": ProtocolSpec(
+        name="mapq_score",
+        cls=ScoreMapQ,
+        deps=mapq_score_deps,
+        add_args=add_mapq_score_args,
+        help="Score Ligand MapQ",
+    ),
 }

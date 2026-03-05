@@ -29,6 +29,7 @@ from ChemEM.tools.geometry import rmsd_cluster #stay
 from ChemEM.tools.pose_minimiser import PoseMinimiser #move
 
 
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
