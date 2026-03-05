@@ -22,6 +22,68 @@ from ChemEM.messages import Messages
 
 
 
+def generate_custom_usage() -> str:
+    """Generates a clean, aligned usage string dynamically from the REGISTRY, including protocol options."""
+    from ChemEM.protocol_spec import REGISTRY, SHORT_ALIASES
+
+    lines = [
+        "chemem <config_file> [protocols...] [options...]",
+        "",
+        "Available Protocols & Options:",
+        "=============================="
+    ]
+
+    for key, spec in REGISTRY.items():
+        # 1. Format the main protocol flag
+        long_flag = "--" + key.replace("_", "-")
+        short_flag = SHORT_ALIASES.get(key)
+        flag_str = f"{long_flag}, {short_flag}" if short_flag else long_flag
+        
+        # Add the Protocol Header
+        lines.append(f"• {flag_str}")
+        if spec.help:
+            lines.append(f"    {spec.help}")
+
+        # 2. Extract arguments for this specific protocol
+        if spec.add_args:
+            # Create a dummy parser just to capture the arguments added by this protocol
+            temp_p = argparse.ArgumentParser(add_help=False)
+            spec.add_args(temp_p)
+            
+            # _actions contains all the arguments added
+            actions = temp_p._actions
+            
+            if actions:
+                lines.append("    Options:")
+                # Find the longest option string so we can align the help text perfectly
+                max_opt_len = max([len(", ".join(a.option_strings)) for a in actions])
+                
+                for action in actions:
+                    opt_strs = ", ".join(action.option_strings)
+                    padded_opt = opt_strs.ljust(max_opt_len + 2)
+                    
+                    help_txt = action.help or ""
+                    
+                    # Append default values (skip for boolean True/False flags to keep it clean)
+                    if action.default is not None and action.default != argparse.SUPPRESS:
+                        if not isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+                            default_str = f"[default: {action.default}]"
+                            help_txt = f"{help_txt} {default_str}".strip()
+
+                    lines.append(f"      {padded_opt}{help_txt}")
+        
+        # Add a blank line between protocols to keep it from looking cluttered
+        lines.append("")
+
+    lines.extend([
+        "Examples:",
+        "  chemem config.txt --dock --minimize-docking",
+        "  chemem config.txt --mapq-score --rescore",
+        "  chemem config.txt -b -d  # Using short aliases"
+    ])
+
+    return "\n".join(lines)
+
 def load_system(conf_file: str):
     cfg = Config()
     return cfg.load_config(conf_file)
@@ -35,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="chemem",
         description="ChemEM command-line interface",
+        usage = generate_custom_usage(),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
