@@ -11,7 +11,8 @@ from __future__ import annotations
 from openmm import unit
 from rdkit.Geometry import Point3D
 import numpy as np
-
+import os
+from pathlib import PurePath
 from ChemEM.tools.biomolecule import sse_groups_from_parmed
 
 
@@ -78,6 +79,17 @@ class Ligand:
         _id = self.complex_structure.residues[0].name 
         if _id.startswith("LIG"):
             return int(_id.strip("LIG"))
+    
+    @property
+    def identifier(self):
+        
+        if os.path.exists(self.input):
+            #is a path
+            path = PurePath(str(self.input))
+            return path.name or path.parts[-1] if path.parts else str(self.input)
+        else:
+            #is a smiles string
+            return str(self.input)
     
     def set_positions(self, coords: np.ndarray, conf_id: int = 0) -> None:
         """

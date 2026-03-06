@@ -70,7 +70,7 @@ class ScoreMapQ:
 
         for lig_id, ligand in enumerate(self.system.ligand):
             lig_key = f"ligand_{lig_id}"
-            results[lig_key] = {}
+            results[ligand.identifier] = {}
             
             
             heavy_idxs = [a.GetIdx() for a in ligand.mol.GetAtoms() if a.GetSymbol() != 'H']
@@ -88,7 +88,7 @@ class ScoreMapQ:
                 
                 if not self._is_within_map_bounds(positions):
                     self.system.log(f"  -> Ligand {lig_id} (Conf {conf_id}) is outside map bounds. Skipping.")
-                    results[lig_key][f"conf_{conf_id}"] = None
+                    results[ligand.identifier][f"conf_{conf_id}"] = None
                     continue
                 
                 qs = compute_qscores_from_emmap(
@@ -105,7 +105,7 @@ class ScoreMapQ:
                     # Convert the numpy array of individual scores to a list of standard floats
                     final_score = [float(q) for q in qs]
                 
-                results[lig_key][f"conf_{conf_id}"] = final_score
+                results[ligand.identifier][f"conf_{conf_id}"] = final_score
         
         
         self.system.log(f"Writing MapQ scores to {outfile_path}")
