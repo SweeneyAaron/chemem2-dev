@@ -143,8 +143,8 @@ def ligand_from_sdf(sdf_file,
             _ = Chem.GetSymmSSSR( protonated_mol)
         
         
-        source_id = f"{sdf_file}#{idx}"
-        ligands.append(_make_ligand_from_rd_mol(protonated_mol, source_id, name))
+        
+        ligands.append(_make_ligand_from_rd_mol(protonated_mol, sdf_file, name))
     
     return ligands
         
