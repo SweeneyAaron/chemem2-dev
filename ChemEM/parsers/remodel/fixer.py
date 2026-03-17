@@ -57,7 +57,7 @@ def run_standard_repairs(fixer: PDBFixer, opts: Optional[FixerOptions] = None) -
  
 def model_to_fixer_interchange(modeller):
     with tempfile.NamedTemporaryFile(mode="w+", delete=True) as temp:
-        PDBFile.writeFile(modeller.topology, modeller.positions, temp)
+        PDBFile.writeFile(modeller.topology, modeller.positions, temp, keepIds=True)
         temp.flush()
         receptor_pdbfile = PDBFixer(temp.name)
     return receptor_pdbfile
@@ -65,7 +65,7 @@ def model_to_fixer_interchange(modeller):
 
 def fixer_to_model_interchange(fixer):
     with tempfile.NamedTemporaryFile(mode="w+", delete=True) as temp:
-        PDBFile.writeFile(fixer.topology, fixer.positions, temp)
+        PDBFile.writeFile(fixer.topology, fixer.positions, temp, keepIds=True)
         temp.flush()
         receptor_pdbfile = PDBFile(temp.name)
     return receptor_pdbfile

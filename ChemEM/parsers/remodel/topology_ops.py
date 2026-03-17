@@ -154,6 +154,7 @@ def split_chains_on_breaks(fixer,
 
             prev_residue = res
     new_positions = unit.Quantity(new_positions_vals, unit.nanometer)
+    
     return new_topology, new_positions
 
             

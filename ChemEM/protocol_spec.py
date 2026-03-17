@@ -41,8 +41,9 @@ from ChemEM.protocols._docking.docking import Docking
 from ChemEM.protocols.binding_site import BindingSite
 from ChemEM.protocols.alpha_mask import AlphaMask
 from ChemEM.protocols.confidence_map import ConfidenceMap
-from ChemEM.protocols.post_processing import PostProcess
+from ChemEM.protocols.refine.minimize import Refine
 from ChemEM.protocols.mapQ_score.mapQ_score import ScoreMapQ
+from ChemEM.protocols.refine.ion_fixer import IonFixer
 
 @dataclass(frozen=True)
 class ProtocolSpec:
@@ -170,7 +171,9 @@ def add_alpha_mask_args(p):
 
 def refine_deps(args):
     # Dock always needs binding_site first 
-    return ("confidence_map",)
+    #don't use con map here the user can specify 
+    #return ("confidence_map",)
+    return tuple()
 
 def add_refine_args(p):
     g = p.add_argument_group("Density Refinement")
@@ -183,6 +186,11 @@ def add_refine_args(p):
     g.add_argument("--global-k", type=float, default=75.0,
                    help="")
     
+    g.add_argument('--local-refine', action="store_true")
+    g.add_argument('--local-radius', type=float, default = 12.0)
+    g.add_argument('--anneling', action="store_true")
+    
+    
 def mapq_score_deps(args):
     return tuple() 
 
@@ -190,6 +198,41 @@ def add_mapq_score_args(p):
     g = p.add_argument_group("MapQ Score")
     g.add_argument("--sigma-ref", type=float, default = 0.6)
     p.add_argument("--per-atom", action="store_true", help="Get per atom MapQ scores")
+
+
+def ion_fixer_deps(args):
+    return tuple() 
+
+def add_ion_fixer_args(p):
+    g = p.add_argument_group("Ion Fixer")
+    g.add_argument("--ion-type", type=str)
+    g.add_argument("--coordination-geometry", type=str, default='Octahedral', help="Coordination geometry : Octahedral |Square Planar | linear | Trigonal Bipyramidal | Triganal Planer | Square Pyrimidal | Tetrahedral | Pentagonal Bipyrimidal")
+    g.add_argument(
+        "--atom-spec",
+        dest="atom_specs",
+        action="append",
+        default=[],
+        help=(
+            "Atom specification for a coordinating atom. "
+            "Repeat this option multiple times. "
+            "Format example: A:ASP:45:OD1 or LIG:0:O3"
+        ))
+    
+    g.add_argument(
+        "--exclude-spec",
+        dest="exclude_specs",
+        action="append",
+        default=[],
+        help=(
+            "Atom specification for a coordinating atom. "
+            "Repeat this option multiple times. "
+            "Format example: A:ASP:45:OD1 or LIG:0:O3"
+        ))
+    
+    g.add_argument("--ion-forcefield",type=str,default="amber14/tip3pfb.xml")
+    
+    
+
 
 SHORT_ALIASES = {
     "binding_site": "-b",
@@ -233,10 +276,18 @@ REGISTRY = {
     ),
     "refine": ProtocolSpec(
         name="refine",
-        cls=PostProcess,
+        #cls=PostProcess,
+        cls=Refine,
         deps=refine_deps,
         add_args=add_refine_args,
         help="MD-Refine ligand to density map"),
+    
+    "ion_fixer": ProtocolSpec(
+        name="ion_fixer",
+        cls=IonFixer,
+        deps=ion_fixer_deps,
+        add_args=add_ion_fixer_args,
+        help="Refine Ion Cordination in cryoEM maps"),
     
     "mapq_score": ProtocolSpec(
         name="mapq_score",

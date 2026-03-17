@@ -22,12 +22,14 @@ from ChemEM import docking
 from ChemEM.messages import Messages
 from ChemEM.parsers.models import Ligand #stay
 from ChemEM.tools.mmgbsa_score import MMGBSAScore #move
-from .mmgbsa_score import mmgbsa_score_docked_poses,write_mmgbsa_scores
+
 from ChemEM.tools.precomputed_data import PreCompDataLigand, PreCompDataProtein #move 
 from ChemEM.tools.docking import energy_cutoff, write_results, dock_worker#move
 from ChemEM.tools.ligand import  mol_with_positions #stay
 from ChemEM.tools.geometry import rmsd_cluster #stay
-from ChemEM.tools.pose_minimiser import PoseMinimiser #move
+#refactored
+from .mmgbsa_score import mmgbsa_score_docked_poses, write_mmgbsa_scores
+from ChemEM.protocols.refine.pose_minimiser import BatchPoseMinimizer, ChemEMSimulationSetup
 
 #----refactor notes
 #going to move mmgbsa rescoreing out of this file 
@@ -323,7 +325,31 @@ class Docking:
                 densmap = conf_map.submap(origin=precomp_site.binding_site_density_map_origin,
                                           box_size=precomp_site.binding_site_density_map_grid.shape)
             
-       
+        
+
+        env = ChemEMSimulationSetup(
+            protein_structure=self.system.protein.complex_structure,
+            ligand_structure=[mol.complex_structure],
+            residues=binding_site.residues,  # The setup class will automatically cut the subset!
+            density_map=densmap,
+            platform_name=getattr(self.system, 'platform', 'CPU'),
+            protein_restraint='protein',
+            pin_k=5000.0,
+            localise=False
+        )
+        
+        
+        minimizer = BatchPoseMinimizer(env)
+        all_pos = np.array([i[1] for i in poses])
+        min_pos = minimizer.run(
+            ligand_poses_angstrom=all_pos,
+            do_biased_md=getattr(self.system.options, 'do_biased_md', False),
+            md_ps=getattr(self.system.options, 'md_ps', 5.0),
+            max_iters=0 # Or getattr(self.system.options, 'max_iters', 0)
+        )
+
+
+        '''
         pm = PoseMinimiser(
             protein_structure=self.system.protein.complex_structure,
             ligand_structure=[mol.complex_structure],
@@ -340,6 +366,7 @@ class Docking:
         all_pos = np.array([i[1] for i in poses])
         min_pos = pm.minimize_pose_list(all_pos)
         
+        '''
         min_pos_scored = []
         for pos in min_pos:
             

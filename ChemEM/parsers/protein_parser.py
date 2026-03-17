@@ -59,6 +59,7 @@ class ProteinParser:
         
         #---- idnetify included components
         pdb = app.PDBFile(protein_file)
+        
         #needed for mapping
         original_topology = pdb.topology
         original_positions = pdb.positions
@@ -71,7 +72,7 @@ class ProteinParser:
                                                request_implicit=request_implicit)
         
         modeller = remodel_from_fixer(protein_file, ff, split_chains = True)
-        
+
         #------conversions
         if to_parmed:
             modeller, system = modeller_to_parmed(modeller, ff)
@@ -83,7 +84,7 @@ class ProteinParser:
         else:
             system = ff.createSystem(modeller.topology)
         
-        
+       
         #------mapping 
         residue_map = build_residue_map_by_positions(
             original_topology,
