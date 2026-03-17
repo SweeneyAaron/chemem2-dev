@@ -3,3 +3,25 @@
 --cpp scoring functions for sci score and mutual information were added 
 --new protocls include alphamask for ligand segmentation
 
+
+# Changelog: Architecture Refactor & Minimization Pipeline
+
+## 1. Refactored
+* **Modular Redesign:** Transitioned the minimization pipeline from a monolithic class structure into a decoupled Strategy/Composition pattern.
+* **Separation of Concerns:** System state and environment preparation are now strictly handled by `ChemEMSimulationSetup`, independent of the execution logic.
+* **Dedicated Execution Protocols:** Replaced unified minimization methods with isolated, purpose-built protocol classes (`BatchPoseMinimizer`, `MinimiseInPlace`, and `SimulatedAnnealingInPlace`).
+
+## 2. API Unification
+* **Consolidated Wrappers:** Merged the redundant `Refine` and `Anneling` API classes into a single, unified `Refine` class, eliminating significant code duplication.
+* **Unified Job Queue:** Standardized "Local" (pocket subsets) and "Global" (full complex) refinement pathways to use the exact same data preparation and execution loop.
+
+## 3. Simulated Annealing Enhancements
+* **Literature Protocol Replication:** Completely rewrote the simulated annealing loop to ensure mathematical fidelity to ChemEM v1 method.
+* **Deterministic Steps:** Replaced arbitrary time-chunk calculations with deterministic temperature arrays and explicit molecular dynamics step counts.
+
+## 4. Critical Bug Fixes & Data Routing
+* **Spatial Coordinate Mapping:** Replaced brittle, text-based residue index mapping with robust 3D spatial mapping (`cKDTree`) to safely project minimized local subsets back into the global complex.
+* **ParmEd Write Failures:** Resolved a silent coordinate-update failure by enforcing explicit OpenMM `Vec3` formatting for all NumPy array transfers.
+* **Ligand State Synchronization:** Fixed SDF export bugs by ensuring optimization coordinates are synchronized to both the RDKit Mol object and the ParmEd structure simultaneously.
+* **Tether Stability:** Fixed simulation crashes (NaN forces) during batch minimization by ensuring flat-bottom tethers strictly exclude hydrogen atoms.
+

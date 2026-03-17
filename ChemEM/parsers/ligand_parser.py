@@ -7,7 +7,7 @@ Created on Wed Mar  4 14:37:55 2026
 """
 import os 
 from typing import List
-from .models import Ligand 
+from .models import Ligand , LigandList
 from .remodel.protonation import set_smiles_protonation_state, set_mol_protonatation_state
 from .remodel.ligand_ops import (check_unassigned_chirality,
                                  set_ligand_rings,
@@ -68,7 +68,7 @@ class LigandParser:
         print(f'[DEBUG] loaded {len(ligand)} ligands')
         print(f'[DEBUG] {ligand}')
         
-        return ligand
+        return LigandList(ligand)
     
 
 def ligand_from_smiles(

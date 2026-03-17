@@ -128,6 +128,13 @@ class AMBER_FF:
 class CHARMM_FF:
     pass
 
+def ff_load(file: str):
+    try:
+        ff = app.ForceField(file)
+        return ff
+    except Exception as e:
+        return None
+
 def ff_loads(files: List[str]):
     try:
         ff = app.ForceField(*files)

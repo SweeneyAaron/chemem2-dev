@@ -198,6 +198,7 @@ target_include_directories(docking PRIVATE
 )
 target_link_libraries(docking PRIVATE
   ${RDKIT_LIBRARIES}
+  Eigen3::Eigen
   $<$<BOOL:${Boost_FOUND}>:Boost::boost>
   $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
 )
@@ -235,6 +236,7 @@ target_include_directories(ligand_fitting PRIVATE
   ${Python_NumPy_INCLUDE_DIRS}
 )
 target_link_libraries(ligand_fitting PRIVATE
+  Eigen3::Eigen
   $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
 )
 set_target_properties(ligand_fitting PROPERTIES

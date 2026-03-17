@@ -24,7 +24,59 @@ from openmm import (
     Platform
 )
 from scipy.spatial import cKDTree
+from .biomolecule import find_atoms_outside_ligand
 
+
+def add_sse_rmsd_forces(
+    complex_system,
+    complex_structure,
+    ref_nm,
+    sse_groups,
+    ligand_set,
+    ligand_heavy_indices,
+    sse_k: float,
+    localise: bool = False
+):
+    """
+    Filters SSE groups, builds RMSD restraints, and adds them to the system.
+    """
+    if not sse_groups: 
+        raise ValueError("SSE mode requires sse_groups")
+        
+    for grp in sse_groups:
+        # Filter out ligand atoms
+        valid_grp = [i for i in grp if i not in ligand_set]
+        
+        # Filter out atoms too far from the ligand (if localise is True)
+        if localise:
+            outside = find_atoms_outside_ligand(
+                complex_structure, ligand_heavy_indices
+            )
+            valid_grp = [i for i in valid_grp if i not in outside]
+        
+        # Build and add the force
+        rmsd_force = ForceBuilder.create_rmsd_restraint(ref_nm, valid_grp, sse_k)
+        if rmsd_force:
+            complex_system.addForce(rmsd_force)
+
+def add_density_map_force(complex_system, 
+                          complex_structure,
+                          density_map, 
+                          global_k, 
+                          padding, 
+                          smooth_sigma_vox=0.0):
+    
+        print("Processing Density Map...")
+        print('-- Global k:', global_k)
+        map_force = ForceBuilder.create_map_potential(
+            density_map, 
+            global_k,
+            smooth_sigma_vox=smooth_sigma_vox
+        )
+        for atom in complex_structure.atoms:
+            if atom.element != 1:
+                map_force.addBond([atom.idx])
+        complex_system.addForce(map_force)
 
 class ForceBuilder:
     """Helper class to construct OpenMM Force objects."""
@@ -321,32 +373,34 @@ class ForceBuilder:
         if include_angles:
             if geometry is None:
                 raise ValueError("geometry must be provided when include_angles=True")
-
+        
             dirs = ForceBuilder._coordination_template_dirs(geometry)
             if dirs.shape[0] != cn:
                 raise ValueError(
                     f"Geometry {geometry!r} implies CN={dirs.shape[0]} but you gave {cn} coord atoms."
                 )
-
+        
             if angle_pairs != "all":
                 raise ValueError("Only angle_pairs='all' is implemented right now (safe default).")
-
-            ang = CustomCompoundBondForce(3, f"{k_ang_name}*(theta-theta0)^2")
+        
+            ang = CustomCompoundBondForce(
+                3,
+                f"{k_ang_name}*(angle(p1,p2,p3)-theta0)^2"
+            )
             ang.addGlobalParameter(
                 k_ang_name, 0.0 * unit.kilojoule_per_mole / unit.radian**2
             )
             ang.addPerBondParameter("theta0")
-
-            # All i<j pairs
+        
             for i in range(cn):
                 for j in range(i + 1, cn):
-                    cos0 = float(np.clip(np.dot(dirs[i], dirs[j]), -1.0, 1.0))
-                    theta0 = float(np.arccos(cos0))  # radians
-
-                    ai = coord_atom_indices[i]
-                    aj = coord_atom_indices[j]
-                    ang.addBond([int(ai), ion_idx, int(aj)], [theta0 * unit.radian])
-
+                    cos_t = float(np.clip(np.dot(dirs[i], dirs[j]), -1.0, 1.0))
+                    theta0 = float(np.arccos(cos_t))
+                    ang.addBond(
+                        [int(coord_atom_indices[i]), int(ion_idx), int(coord_atom_indices[j])],
+                        [theta0 * unit.radian],
+                    )
+        
             ang.setForceGroup(int(force_group_ang))
 
         return {

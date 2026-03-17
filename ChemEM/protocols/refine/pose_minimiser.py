@@ -1,0 +1,553 @@
+# This file is part of the ChemEM software.
+#
+# Copyright (c) 2026 - Topf Group & Leibniz Institute for Virology (LIV),
+# Hamburg, Germany.
+#
+# This module was developed by:
+#   Aaron Sweeney    <aaron.sweeney AT cssb-hamburg.de>
+
+
+
+from tqdm.auto import tqdm
+from contextlib import nullcontext
+import time
+import copy
+import numpy as np
+from dataclasses import dataclass, field
+from typing import List, Optional, Union
+
+from openmm import (
+    unit, app, 
+    LangevinIntegrator, Platform, 
+    MonteCarloBarostat,
+    Vec3
+)
+from openmm.app import NoCutoff, HBonds, PDBFile
+from openmm import CustomExternalForce
+
+
+from ChemEM.protocols.core.simulation import (create_system, 
+                                              identify_indices_from_name,
+                                              run_biased_md_burst,
+                                              check_pose_forces)
+
+from ChemEM.protocols.core.forces import (add_density_map_force,
+                                          add_sse_rmsd_forces,
+                                          ForceBuilder)
+
+from ChemEM.protocols.core.biomolecule import (find_atoms_outside_ligand,
+                                               select_atoms,
+                                               create_structure_subset)
+
+
+
+class ProgressLogger:
+    @staticmethod
+    def get_bar(total, desc, unit="steps", leave=False, active=True):
+        if active and total > 0:
+            return tqdm(total=total, desc=desc, unit=unit, leave=leave)
+        return nullcontext()
+    
+    @staticmethod
+    def human_ps(ps: float) -> str:
+        if ps >= 1000.0: return f"{ps/1000.0:.1f} ns"
+        if ps >= 1.0: return f"{ps:.1f} ps"
+        return f"{ps*1000.0:.1f} fs"
+
+
+
+class ChemEMSimulationSetup:
+    
+    def __init__(self, 
+                 protein_structure,
+                 ligand_structure,
+                 residues=None,
+                 density_map=None,
+                 padding=1.0,
+                 solvent=app.GBn2,
+                 platform_name='CPU',
+                 # Restraint settings
+                 restrain_side_chains = True,
+                 protein_restraint='protein',  # 'protein', 'sse', 'none'
+                 sse_groups: Optional[List[List[int]]] = None,
+                 sse_k: float = 50.0,
+                 pin_k: float = 5000.0,
+                 localise: bool = True,
+                 global_k : float = 150.0,
+                 smooth_sigma_A : float = 0.0,
+                 smooth_sigma_vox: float = 0.0):
+        
+        self.density_map = density_map
+        self.global_k = global_k
+        self.smooth_sigma_A = smooth_sigma_A
+        
+        if residues is not None:
+            protein_structure = create_structure_subset(protein_structure, residues)
+        
+        self.complex_structure, self.complex_system = create_system(
+            protein_structure, ligand_structure, solvent
+        )
+        
+        #-----Cache ligand indexes
+        self.all_ligand_indices, self.ligand_heavy_indices = identify_indices_from_name(self.complex_structure)
+        
+        #-----Density Map Forces
+        if self.density_map:
+            
+            add_density_map_force(self.complex_system, 
+                                  self.complex_structure,
+                                  self.density_map, 
+                                  self.global_k, 
+                                  padding, 
+                                  smooth_sigma_vox=smooth_sigma_vox)
+
+        
+        # -----Integrator & Platform Setup
+        self.integrator = LangevinIntegrator(
+            300 * unit.kelvin, 
+            1.0 / unit.picoseconds, 
+            1.0 * unit.femtoseconds
+        )
+        self.platform = Platform.getPlatformByName(platform_name)
+        props = {"Precision": "single"} if platform_name != 'CPU' else {}
+        
+        self.simulation = app.Simulation(
+            self.complex_structure.topology,
+            self.complex_system,
+            self.integrator,
+            self.platform,
+            platformProperties=props
+        )
+        
+        self.simulation.context.setPositions(self.complex_structure.positions)
+        
+        # 5. Restraints
+        self.restraint_config = {
+            'mode': protein_restraint, 
+            'sse_groups': sse_groups, 
+            'sse_k': sse_k, 
+            'pin_k': pin_k,
+            'localise': localise,
+            'restrain_sidechains': restrain_side_chains 
+        }
+        self._setup_protein_restraints()
+    
+    
+    def _setup_protein_restraints(self):
+        mode = self.restraint_config['mode']
+        if mode == 'none': return
+        
+        state = self.simulation.context.getState(getPositions=True)
+        ref_nm = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+        
+        # --- SSE Mode ---
+        if mode == 'sse':
+            add_sse_rmsd_forces(
+                complex_system=self.complex_system,
+                complex_structure=self.complex_structure,
+                ref_nm=ref_nm,
+                sse_groups=self.restraint_config['sse_groups'],
+                sse_k=self.restraint_config['sse_k'],
+                localise=self.restraint_config['localise'],
+                all_ligand_indices=self.all_ligand_indices,
+                ligand_heavy_indices=self.ligand_heavy_indices
+            )
+            return  # Exit here as SSE forces are fully handled
+        
+        # --- Protein Pin Mode ---
+        
+        self.protein_heavy_indices = [
+            a.idx for a in self.complex_structure.atoms
+            if not a.residue.name.startswith('LIG') and a.element != 1
+        ]
+        
+        ligand_set = set(self.all_ligand_indices)
+        atoms_to_restrain = select_atoms(
+            self.complex_structure, 
+            indices=self.protein_heavy_indices, 
+            exclude_indices=ligand_set,
+        )
+        
+        if self.restraint_config['localise']:
+            outside_indices = find_atoms_outside_ligand(
+                self.complex_structure, self.ligand_heavy_indices,
+                exclude_backbone=False if self.restraint_config['restrain_sidechains'] else True
+            )
+            
+            atoms_to_restrain = [i for i in atoms_to_restrain if i not in outside_indices]
+       
+        if atoms_to_restrain:
+            pin_f = ForceBuilder.create_positional_pin(
+                atoms_to_restrain, ref_nm, k_name="k_static_pin"
+            )
+            self.complex_system.addForce(pin_f)
+            self.simulation.context.reinitialize(preserveState=True)
+            self.simulation.context.setParameter("k_static_pin", self.restraint_config['pin_k'])
+    
+    # ------------------------------------------------------------------
+    # Public API for Force & State Management (Used by Minimizers)
+    # ------------------------------------------------------------------
+    
+    def set_ligand_flatbottom_tether(self, ref_pos_nm, *, r0_A=0.1, k_kcal_per_mol_A2=0.2):
+        self._ensure_ligand_flatbottom_tether()
+        r0_nm = float(r0_A) * 0.1
+        k_kj_per_mol_nm2 = float(k_kcal_per_mol_A2) * 418.4
+    
+        f = self._lig_fb_tether
+        for p, atom_idx in enumerate(self._lig_fb_atoms):
+            x0, y0, z0 = map(float, ref_pos_nm[int(atom_idx)])
+            f.setParticleParameters(p, int(atom_idx), [x0, y0, z0])
+    
+        f.updateParametersInContext(self.simulation.context)
+        self.simulation.context.setParameter("r0", r0_nm)
+        self.simulation.context.setParameter("k_tether", k_kj_per_mol_nm2)
+    
+    def clear_ligand_flatbottom_tether(self):
+        if hasattr(self, "_lig_fb_tether"):
+            self.simulation.context.setParameter("k_tether", 0.0)
+
+    def _ensure_ligand_flatbottom_tether(self):
+        if hasattr(self, "_lig_fb_tether"): return
+        dist = "sqrt((x-x0)*(x-x0) + (y-y0)*(y-y0) + (z-z0)*(z-z0))"
+        expr = f"0.5*k_tether*step({dist}-r0)*({dist}-r0)^2"
+        f = CustomExternalForce(expr)
+
+        f.addGlobalParameter("k_tether", 0.0)
+        f.addGlobalParameter("r0", 0.0)
+        f.addPerParticleParameter("x0")
+        f.addPerParticleParameter("y0")
+        f.addPerParticleParameter("z0")
+    
+        self._lig_fb_atoms = list(self.ligand_heavy_indices)
+        for atom_idx in self._lig_fb_atoms:
+            f.addParticle(int(atom_idx), [0.0, 0.0, 0.0])
+    
+        self.complex_system.addForce(f)
+        self._lig_fb_tether = f
+        self.simulation.context.reinitialize(preserveState=True)
+
+    def set_ligand_tether(self, ref_pos_nm: np.ndarray, k_kcal_per_mol_A2: float):
+        self._ensure_ligand_tether_force()
+        k_kj_per_mol_nm2 = float(k_kcal_per_mol_A2) * 418.4
+    
+        f = self._lig_tether_force
+        for p, atom_idx in enumerate(self._lig_tether_atoms):
+            x0, y0, z0 = map(float, ref_pos_nm[int(atom_idx)])
+            f.setParticleParameters(p, int(atom_idx), [x0, y0, z0])
+    
+        f.updateParametersInContext(self.simulation.context) 
+        self.simulation.context.setParameter("k_tether", k_kj_per_mol_nm2)
+    
+    def clear_ligand_tether(self):
+        if hasattr(self, "_lig_tether_force"):
+            self.simulation.context.setParameter("k_tether", 0.0)
+
+    def _ensure_ligand_tether_force(self):
+        if hasattr(self, "_lig_tether_force"): return
+        f = CustomExternalForce("0.5*k_tether*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
+        f.addGlobalParameter("k_tether", 0.0)
+        f.addPerParticleParameter("x0")
+        f.addPerParticleParameter("y0")
+        f.addPerParticleParameter("z0")
+    
+        self._lig_tether_atoms = list(self.ligand_heavy_indices)
+        for atom_idx in self._lig_tether_atoms:
+            f.addParticle(int(atom_idx), [0.0, 0.0, 0.0])
+    
+        self.complex_system.addForce(f)
+        self._lig_tether_force = f
+        self.simulation.context.reinitialize(preserveState=True)
+
+    # ------------------------------------------------------------------
+    # Debugging Helpers
+    # ------------------------------------------------------------------
+
+    def debug_min_state(self, tag: str, intended_lig_nm=None):
+        st = self.simulation.context.getState(getEnergy=True, getPositions=True, getForces=True)
+        E = st.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
+        pos = st.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+        frc = st.getForces(asNumpy=True).value_in_unit(unit.kilojoule_per_mole/unit.nanometer)
+    
+        lig_idx = np.array(self.all_ligand_indices, dtype=int)
+        lig_f = frc[lig_idx]
+        lig_f_norm = np.linalg.norm(lig_f, axis=1)
+        max_f = float(lig_f_norm.max()) if lig_f_norm.size else 0.0
+        rms_f = float(np.sqrt(np.mean(lig_f_norm**2))) if lig_f_norm.size else 0.0
+    
+        msg = f"[{tag}] E={E:.2f} kcal/mol | ligand max|F|={max_f:.3g} | ligand rms|F|={rms_f:.3g}"
+        if intended_lig_nm is not None:
+            d = pos[lig_idx] - intended_lig_nm
+            dA = np.linalg.norm(d, axis=1) * 10.0
+            msg += f" | ligand rms disp={float(np.sqrt(np.mean(dA**2))):.3f} Å | max={float(dA.max()):.3f} Å"
+    
+        for pname in ("k_static_pin", "k_stage_heavy", "k_stage_bb", "global_k"):
+            try: msg += f" | {pname}={self.simulation.context.getParameter(pname)}"
+            except Exception: pass
+        print(msg)
+        
+
+class BatchPoseMinimizer:
+    def __init__(self, env):
+        self.env = env
+        
+    def run(self, 
+            ligand_poses_angstrom, 
+            do_biased_md=False, 
+            md_ps=5.0, 
+            dt_ps=0.001,
+            md_temp_K=150.0,
+            md_seed=1,
+            md_pre_min_iters=0,
+            md_report_ps=0.0,
+            max_iters=0):
+        
+        results = []
+        print(f"Minimizing {len(ligand_poses_angstrom)} poses...")
+
+       
+        initial_pos = self.env.simulation.context.getState(getPositions=True).getPositions()
+
+        for i, pose_ang in enumerate(ligand_poses_angstrom):
+            t_start = time.perf_counter()
+            print(f"\n--- Pose {i+1} ---")
+
+            try:
+               
+                self.env.simulation.context.setPositions(initial_pos)
+                curr_pos_nm = np.array(initial_pos.value_in_unit(unit.nanometer), copy=True)
+                curr_pos_nm[self.env.all_ligand_indices] = pose_ang / 10.0
+
+                # IMPORTANT: set with units
+                self.env.simulation.context.setPositions(curr_pos_nm * unit.nanometer)
+
+                # Enforce constraints after setPositions
+                try:
+                    self.env.simulation.context.applyConstraints(1e-6)
+                except Exception:
+                    pass
+
+                intended_lig_nm = np.array(curr_pos_nm)[self.env.all_ligand_indices]
+
+                bad, reason = check_pose_forces(
+                    self.env.simulation, 
+                    self.env.all_ligand_indices
+                )
+                if bad:
+                    print(f"[pose {i+1}] SKIP (pre-check): {reason}")
+                    continue
+
+                self.env.set_ligand_flatbottom_tether(curr_pos_nm, r0_A=0.4, k_kcal_per_mol_A2=0.2)
+
+                
+                if do_biased_md and md_ps > 0:
+                    run_biased_md_burst(
+                        simulation=self.env.simulation,
+                        ligand_indices=self.env.all_ligand_indices,
+                        intended_lig_nm=intended_lig_nm,
+                        md_ps=md_ps,
+                        dt_ps=dt_ps,
+                        md_temp_K=md_temp_K,
+                        md_seed=md_seed,
+                        md_pre_min_iters=md_pre_min_iters,
+                        md_report_ps=md_report_ps,
+                        pose_index=i+1
+                    )
+
+                    
+                    bad, reason = check_pose_forces(
+                        self.env.simulation, 
+                        self.env.all_ligand_indices,
+                        
+                    )
+                    if bad:
+                        print(f"[pose {i+1}] SKIP (post-MD): {reason}")
+                        continue
+
+                
+                self.env.simulation.minimizeEnergy(maxIterations=max_iters)
+
+                
+                bad, reason = check_pose_forces(
+                    self.env.simulation, 
+                    self.env.all_ligand_indices,
+                    
+                )
+                if bad:
+                    print(f"[pose {i+1}] SKIP (post-min): {reason}")
+                    continue
+
+                
+                state = self.env.simulation.context.getState(getPositions=True, getEnergy=True)
+                final_pos = state.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+
+                dA = np.linalg.norm(final_pos[self.env.all_ligand_indices] - intended_lig_nm, axis=1) * 10.0
+                print(f"  -> pose {i+1} ligand move: rms={np.sqrt(np.mean(dA**2)):.3f} Å max={dA.max():.3f} Å")
+
+                final_lig = final_pos[self.env.all_ligand_indices] * 10.0
+                energy = state.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
+                
+                results.append(final_lig)
+                print(f" Pose {i+1} Finished: {time.perf_counter() - t_start:.2f}s | E: {energy:.2f} kcal/mol")
+
+            except FloatingPointError as e:
+                print(f"[pose {i+1}] SKIP (non-finite): {e}")
+
+            except Exception as e:
+                print(f"[pose {i+1}] SKIP (exception): {type(e).__name__}: {e}")
+
+            finally:
+                # CRITICAL: Always clear the tether so a bad pose doesn't poison the next pose
+                try:
+                    self.env.clear_ligand_flatbottom_tether()
+                except Exception:
+                    pass
+        #reset the simulation as its a refernece to the actual simulation
+        self.env.simulation.context.setPositions(initial_pos)
+        return results
+
+
+class MinimiseInPlace:
+    def __init__(self, env):
+        self.env = env 
+    
+    def run(self, 
+            do_biased_md=False, 
+            md_ps=5.0, 
+            dt_ps=0.001,
+            md_temp_K=150.0,
+            max_iters=0):
+        
+        print("Starting In-Place Minimization...")
+        t_start = time.perf_counter()
+
+        # 1. Pre-Check
+        bad, reason = check_pose_forces(
+            self.env.simulation, 
+            self.env.all_ligand_indices
+        )
+        if bad:
+            print(f"[SKIP (pre-check)]: {reason}")
+            return None
+        
+        
+        st = self.env.simulation.context.getState(getPositions=True)
+        current_pos_nm = st.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+        intended_lig_nm = current_pos_nm[self.env.all_ligand_indices]
+
+        
+        if do_biased_md and md_ps > 0:
+            print(f"Running Biased MD ({md_ps} ps)...")
+            run_biased_md_burst(
+                simulation=self.env.simulation,
+                ligand_indices=self.env.all_ligand_indices,
+                intended_lig_nm=intended_lig_nm,
+                md_ps=md_ps,
+                dt_ps=dt_ps,
+                md_temp_K=md_temp_K,
+                md_report_ps=0.0 # Change to >0 if you want the logs
+            )
+
+        
+        print("Minimizing Energy...")
+        self.env.simulation.minimizeEnergy(maxIterations=max_iters)
+
+        
+        state = self.env.simulation.context.getState(getPositions=True, getEnergy=True)
+        final_pos = state.getPositions(asNumpy=True).value_in_unit(unit.angstrom)
+        energy = state.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
+
+        
+        self.env.complex_structure.positions = final_pos * unit.angstrom
+
+        print(f"Finished in {time.perf_counter() - t_start:.2f}s | Final E: {energy:.2f} kcal/mol")
+        return energy
+
+@dataclass
+class AnnealingConfig:
+    """Configuration for simulated annealing schedule matching the paper protocol."""
+    minimise_before: bool = True
+    minimise_after: bool = True
+    base_T: float = 300.0          # Starting and ending temperature
+    heat_to_K: float = 315.0       # Max temperature
+    temp_step_K: float = 1.0       # "temperature steps of 1K"
+    md_steps_per_T: int = 1000     # "1000 steps at each temperature step"
+    high_hold_ps: float = 0.0      # Optional hold at max temp (0 in paper)
+    cycles: int = 4                # "4 by default"
+
+
+class SimulatedAnnealingInPlace:
+    
+    def __init__(self, env):
+        self.env = env 
+        self._initial_pos_nm = None
+    
+    def run(self, config=None):
+        if config is None:
+            config = AnnealingConfig()
+        t_start = time.perf_counter()
+        print('\nStarting Simulated Annealing In-Place...')
+        
+        # 1. Capture the exact starting coordinates
+        st_initial = self.env.simulation.context.getState(getPositions=True)
+        self._initial_pos_nm = st_initial.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+        
+        if config.minimise_before:
+            print("Running pre-minimization...")
+            self.env.simulation.minimizeEnergy()
+            
+            
+        for cycle in range(config.cycles):
+            print(f"\n--- Starting Cycle {cycle + 1} of {config.cycles} ---")
+            self.cycle(config)
+            
+        
+        if config.minimise_after:
+            print("\nRunning final energy minimization...")
+            self.env.simulation.minimizeEnergy()
+            
+        
+        
+        state = self.env.simulation.context.getState(getPositions=True, getEnergy=True)
+        final_pos = state.getPositions(asNumpy=True).value_in_unit(unit.angstrom)
+        energy = state.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
+        self.env.complex_structure.positions = final_pos * unit.angstrom
+
+        print(f"Finished in {time.perf_counter() - t_start:.2f}s | Final E: {energy:.2f} kcal/mol")
+        
+        
+        return energy
+        
+    def cycle(self, config):
+        # RAMP UP
+        ramp_up_temps = np.arange(
+            config.base_T + config.temp_step_K,
+            config.heat_to_K + config.temp_step_K,
+            config.temp_step_K
+        )
+        for t in ramp_up_temps:
+            self._set_T(float(t))
+            self.env.simulation.step(config.md_steps_per_T)
+        
+        # HOLD
+        if config.high_hold_ps > 0:
+            hold_steps = int(config.high_hold_ps / 0.001)
+            self.env.simulation.step(hold_steps)
+        
+        # RAMP DOWN
+        ramp_down_temps = np.arange(
+            config.heat_to_K - config.temp_step_K,
+            config.base_T - config.temp_step_K,
+            -config.temp_step_K
+        )
+        for t in ramp_down_temps:
+            self._set_T(float(t))
+            self.env.simulation.step(config.md_steps_per_T)
+        
+    def get_energy(self):
+        state = self.env.simulation.context.getState(getEnergy=True)
+        return state.getPotentialEnergy().value_in_unit(unit.kilocalories_per_mole)
+        
+    def _set_T(self, k):
+        self.env.integrator.setTemperature(k * unit.kelvin)
+
+    
