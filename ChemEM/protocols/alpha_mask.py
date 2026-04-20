@@ -586,6 +586,62 @@ class AlphaMask:
         '''
         for k, v in new_binding_sites.items():
             self.system.binding_sites[k] = v
+
+    def _write_segment_binding_sites_combined_map(self):
+        """
+        Build a global combined map on the masked-density grid using the per-site
+        maps from the significant-features branch, then write it to disk.
+        """
+        combined = self.masked_density.copy()
+        combined.density_map = np.zeros_like(self.masked_density.density_map, dtype=np.float32)
+
+        base_origin = np.asarray(combined.origin, dtype=float)  # xyz
+        base_apix = np.asarray(combined.apix, dtype=float)      # xyz
+        zmax, ymax, xmax = combined.density_map.shape
+
+        written_segments = 0
+        skipped_segments = 0
+
+        for _, maps in (getattr(self.system, "binding_site_maps", {}) or {}).items():
+            for item in maps:
+                if not item:
+                    skipped_segments += 1
+                    continue
+
+                site_map = item[0]
+                if site_map is None or getattr(site_map, "density_map", None) is None:
+                    skipped_segments += 1
+                    continue
+
+                src = np.asarray(site_map.density_map)
+                if src.ndim != 3 or src.size == 0:
+                    skipped_segments += 1
+                    continue
+
+                # Submaps are axis-aligned on the same grid convention (origin/apix xyz, data zyx).
+                src_origin = np.asarray(site_map.origin, dtype=float)
+                offset_xyz = np.rint((src_origin - base_origin) / base_apix).astype(int)
+                z0, y0, x0 = int(offset_xyz[2]), int(offset_xyz[1]), int(offset_xyz[0])
+                z1, y1, x1 = z0 + src.shape[0], y0 + src.shape[1], x0 + src.shape[2]
+
+                dz0, dy0, dx0 = max(0, z0), max(0, y0), max(0, x0)
+                dz1, dy1, dx1 = min(zmax, z1), min(ymax, y1), min(xmax, x1)
+                if dz0 >= dz1 or dy0 >= dy1 or dx0 >= dx1:
+                    skipped_segments += 1
+                    continue
+
+                sz0, sy0, sx0 = dz0 - z0, dy0 - y0, dx0 - x0
+                sz1, sy1, sx1 = sz0 + (dz1 - dz0), sy0 + (dy1 - dy0), sx0 + (dx1 - dx0)
+
+                combined.density_map[dz0:dz1, dy0:dy1, dx0:dx1] = src[sz0:sz1, sy0:sy1, sx0:sx1]
+                written_segments += 1
+
+        out_path = os.path.join(self.output, "combined_map_segment_binding_sites.mrc")
+        combined.write_mrc(out_path)
+        self.system.log(
+            f"-- Wrote segment-binding-sites combined map: {out_path} "
+            f"(segments written={written_segments}, skipped={skipped_segments})"
+        )
     
     def handle_centroids(self):
         
@@ -748,6 +804,10 @@ class AlphaMask:
         t2 = time.perf_counter()
         rt = t2 - t1
         print('handel_cent', rt)
+
+        if self.system.options.segment_binding_sites:
+            self._write_segment_binding_sites_combined_map()
+
         self.log()
         
         #TODO! add loggin

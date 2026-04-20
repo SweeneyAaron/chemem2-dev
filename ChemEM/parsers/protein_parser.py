@@ -66,13 +66,16 @@ class ProteinParser:
         
         comp_report = Components.scan_components(pdb.topology)
         comp_report.print_component_report()
+        
+        
         ff = build_forcefeilds_from_components(comp_report,
                                                forcefield, 
                                                force_ff = force_ff,
                                                request_implicit=request_implicit)
         
         modeller = remodel_from_fixer(protein_file, ff, split_chains = True)
-
+        
+        
         #------conversions
         if to_parmed:
             modeller, system = modeller_to_parmed(modeller, ff)

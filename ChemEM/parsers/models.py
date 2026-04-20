@@ -16,9 +16,9 @@ from pathlib import PurePath
 from ChemEM.tools.biomolecule import sse_groups_from_parmed
 from .writers import write_to_sdf
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import UserList
-from typing import Optional, Iterable
+from typing import Optional, Iterable, List, Dict, Any
 
 
 def _safe_cast(obj, new_type):
@@ -27,6 +27,49 @@ def _safe_cast(obj, new_type):
         return new_obj 
     except ValueError:
         return None
+
+@dataclass
+class CovalentLinkSpec:
+    """
+    Declarative description of a single covalent link between a ligand atom
+    and a protein atom. Attached to a `Ligand` via `Ligand.covalent_link`.
+
+    User-provided fields (from config):
+        ligand_atom_spec   : "LIG:i:ATOMNAME"
+        protein_atom_spec  : "CHAIN:RESNAME:RESNUM:ATOMNAME"
+        bond_order         : one of "SINGLE", "DOUBLE", "TRIPLE"
+        delete_ligand_atoms  : optional list of ligand atom names (overrides auto-H)
+        delete_protein_atoms : optional list of protein atom names in target residue
+
+    Fields populated later by the covalent fragment pipeline:
+        resolved_ligand_atom_name, resolved_protein_atom  (after auto-detection)
+        fragment_structure (parmed.Structure for the capped junction fragment)
+        junction_bond_params : (k, req)
+        junction_angles      : list of (atom_names_tuple, k, theta0)
+        junction_dihedrals   : list of (atom_names_tuple, k, phase, periodicity)
+        fragment_ligand_charges : dict mapping ligand atom name -> new partial charge
+    """
+    ligand_atom_spec: str
+    protein_atom_spec: str
+    bond_order: str = "SINGLE"
+    delete_ligand_atoms: List[str] = field(default_factory=list)
+    delete_protein_atoms: List[str] = field(default_factory=list)
+
+    # Populated during the covalent injection pipeline:
+    resolved_ligand_atom_name: Optional[str] = None
+    resolved_protein_chain: Optional[str] = None
+    resolved_protein_resname: Optional[str] = None
+    resolved_protein_resnum: Optional[int] = None
+    resolved_protein_atom_name: Optional[str] = None
+    auto_deleted_ligand_atoms: List[str] = field(default_factory=list)
+    auto_deleted_protein_atoms: List[str] = field(default_factory=list)
+
+    fragment_structure: Any = None
+    junction_bond_params: Optional[tuple] = None
+    junction_angles: List[tuple] = field(default_factory=list)
+    junction_dihedrals: List[tuple] = field(default_factory=list)
+    fragment_ligand_charges: Dict[str, float] = field(default_factory=dict)
+
 
 @dataclass
 class AtomSpec:
@@ -124,7 +167,10 @@ class Ligand:
         for idx, charge in ligand_charges:
             self.ligand_charge_idx.append(idx)
             self.ligand_charge.append(charge)
-        
+
+        # Optional covalent link to a protein atom. None for non-covalent ligands.
+        self.covalent_link: Optional[CovalentLinkSpec] = None
+
         self.get_atom_names()
     
     @property 

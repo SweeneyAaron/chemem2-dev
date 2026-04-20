@@ -183,7 +183,7 @@ class BindingSite:
     
             # Optional debug output (kept explicit + separate path)
             dmap = EMMap(origin, apix, distance_map, 3.0)
-            #dmap.write_mrc(distmap_path)
+            dmap.write_mrc(distmap_path)
     
             data = {
                 "key": site_label,
@@ -218,7 +218,7 @@ class BindingSite:
                 lining_residues,
                 self.protein_openff_structure.positions,
                 pdb_path.replace(".pdb", "_lining.pdb"),
-                write=False
+                write=True
             )
     
             self.binding_sites[site_label] = BindingSiteModel.from_dict(data)

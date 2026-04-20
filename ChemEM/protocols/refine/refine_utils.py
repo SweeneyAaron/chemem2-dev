@@ -221,6 +221,7 @@ def generate_initial_ion_position(
     ion_name,
     target_dists=None,
     exclude_spec_from_obstacles=True,
+    spec_weights=None,
 ):
     """
     Generate an initial ion position in Å.
@@ -289,7 +290,12 @@ def generate_initial_ion_position(
             obstacle_xyz, obstacle_radii, spec_xyz
         )
 
-    centroid = np.mean(spec_xyz, axis=0)
+    if spec_weights is not None:
+        w = np.asarray(spec_weights, dtype=float)
+        w = w / w.sum()
+        centroid = np.sum(spec_xyz * w[:, None], axis=0)
+    else:
+        centroid = np.mean(spec_xyz, axis=0)
 
     if len(spec_xyz) == 1:
         anchor = spec_xyz[0]
@@ -314,16 +320,45 @@ def generate_initial_ion_position(
     x0 = centroid.copy()
     trial_points = [x0]
 
-    shell_guess = _choose_shell_position_single_anchor(
-        anchor=spec_xyz[0],
-        target_dist=float(target_dists[0]),
-        obstacle_xyz=obstacle_xyz,
-        obstacle_radii=obstacle_radii,
-        ion_radius=ion_radius,
-        preferred_direction=(centroid - spec_xyz[0]),
-        n_samples=128,
-    )
-    trial_points.append(shell_guess)
+    # Shell guesses from each spec atom toward centroid
+    for si in range(len(spec_xyz)):
+        direction = centroid - spec_xyz[si]
+        if np.linalg.norm(direction) < 1e-8:
+            direction = np.array([1.0, 0.0, 0.0], dtype=float)
+        shell_guess = _choose_shell_position_single_anchor(
+            anchor=spec_xyz[si],
+            target_dist=float(target_dists[si]),
+            obstacle_xyz=obstacle_xyz,
+            obstacle_radii=obstacle_radii,
+            ion_radius=ion_radius,
+            preferred_direction=direction,
+            n_samples=128,
+        )
+        trial_points.append(shell_guess)
+
+    # Fibonacci sphere samples around centroid at mean target distance
+    mean_target_dist = float(np.mean(target_dists))
+    fib_dirs = _fibonacci_sphere(64)
+    fib_candidates = centroid[None, :] + mean_target_dist * fib_dirs
+
+    # Score candidates by clash penalty and pick top 5
+    fib_scores = []
+    for fc in fib_candidates:
+        score = _placement_objective(
+            fc, spec_xyz, target_dists, obstacle_xyz,
+            obstacle_radii, ion_radius, centroid,
+        )
+        fib_scores.append(score)
+    fib_scores = np.array(fib_scores)
+    top_fib_idx = np.argsort(fib_scores)[:5]
+    for idx in top_fib_idx:
+        trial_points.append(fib_candidates[idx])
+
+    # Small random perturbations of centroid
+    rng = np.random.default_rng(42)
+    for _ in range(5):
+        perturb = rng.normal(0.0, 0.5, size=3)
+        trial_points.append(centroid + perturb)
 
     best_x = None
     best_fun = np.inf
@@ -359,3 +394,33 @@ def generate_initial_ion_position(
             best_x = x
 
     return np.asarray(best_x, dtype=float)
+
+
+
+def find_atom_from_spec_by_coord_and_element(atom_spec, complex_structure, tol=1e-3):
+    """
+    Find the matching atom in a ParmEd complex_structure by comparing
+    x, y, z coordinates and element.
+    """
+    target_xyz = np.asarray(atom_spec.get_point(), dtype=float)
+    target_elem = atom_spec.get_element()
+
+    for atom in complex_structure.atoms:
+        atom_elem = atom.element_name.upper()
+        atom_xyz = np.array([atom.xx, atom.xy, atom.xz], dtype=float)
+
+        if atom_elem != target_elem:
+            continue
+
+        if np.allclose(atom_xyz, target_xyz, atol=tol, rtol=0.0):
+            return atom
+
+    raise RuntimeError(
+        f"[ERROR] Could not find matching atom for element={target_elem} "
+        f"at xyz={target_xyz.tolist()} within tol={tol}"
+    )
+
+def _default_k_ang_for_cn(cn):
+    """Return a default k_ang scaled by coordination number."""
+    defaults = {2: 600.0, 3: 600.0, 4: 600.0, 5: 500.0, 6: 400.0, 7: 400.0}
+    return defaults.get(int(cn), 500.0)

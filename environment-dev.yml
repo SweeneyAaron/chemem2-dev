@@ -14,6 +14,7 @@ dependencies:
   - rdkit-dev=2024.03.3
   - numpy=1.26.4
   - scipy
+  - openmm
   - dimorphite-dl>=2.0.1
   - spyrmsd>=0.8.0
   - ambertools=23.6

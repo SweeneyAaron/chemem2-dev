@@ -9,7 +9,7 @@ source:
   path: .
 
 build:
-  number: 0
+  number: 8
   script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
   skip: true  # [py<38]
   entry_points:
@@ -37,6 +37,7 @@ requirements:
     - python >=3.11,<3.11.12
     - numpy =1.26.4
     - scipy 
+    - openmm
     - rdkit=2024.03.3
     - dimorphite-dl >=2.0.1
     - spyrmsd >=0.8.0
@@ -65,6 +66,9 @@ requirements:
 test:
   imports:
     - ChemEM
+  commands:
+    - chemem --help
+    - python -c "import openmm; from ChemEM.config import Config; print('runtime imports ok')"
 
 about:
   home: https://github.com/yourusername/chemem

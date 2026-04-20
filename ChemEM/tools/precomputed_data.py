@@ -70,7 +70,6 @@ import matplotlib.pyplot as plt
 import multiprocessing
 from joblib import Parallel, delayed
 import pickle
-import pkg_resources
 import scipy.ndimage as ndimage
 from ChemEM.parsers.EMMap import EMMap 
 from ChemEM.tools.aromatic_score import AromaticScore
@@ -4313,6 +4312,5 @@ def build_site_maps_standalone(
     }
 
     return site_maps
-
 
 
