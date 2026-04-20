@@ -142,7 +142,8 @@ def split_chains_on_breaks(fixer,
                 
                 if do_split:
                     seg_idx += 1
-                    new_chain = new_topology.addChain(id=f"{orig_cid}#{seg_idx}")
+                    #new_chain = new_topology.addChain(id=f"{orig_cid}#{seg_idx}")
+                    new_chain = new_topology.addChain(id=f"{orig_cid}")
             new_residue = new_topology.addResidue(res.name, new_chain, id=res.id)
             for atom in res.atoms():
                 new_topology.addAtom(atom.name, atom.element, new_residue)

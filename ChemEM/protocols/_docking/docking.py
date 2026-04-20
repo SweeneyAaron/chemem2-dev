@@ -153,6 +153,8 @@ class Docking:
         
         for site_id, binding_site in self._iter_sites():
             
+            #import pdb 
+            #pdb.set_trace()
             precomp_site = PreCompDataProtein(
                 binding_site,
                 self.system,

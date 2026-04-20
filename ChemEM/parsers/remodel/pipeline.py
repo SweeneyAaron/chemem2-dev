@@ -28,6 +28,7 @@ def remodel_from_fixer(pdb_file, forcefield, split_chains = True):
     fixer = PDBFixer(pdb_file)
     
     
+    
     if split_chains:
         #always split chains in ChemEM but including the option
         #so that this can be moved into its own package
@@ -40,10 +41,15 @@ def remodel_from_fixer(pdb_file, forcefield, split_chains = True):
         modeller = app.Modeller(new_topology, new_positions)
     else:
         modeller = app.Modeller(fixer.topology, fixer.positions)
-
+    
+    
+    
+    
+    
     #fix non standard with pdbfixer
     new_fixer = model_to_fixer_interchange(modeller)
-
+    
+    
     run_standard_repairs(new_fixer)
     
     modeller = app.Modeller(new_fixer.topology, new_fixer.positions)
@@ -68,8 +74,7 @@ def remodel_from_fixer(pdb_file, forcefield, split_chains = True):
     for n in notes:
         print(n)
     
-    
-    res_mod= [r for r in modeller.topology.residues() if r.id == '435']
+
     
     return modeller
         

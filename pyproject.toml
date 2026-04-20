@@ -63,15 +63,12 @@ Repository = "https://github.com/SweeneyAaron/chemem2-dev.git"
 [project.scripts]
 chemem = "ChemEM.__main__:main"
 
-[tool.setuptools]
-packages = ["ChemEM"]
-
-[tool.setuptools.package-data]
-ChemEM = [
-    "*.so", "*.dll", "*.dylib",
-    "ECHO_dock/*.json",
-    "ECHO_dock/halogen/*.pkl", 
-    "ECHO_dock/aromatic/*.pkl"
+[tool.scikit-build]
+wheel.packages = ["ChemEM"]
+sdist.include = [
+    "ChemEM/**",
+    "CMakeLists.txt",
+    "meta.yaml",
 ]
 
 [tool.black]

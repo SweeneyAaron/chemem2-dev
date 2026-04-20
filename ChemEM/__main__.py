@@ -17,7 +17,6 @@ import traceback
 
 import ChemEM
 from ChemEM.protocol_spec import REGISTRY, SHORT_ALIASES
-from ChemEM.config import Config
 from ChemEM.messages import Messages
 
 
@@ -85,6 +84,8 @@ def generate_custom_usage() -> str:
     return "\n".join(lines)
 
 def load_system(conf_file: str):
+    from ChemEM.config import Config
+
     cfg = Config()
     return cfg.load_config(conf_file)
 
@@ -186,7 +187,8 @@ def apply_overrides(system, args: argparse.Namespace) -> None:
         
 def build_pipeline(system, ordered_protocols: list[str]) -> None:
     for name in ordered_protocols:
-        system.add_protocol(REGISTRY[name].cls(system))
+        protocol_cls = REGISTRY[name].load_cls()
+        system.add_protocol(protocol_cls(system))
 
 def main() -> None:
     args = build_parser().parse_args()
@@ -221,8 +223,6 @@ def main() -> None:
     #    sys.exit(1)
 if __name__ == "__main__":
     main()
-
-
 
 
 

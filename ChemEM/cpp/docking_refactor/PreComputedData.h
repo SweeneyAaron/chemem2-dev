@@ -43,7 +43,6 @@ struct ProteinData{
     std::vector<int> halogen_acceptor_roots;
     std::unordered_set<int> halogen_acceptors_set;
     std::vector<int> halogen_acceptor_root_by_atom;
-    std::vector<int> ion_mask;
 
 };
 
@@ -100,8 +99,6 @@ struct LigandIntraData {
     std::set<std::pair<int, int>> constrained_pairs_to_ignore;
     int n_torsions, torsion_end;
     std::vector<std::array<int,4>> ligand_torsion_idxs;
-    std::vector<std::vector<int>> ligand_torsion_windows;
-    int n_torsion_windows = 0;
     std::vector<std::vector<std::pair<int,double>>> ligand_torsion_scores;
 };
 

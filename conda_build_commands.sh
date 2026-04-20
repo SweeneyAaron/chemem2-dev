@@ -110,6 +110,10 @@ if conda build . --output-folder conda-dist --no-anaconda-upload; then
         tar -tf "$PACKAGE" | grep -E "\.(so|dll|dylib)$" || echo "No compiled modules found in package"
         
         echo ""
+        echo "Indexing local channel for mamba installation..."
+        conda index conda-dist
+
+        echo ""
         echo "Testing package installation..."
         
         # Test in a clean environment
@@ -117,7 +121,7 @@ if conda build . --output-folder conda-dist --no-anaconda-upload; then
         echo "Creating test environment: $TEST_ENV"
         conda create -n "$TEST_ENV" python=3.11 -y -q
         
-        if conda install -n "$TEST_ENV" "$PACKAGE" -y -q; then
+        if mamba install -n "$TEST_ENV" -c "file://$(pwd)/conda-dist" -c conda-forge chemem -y -q; then
             echo "Package installs successfully"
             
             # Test imports
@@ -148,6 +152,13 @@ except ImportError as e:
             else
                 echo "ERROR: Import tests failed"
             fi
+
+            echo "Testing CLI entry point..."
+            if conda run -n "$TEST_ENV" chemem --help > /dev/null; then
+                echo "SUCCESS: chemem CLI entry point works"
+            else
+                echo "ERROR: chemem CLI entry point failed"
+            fi
         else
             echo "ERROR: Package installation failed"
         fi
@@ -175,7 +186,7 @@ fi
 
 echo ""
 echo "Next steps:"
-echo "1. Test your package locally: conda install $PACKAGE"
+echo "1. Test your package locally: mamba install -c file://$(pwd)/conda-dist -c conda-forge chemem"
 echo "2. Upload to anaconda.org: anaconda upload $PACKAGE"
 echo "3. Or use in CI/CD for multi-platform builds"
 echo ""

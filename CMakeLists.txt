@@ -63,6 +63,36 @@ else()
   message(FATAL_ERROR "No conda prefix detected. Activate an environment or run under conda-build.")
 endif()
 
+# ---- macOS: keep RPATHs relocatable ----
+# Without this, CMake defaults to CMAKE_INSTALL_RPATH_USE_LINK_PATH=ON and
+# bakes the absolute build-env path (e.g.
+# /Users/aaron.sweeney/anaconda3/envs/chem111/lib) into every .so as an
+# LC_RPATH. conda-build then has to rewrite it with install_name_tool,
+# which invalidates the linker's ad-hoc code signature on macOS and
+# produces the `zsh: killed` / SIGKILL on import.
+if(APPLE)
+  set(CMAKE_MACOSX_RPATH ON)
+
+  # THE key line: do not inherit link-time library dirs into install RPATH.
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH OFF)
+
+  # Build-tree RPATH: point at the active conda env so in-tree imports
+  # (e.g. the post-build import tests in conda_build_commands.sh) still
+  # find RDKit/OpenMP before the package is installed.
+  set(CMAKE_BUILD_RPATH "${CONDA_HOST_PREFIX}/lib")
+
+  # Install RPATH: @loader_path-relative so the installed .so finds
+  # $PREFIX/lib regardless of where the target env lives on disk.
+  # Installed layout: $PREFIX/lib/python3.11/site-packages/ChemEM/<mod>.so
+  # Target dylibs:    $PREFIX/lib/
+  # -> four levels up from the .so lands at $PREFIX/lib.
+  set(CMAKE_INSTALL_RPATH "@loader_path/../../../..")
+
+  # Stripping a signed Mach-O also invalidates its signature. Let
+  # conda-build handle any binary post-processing.
+  set(CMAKE_INSTALL_DO_STRIP OFF)
+endif()
+
 # ---- Dependencies (no RDKit find_package!) ----
 find_package(Python REQUIRED COMPONENTS Development.Module Interpreter NumPy)
 find_package(pybind11 CONFIG REQUIRED)
@@ -207,6 +237,11 @@ set_target_properties(docking PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CHEMEM_PACKAGE_DIR}
   OUTPUT_NAME "docking"
 )
+install(TARGETS docking
+  LIBRARY DESTINATION ChemEM
+  RUNTIME DESTINATION ChemEM
+  ARCHIVE DESTINATION ChemEM
+)
 
 # ---- grid_maps ----
 pybind11_add_module(grid_maps
@@ -223,6 +258,11 @@ set_target_properties(grid_maps PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CHEMEM_PACKAGE_DIR}
   RUNTIME_OUTPUT_DIRECTORY ${CHEMEM_PACKAGE_DIR}
   OUTPUT_NAME "grid_maps"
+)
+install(TARGETS grid_maps
+  LIBRARY DESTINATION ChemEM
+  RUNTIME DESTINATION ChemEM
+  ARCHIVE DESTINATION ChemEM
 )
 
 # ---- ligand_fitting ----
@@ -243,6 +283,21 @@ set_target_properties(ligand_fitting PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CHEMEM_PACKAGE_DIR}
   RUNTIME_OUTPUT_DIRECTORY ${CHEMEM_PACKAGE_DIR}
   OUTPUT_NAME "ligand_fitting"
+)
+install(TARGETS ligand_fitting
+  LIBRARY DESTINATION ChemEM
+  RUNTIME DESTINATION ChemEM
+  ARCHIVE DESTINATION ChemEM
+)
+
+install(
+  DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ChemEM/
+  DESTINATION ChemEM
+  FILES_MATCHING
+    PATTERN "*.py"
+    PATTERN "*.json"
+    PATTERN "*.pkl"
+    PATTERN "*.txt"
 )
 
 # ---- convenience target ----

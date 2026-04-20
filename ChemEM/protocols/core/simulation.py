@@ -23,30 +23,43 @@ def first_missing_params(struct):
         if i.type is None: return ("improper", [i.atom1, i.atom2, i.atom3, i.atom4])
     return None
 
-def create_system(protein, ligand_list, solvent):
-    if not isinstance(ligand_list, list):
-        ligand_list = [ligand_list]
+def _is_ligand_object(obj):
+    """Duck-type check: Ligand has .complex_structure and .covalent_link."""
+    return hasattr(obj, "complex_structure") and hasattr(obj, "covalent_link")
 
-    for lig in ligand_list:
+
+def merge_structures(protein, ligand_structures):
+    """Merge protein + ligand parmed Structures via parmed's `+=` operator.
+
+    ligand_structures is a list of parmed Structure objects (not Ligand).
+    """
+    if not isinstance(ligand_structures, list):
+        ligand_structures = [ligand_structures]
+
+    for lig in ligand_structures:
         for i, res in enumerate(lig.residues):
-            if res.name == 'UNL': res.name = f'LIG_{i}'
+            if res.name == 'UNL':
+                res.name = f'LIG_{i}'
 
     complex_struc = protein
-    for lig in ligand_list:
+    for lig in ligand_structures:
         complex_struc += lig
+    return complex_struc
 
+
+def finalize_system_from_structure(complex_struc, solvent):
     kwargs = {
         'nonbondedMethod': NoCutoff,
         'nonbondedCutoff': 9.0 * unit.angstrom,
         'constraints': HBonds,
         'removeCMMotion': True,
     }
-    
+
     if solvent:
         kwargs['implicitSolvent'] = solvent
     else:
         kwargs['rigidWater'] = True
-    
+
     miss = first_missing_params(complex_struc)
     if miss:
         kind, atoms = miss
@@ -55,9 +68,40 @@ def create_system(protein, ligand_list, solvent):
             print(f"  {at.residue.name}:{at.name} (idx {at.idx})")
     else:
         print("No missing valence params found.")
-    
+
     system = complex_struc.createSystem(**kwargs)
     return complex_struc, system
+
+
+def create_system(protein, ligand_list, solvent):
+    """Build a merged OpenMM system from protein + ligands.
+
+    `ligand_list` may be a list of parmed Structures (legacy) OR a list of
+    ChemEM Ligand objects. If Ligand objects are passed, any CovalentLinkSpec
+    attached to them is applied (junction bond/angle/dihedral terms injected
+    into the merged structure and fragment-derived charges copied onto the
+    ligand) before createSystem is called.
+    """
+    if not isinstance(ligand_list, list):
+        ligand_list = [ligand_list]
+
+    ligand_objects = None
+    if ligand_list and _is_ligand_object(ligand_list[0]):
+        ligand_objects = ligand_list
+        ligand_structures = [lig.complex_structure for lig in ligand_objects]
+    else:
+        ligand_structures = ligand_list
+
+    complex_struc = merge_structures(protein, ligand_structures)
+
+    if ligand_objects is not None and any(
+        getattr(l, "covalent_link", None) for l in ligand_objects
+    ):
+        # Lazy import to avoid a circular import at module load time.
+        from ChemEM.parsers.covalent_fragment import inject_covalent_bonds
+        inject_covalent_bonds(complex_struc, ligand_objects)
+
+    return finalize_system_from_structure(complex_struc, solvent)
 
 def identify_indices_from_name(complex_structure):
         all_ligand_indices = [

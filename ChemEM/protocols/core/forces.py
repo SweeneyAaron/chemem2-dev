@@ -158,6 +158,30 @@ class ForceBuilder:
         return cf
 
     @staticmethod
+    def create_pocket_repulsive_force(pocket_depth_map,
+                                      k_repel: float,
+                                      k_name: str = "k_repel",
+                                      normalise: bool = True,
+                                      force_group: int = 8):
+        """
+        Grid-based repulsive force that pushes atoms out of binding-site pockets.
+
+        The grid is a pocket-depth field (positive inside pockets, zero outside).
+        Atoms added via `addBond([idx])` receive an energy
+            E = k_repel * pocket_depth(x, y, z)^2
+        so the gradient points down the depth gradient — out of the pocket.
+        """
+        func = ForceBuilder.create_continuous_3d_function(
+            pocket_depth_map, blur=0.0, normalise=normalise
+        )
+        cf = CustomCompoundBondForce(1, "")
+        cf.addTabulatedFunction("pocket_depth", func)
+        cf.addGlobalParameter(k_name, float(k_repel))
+        cf.setEnergyFunction(f"{k_name} * pocket_depth(x1, y1, z1)^2")
+        cf.setForceGroup(force_group)
+        return cf
+
+    @staticmethod
     def create_positional_pin(atom_indices, ref_positions_nm, k_name="k_pin"):
         """Creates a CustomExternalForce for pinning atoms."""
         expr = f"{k_name}*((x-x0)^2 + (y-y0)^2 + (z-z0)^2)"
@@ -171,6 +195,21 @@ class ForceBuilder:
             x0, y0, z0 = map(float, ref_positions_nm[int(i)])
             f.addParticle(int(i), [x0 * unit.nanometer, y0 * unit.nanometer, z0 * unit.nanometer])
         
+        return f
+
+    @staticmethod
+    def create_distance_restraint(restraints, k_name="k_dist"):
+        """Creates harmonic distance restraints for one or more atom pairs."""
+        f = CustomBondForce(f"{k_name}*(r-r0)^2")
+        f.addGlobalParameter(
+            k_name,
+            0.0 * unit.kilojoule_per_mole / unit.nanometer**2,
+        )
+        f.addPerBondParameter("r0")
+
+        for atom_i, atom_j, r0_nm in restraints:
+            f.addBond(int(atom_i), int(atom_j), [float(r0_nm) * unit.nanometer])
+
         return f
 
     @staticmethod

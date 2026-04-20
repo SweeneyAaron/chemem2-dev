@@ -25,3 +25,4 @@
 * **Ligand State Synchronization:** Fixed SDF export bugs by ensuring optimization coordinates are synchronized to both the RDKit Mol object and the ParmEd structure simultaneously.
 * **Tether Stability:** Fixed simulation crashes (NaN forces) during batch minimization by ensuring flat-bottom tethers strictly exclude hydrogen atoms.
 
+

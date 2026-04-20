@@ -6,6 +6,4 @@
 # This module was developed by:
 #   Aaron Sweeney    <aaron.sweeney AT cssb-hamburg.de>
 
-
-
 __version__ = '2.0.0'

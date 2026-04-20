@@ -35,23 +35,25 @@ Adding a new protocol
 
 
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Callable, Optional
-
-from ChemEM.protocols._docking.docking import Docking
-from ChemEM.protocols.binding_site import BindingSite
-from ChemEM.protocols.alpha_mask import AlphaMask
-from ChemEM.protocols.confidence_map import ConfidenceMap
-from ChemEM.protocols.refine.minimize import Refine
-from ChemEM.protocols.mapQ_score.mapQ_score import ScoreMapQ
-from ChemEM.protocols.refine.ion_fixer import IonFixer
 
 @dataclass(frozen=True)
 class ProtocolSpec:
     name: str                 
-    cls: type                 
+    class_path: str
     deps: Callable            
     add_args: Optional[Callable] = None
     help: str = ""
+
+    def load_cls(self) -> type:
+        module_name, _, class_name = self.class_path.partition(":")
+        if not module_name or not class_name:
+            raise ValueError(
+                f"Invalid protocol class path for '{self.name}': {self.class_path}"
+            )
+        module = import_module(module_name)
+        return getattr(module, class_name)
     
 def binding_site_deps(args):
     return tuple()
@@ -188,7 +190,21 @@ def add_refine_args(p):
     
     g.add_argument('--local-refine', action="store_true")
     g.add_argument('--local-radius', type=float, default = 12.0)
-    g.add_argument('--anneling', action="store_true")
+    g.add_argument('--annealing', action="store_true")   
+    g.add_argument('--pre-minimise', action="store_true")
+    g.add_argument('--post-minimise', action="store_true")
+    g.add_argument('--base-temp', type=float, default=50.0)
+    g.add_argument('--heat-to-k', type=float, default=150.0)
+    g.add_argument('--temp-step-k', type=float, default=5.0)
+    g.add_argument('--steps-per-temp', type=int, default=25)
+    g.add_argument('--high-hold-ps', type=float, default=0.0)
+    g.add_argument('--cycles', type=int, default=1)
+    g.add_argument('--seed', type=int, default=1)
+    g.add_argument('--com-restraint', action="store_true")
+    g.add_argument('--com-restraint-dist', type=float, default=2.0)
+    g.add_argument('--com-restrain-kcal-per-mol', type=float, default=20.0)
+    g.add_argument('--com_restrain_alpha_per_nm', type=float, default=80.0)
+
     
     
 def mapq_score_deps(args):
@@ -207,6 +223,7 @@ def add_ion_fixer_args(p):
     g = p.add_argument_group("Ion Fixer")
     g.add_argument("--ion-type", type=str)
     g.add_argument("--coordination-geometry", type=str, default='Octahedral', help="Coordination geometry : Octahedral |Square Planar | linear | Trigonal Bipyramidal | Triganal Planer | Square Pyrimidal | Tetrahedral | Pentagonal Bipyrimidal")
+    
     g.add_argument(
         "--atom-spec",
         dest="atom_specs",
@@ -229,23 +246,89 @@ def add_ion_fixer_args(p):
             "Format example: A:ASP:45:OD1 or LIG:0:O3"
         ))
     
+    g.add_argument(
+        "--pin-spec",
+        dest="pin_specs",
+        action="append",
+        default=[],
+        help=(
+            "Atom specification to pin during refinement/annealing. "
+            "Repeat this option multiple times. "
+            "Format example: A:ASP:45:OD1 or LIG:0:O3"
+        ),
+    )
+    
+    g.add_argument(
+        "--distance-spec",
+        dest="distance_specs",
+        action="append",
+        default=[],
+        help=(
+            "Distance restraint specification. Repeat this option multiple times. "
+            "Format: <atom1-spec>;<atom2-spec>;<distance-in-A>. "
+            "Example: A:ASP:45:OD1;LIG:0:O3;2.1"
+        ),
+    )
+    
     g.add_argument("--ion-forcefield",type=str,default="amber14/tip3pfb.xml")
+    g.add_argument("--k_ang", type=float, default=None)
+    g.add_argument("--distance_fraction", type=float, default=0.9)
+    g.add_argument("--n-cycles", type=int, default=60)
     
     
+def lining_refine_deps(args):
+    # Needs binding_site to obtain site.distance_map + lining_residues.
+    return ("binding_site",)
+
+def add_lining_refine_args(p):
+    g = p.add_argument_group("Lining-residue refinement")
+
+    # --- Detection (density-blob centroid method) ---
+    g.add_argument("--lr-sigma-thr", type=float, default=1.5,
+                   help="Map threshold in sigma (mean + sigma*std) for blob seeding")
+    g.add_argument("--lr-crop-pad", type=float, default=2.0,
+                   help="Padding around site bounding box when cropping the map (Å)")
+    g.add_argument("--lr-blob-vol-min", type=float, default=20.0,
+                   help="Minimum connected-component volume to be considered a ligand blob (Å³)")
+    g.add_argument("--lr-centroid-depth-thr", type=float, default=2.0,
+                   help="Minimum pocket depth at the blob centroid (Å)")
+    g.add_argument("--lr-misfit-frac", type=float, default=0.5,
+                   help="Fraction of a residue's heavy sidechain atoms that must be in-blob")
+    g.add_argument("--lr-allow-backbone-bridge", action="store_true",
+                   help="Do not reject blobs that touch backbone density")
+    g.add_argument("--lr-backbone-bridge-dist", type=float, default=0.8,
+                   help="Backbone-neighbour distance used by the bridge filter (Å)")
+
+    # --- Refinement ---
+    g.add_argument("--lr-neighborhood", type=float, default=10.0,
+                   help="Radius around flagged atoms for the refinement subset (Å)")
+    g.add_argument("--lr-global-k", type=float, default=150.0,
+                   help="Density-map global k for the local refinement")
+    g.add_argument("--lr-backbone-k", type=float, default=1000.0,
+                   help="Soft positional pin k for non-flagged heavy atoms")
+    g.add_argument("--lr-repel-k", type=float, default=500.0,
+                   help="Strength of the pocket-repulsive force applied to flagged atoms")
+
+
+def export_deps(args):
+    return tuple()
+
+def add_export_args(p):
+    pass
 
 
 SHORT_ALIASES = {
     "binding_site": "-b",
     "dock": "-d",
     "alpha_mask" : "-am",
-    
+    "lining_refine": "-lr",
 }
 
 
 REGISTRY = {
     "binding_site": ProtocolSpec(
         name="binding_site",
-        cls=BindingSite,
+        class_path="ChemEM.protocols.binding_site:BindingSite",
         deps=binding_site_deps,
         add_args=add_binding_site_args,
         help="Prepare/identify binding site",
@@ -253,7 +336,7 @@ REGISTRY = {
     
     "confidence_map": ProtocolSpec(
         name="confidence_map",
-        cls=ConfidenceMap,
+        class_path="ChemEM.protocols.confidence_map:ConfidenceMap",
         deps=confidence_map_deps,
         add_args=add_confidence_map_args,
         help="FDR Confidence map",
@@ -261,7 +344,7 @@ REGISTRY = {
     
     "alpha_mask": ProtocolSpec(
         name="alpha_mask",
-        cls=AlphaMask,
+        class_path="ChemEM.protocols.alpha_mask:AlphaMask",
         deps=alpha_mask_deps,
         add_args=add_alpha_mask_args,
         help="Segment ligand density",
@@ -269,31 +352,46 @@ REGISTRY = {
     
     "dock": ProtocolSpec(
         name="dock",
-        cls=Docking,
+        class_path="ChemEM.protocols._docking.docking:Docking",
         deps=dock_deps,
         add_args=add_dock_args,
         help="Dock ligands into the binding site",
     ),
     "refine": ProtocolSpec(
         name="refine",
-        #cls=PostProcess,
-        cls=Refine,
+        class_path="ChemEM.protocols.refine.minimize:Refine",
         deps=refine_deps,
         add_args=add_refine_args,
         help="MD-Refine ligand to density map"),
     
     "ion_fixer": ProtocolSpec(
         name="ion_fixer",
-        cls=IonFixer,
+        class_path="ChemEM.protocols.refine.ion_fixer:IonFixer",
         deps=ion_fixer_deps,
         add_args=add_ion_fixer_args,
         help="Refine Ion Cordination in cryoEM maps"),
     
     "mapq_score": ProtocolSpec(
         name="mapq_score",
-        cls=ScoreMapQ,
+        class_path="ChemEM.protocols.mapQ_score.mapQ_score:ScoreMapQ",
         deps=mapq_score_deps,
         add_args=add_mapq_score_args,
         help="Score Ligand MapQ",
     ),
+    "lining_refine": ProtocolSpec(
+        name="lining_refine",
+        class_path="ChemEM.protocols.refine.lining_refine:LiningRefine",
+        deps=lining_refine_deps,
+        add_args=add_lining_refine_args,
+        help="Refine pocket-lining sidechains out of ligand-density regions",
+    ),
+    "export" : ProtocolSpec(
+        name="export",
+        class_path="ChemEM.protocols.export_simulation.export_simulation:ExportSimulation",
+        deps=export_deps,
+        add_args=add_export_args,
+        help="Export Simulation parameters",
+    ),
+        
+        
 }
