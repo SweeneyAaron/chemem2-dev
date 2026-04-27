@@ -1,7 +1,9 @@
 #data and working directory 
 protein = ./test/7jjo_protein.pdb
 #ligand = ./test/Ligand_dep_charged.sdf
-ligand = ./test/Ligand_dep.sdf
+#ligand = ./test/Ligand_dep.sdf
+#ligand = /Users/aaron.sweeney/Documents/chemem2_build/ChemEM2_feb26/chemem2-dev/test/test_output/docking/binding_site_0_Ligand_0/Ligand_0.sdf
+ligand = /Users/aaron.sweeney/Documents/chemem2_build/ChemEM2_build_sep_11/test/test_output/docking/binding_site_0_Ligand_0/Ligand_1.sdf 
 #ligand = ./test/Ligand_0.sdf
 #ligand = CC(C)NCC(C1=CC=C(C=C1)O)O
 #ligand = CC(C)NC[C@@H](c1ccc(c(c1)O)O)O
