@@ -1,0 +1,271 @@
+*===========================================================================*
+|                          Smart Ligand Refinement                          |
+*===========================================================================*
+[smart_ligand_refine] ligand 0: start
+[smart_ligand_refine] Starting near-fit ligand repair: 31 atoms, CCC=0.0331, mean Q=0.7224, low-tail Q=0.5127, worst atoms=[6, 0, 13, 2]
+[smart_ligand_refine] Starting near-fit ligand repair: 31 atoms, CCC=0.0331, mean Q=0.7224, low-tail Q=0.5127, worst atoms=[6, 0, 13, 2]
+[smart_ligand_refine] Detected 8 rotatable torsion directions; built 8 torsion profiles.
+[smart_ligand_refine] Detected 8 torsion directions; built 8 torsion profiles.
+[smart_ligand_refine] Macrocycle 1/3 (broad_repair): CCC=0.0331, mean Q=0.7224, low-tail Q=0.5127, worst atoms=[6, 0, 13, 2]; anchors=0, repair=4, weak/absent=0, uncertain=11; geometry energy=-1589.22 kcal/mol
+[smart_ligand_refine] Macrocycle 1/3 (broad_repair): CCC=0.0331, mean Q=0.7224, low-tail Q=0.5127, worst atoms=[6, 0, 13, 2]; anchors=0, repair=4, weak/absent=0, uncertain=11
+[smart_ligand_refine]   Stage 'rigid_micro_jiggle': evaluating 39 candidate move(s).
+[smart_ligand_refine]     candidate 1: rigid_micro_jiggle, score=+0.01581, acceptable; dCCC=+0.0011, dLowQ=+0.0102, dLocal=+0.0193, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: rigid_micro_jiggle, score=+0.00593, acceptable; dCCC=-0.0000, dLowQ=+0.0104, dLocal=+0.0016, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: rigid_micro_jiggle, score=-0.00088, rejected: score_not_improved; dCCC=-0.0004, dLowQ=+0.0080, dLocal=-0.0090, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: rigid_micro_jiggle, score=-0.00411, rejected: score_not_improved; dCCC=-0.0008, dLowQ=+0.0089, dLocal=-0.0154, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 5: rigid_micro_jiggle, score=-0.00494, rejected: score_not_improved; dCCC=-0.0000, dLowQ=+0.0060, dLocal=-0.0158, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Stage 'rigid_micro_jiggle': generated 39, accepted 1, rejected 38, best score 0.01580748439259405
+[smart_ligand_refine]   Accepted 'rigid_micro_jiggle' with score=+0.01581; dCCC=+0.0011, dLowQ=+0.0102, dLocal=+0.0193, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Ranked 8 torsion(s) for repair in this macrocycle.
+[smart_ligand_refine] Ranked 8 torsion(s) for repair.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-14.85404, rejected: geometry_rejected; dCCC=-0.0028, dLowQ=-0.2054, dLocal=-0.0799, anchorRMSD=0.000 A, geomPenalty=29.417, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-522.22172, rejected: geometry_rejected; dCCC=-0.0142, dLowQ=-0.4981, dLocal=-0.2068, anchorRMSD=0.000 A, geomPenalty=1043.710, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-666.35186, rejected: geometry_rejected; dCCC=-0.0106, dLowQ=-0.3400, dLocal=-0.1526, anchorRMSD=0.000 A, geomPenalty=1332.178, clashPenalty=0.006
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-200196602.57853, rejected: geometry_rejected; dCCC=-0.0199, dLowQ=-0.7633, dLocal=-0.1978, anchorRMSD=0.000 A, geomPenalty=400393203.885, clashPenalty=0.136
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-127467195338.54529, rejected: geometry_rejected; dCCC=-0.0296, dLowQ=-1.0074, dLocal=-0.3397, anchorRMSD=0.000 A, geomPenalty=254934390675.650, clashPenalty=0.017
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score -14.854037529392404
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=5.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-18.97264, rejected: geometry_rejected; dCCC=-0.0007, dLowQ=-0.0152, dLocal=-0.0169, anchorRMSD=0.000 A, geomPenalty=37.909, clashPenalty=0.001
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-86.30317, rejected: geometry_rejected; dCCC=-0.0028, dLowQ=-0.1840, dLocal=-0.0627, anchorRMSD=0.000 A, geomPenalty=172.349, clashPenalty=0.002
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-40519.84306, rejected: geometry_rejected; dCCC=-0.0048, dLowQ=-0.3942, dLocal=-0.0870, anchorRMSD=0.000 A, geomPenalty=81039.122, clashPenalty=0.037
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-9391992.18458, rejected: geometry_rejected; dCCC=-0.0063, dLowQ=-0.4479, dLocal=-0.1328, anchorRMSD=0.000 A, geomPenalty=18783983.638, clashPenalty=0.069
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-191554047.21419, rejected: geometry_rejected; dCCC=-0.0087, dLowQ=-0.5307, dLocal=-0.1286, anchorRMSD=0.000 A, geomPenalty=383108093.631, clashPenalty=0.060
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score -18.972641612036718
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=5.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-47.85287, rejected: geometry_rejected; dCCC=-0.0115, dLowQ=-0.8793, dLocal=-0.1934, anchorRMSD=0.000 A, geomPenalty=94.610, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-1720.40434, rejected: geometry_rejected; dCCC=-0.0162, dLowQ=-1.0935, dLocal=-0.2603, anchorRMSD=0.000 A, geomPenalty=3439.422, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-54772.96540, rejected: geometry_rejected; dCCC=-0.0183, dLowQ=-0.9529, dLocal=-0.2584, anchorRMSD=0.000 A, geomPenalty=109544.683, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-4694168.95204, rejected: geometry_rejected; dCCC=-0.0225, dLowQ=-0.6832, dLocal=-0.2236, anchorRMSD=0.000 A, geomPenalty=9388336.842, clashPenalty=0.055
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-31837478.54414, rejected: geometry_rejected; dCCC=-0.0245, dLowQ=-0.7569, dLocal=-0.2335, anchorRMSD=0.000 A, geomPenalty=63674955.852, clashPenalty=0.098
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score -47.85287169079865
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=5.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-5.38866, rejected: geometry_rejected; dCCC=-0.0021, dLowQ=-0.0514, dLocal=-0.0542, anchorRMSD=0.000 A, geomPenalty=10.667, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-269.30776, rejected: geometry_rejected; dCCC=-0.0083, dLowQ=-0.4695, dLocal=-0.1343, anchorRMSD=0.000 A, geomPenalty=537.995, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-160061.08216, rejected: geometry_rejected; dCCC=-0.0143, dLowQ=-0.6942, dLocal=-0.1987, anchorRMSD=0.000 A, geomPenalty=320121.225, clashPenalty=0.009
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-1151281.99106, rejected: geometry_rejected; dCCC=-0.0167, dLowQ=-0.2810, dLocal=-0.1597, anchorRMSD=0.000 A, geomPenalty=2302563.448, clashPenalty=0.030
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-2241374.27385, rejected: geometry_rejected; dCCC=-0.0136, dLowQ=-0.4048, dLocal=-0.1441, anchorRMSD=0.000 A, geomPenalty=4482747.836, clashPenalty=0.068
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score -5.388663208298661
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=5.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-392.23829, rejected: geometry_rejected; dCCC=-0.0011, dLowQ=-0.0239, dLocal=-0.0292, anchorRMSD=0.000 A, geomPenalty=784.420, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-9058.59988, rejected: geometry_rejected; dCCC=-0.0025, dLowQ=-0.1524, dLocal=-0.0642, anchorRMSD=0.000 A, geomPenalty=18116.959, clashPenalty=0.010
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-140803.26731, rejected: geometry_rejected; dCCC=-0.0041, dLowQ=-0.3131, dLocal=-0.1011, anchorRMSD=0.000 A, geomPenalty=281606.069, clashPenalty=0.021
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-8960524.10114, rejected: geometry_rejected; dCCC=-0.0030, dLowQ=-0.2945, dLocal=-0.0717, anchorRMSD=0.000 A, geomPenalty=17921047.707, clashPenalty=0.061
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-11897565.47873, rejected: geometry_rejected; dCCC=-0.0110, dLowQ=-0.4788, dLocal=-0.1442, anchorRMSD=0.000 A, geomPenalty=23795130.274, clashPenalty=0.019
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score -392.2382902804661
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=5.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-7.19737, rejected: geometry_rejected; dCCC=-0.0005, dLowQ=-0.0565, dLocal=-0.0088, anchorRMSD=0.000 A, geomPenalty=14.329, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-18.29434, rejected: geometry_rejected; dCCC=-0.0010, dLowQ=-0.0941, dLocal=-0.0207, anchorRMSD=0.000 A, geomPenalty=36.472, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-77.89510, rejected: geometry_rejected; dCCC=-0.0016, dLowQ=-0.1154, dLocal=-0.0311, anchorRMSD=0.000 A, geomPenalty=155.640, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-81440.17742, rejected: geometry_rejected; dCCC=-0.0032, dLowQ=-0.5596, dLocal=-0.0737, anchorRMSD=0.000 A, geomPenalty=162879.667, clashPenalty=0.024
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-665977.09474, rejected: geometry_rejected; dCCC=-0.0024, dLowQ=-0.2853, dLocal=-0.0704, anchorRMSD=0.000 A, geomPenalty=1331953.765, clashPenalty=0.032
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score -7.197374556352663
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=5.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=+0.01192, acceptable; dCCC=-0.0012, dLowQ=+0.0326, dLocal=-0.0064, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-5.16971, rejected: geometry_rejected; dCCC=-0.0003, dLowQ=-0.0427, dLocal=-0.0093, anchorRMSD=0.000 A, geomPenalty=10.287, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-5.96779, rejected: geometry_rejected; dCCC=-0.0005, dLowQ=-0.0508, dLocal=-0.0148, anchorRMSD=0.000 A, geomPenalty=11.869, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-35.51305, rejected: geometry_rejected; dCCC=-0.0013, dLowQ=-0.0238, dLocal=-0.0178, anchorRMSD=0.000 A, geomPenalty=70.982, clashPenalty=0.000
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-75.72976, rejected: geometry_rejected; dCCC=-0.0005, dLowQ=-0.0436, dLocal=-0.0151, anchorRMSD=0.000 A, geomPenalty=151.398, clashPenalty=0.001
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 1, rejected 4, best score 0.011922394290949288
+[smart_ligand_refine]   Accepted 'torsion_minima' with score=+0.01192; dCCC=-0.0012, dLowQ=+0.0326, dLocal=-0.0064, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-0.02108, rejected: low_tail_q_degraded; dCCC=-0.0006, dLowQ=-0.0231, dLocal=-0.0178, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-0.03467, rejected: low_tail_q_degraded; dCCC=-0.0011, dLowQ=-0.0428, dLocal=-0.0244, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-0.72385, rejected: geometry_rejected; dCCC=-0.0026, dLowQ=-0.1708, dLocal=-0.0672, anchorRMSD=0.000 A, geomPenalty=1.204, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-2.62512, rejected: geometry_rejected; dCCC=-0.0028, dLowQ=-0.2482, dLocal=-0.0656, anchorRMSD=0.000 A, geomPenalty=4.931, clashPenalty=0.000
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-598.92456, rejected: geometry_rejected; dCCC=-0.0044, dLowQ=-0.5028, dLocal=-0.1203, anchorRMSD=0.000 A, geomPenalty=1197.217, clashPenalty=0.000
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score -0.021075194111104735
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=3, low_tail_q_degraded=2.
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 3, best score 0.08696831267546781
+[smart_ligand_refine] Branch walk depth 2: generated 72, kept 4, best score 0.06959253549575806
+[smart_ligand_refine] Branch walk depth 3: generated 116, kept 5, best score 0.07971483684604411
+[smart_ligand_refine] Branch walk depth 1: generated 29, kept 2, best score 0.06580012697914009
+[smart_ligand_refine] Branch walk depth 2: generated 58, kept 5, best score 0.05418864487814701
+[smart_ligand_refine] Branch walk depth 3: generated 120, kept 16, best score 0.4424626898708031
+[smart_ligand_refine] Branch walk depth 4: generated 384, kept 16, best score 0.6218273227526929
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 3, best score 0.08696831267546781
+[smart_ligand_refine] Branch walk depth 2: generated 72, kept 4, best score 0.06959253549575806
+[smart_ligand_refine] Branch walk depth 3: generated 116, kept 5, best score 0.07971483684604411
+[smart_ligand_refine] Branch walk depth 4: generated 145, kept 16, best score 0.2254139766710891
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 3, best score 0.08696831267546781
+[smart_ligand_refine] Branch walk depth 2: generated 72, kept 4, best score 0.06959253549575806
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 3, best score 0.08696831267546781
+[smart_ligand_refine]   Stage 'branch_rebuild': evaluating 44 candidate move(s).
+[smart_ligand_refine]     candidate 1: branch_rebuild, score=+0.00614, acceptable; dCCC=+0.0006, dLowQ=+0.0106, dLocal=+0.0004, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: branch_rebuild, score=+0.00467, acceptable; dCCC=+0.0003, dLowQ=+0.0137, dLocal=-0.0048, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: branch_rebuild, score=+0.00329, acceptable; dCCC=-0.0001, dLowQ=+0.0124, dLocal=-0.0056, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: branch_rebuild, score=+0.00000, acceptable; dCCC=+0.0000, dLowQ=+0.0000, dLocal=+0.0000, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 5: branch_rebuild, score=-0.00348, rejected: score_not_improved; dCCC=+0.0006, dLowQ=-0.0068, dLocal=-0.0013, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Stage 'branch_rebuild': generated 44, accepted 1, rejected 43, best score 0.00613600814408604
+[smart_ligand_refine]   Accepted 'branch_rebuild' with score=+0.00614; dCCC=+0.0006, dLowQ=+0.0106, dLocal=+0.0004, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]   Stage 'openmm_no_map_clean': evaluating 1 candidate move(s).
+[smart_ligand_refine]     candidate 1: openmm_no_map_clean, score=-0.02437, rejected: low_tail_q_degraded; dCCC=-0.0014, dLowQ=-0.0219, dLocal=-0.0240, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Stage 'openmm_no_map_clean': generated 1, accepted 0, rejected 1, best score -0.024369633801934902
+[smart_ligand_refine]   No move accepted in 'openmm_no_map_clean'. Rejections: low_tail_q_degraded=1.
+[smart_ligand_refine] End macrocycle 1: CCC=0.0337, mean Q=0.7369, low-tail Q=0.5661, worst atoms=[6, 2, 13, 0]
+[smart_ligand_refine] Macrocycle 2/3 (medium_repair): CCC=0.0337, mean Q=0.7369, low-tail Q=0.5661, worst atoms=[6, 2, 13, 0]; anchors=0, repair=2, weak/absent=0, uncertain=13; geometry energy=-2048.26 kcal/mol
+[smart_ligand_refine] Macrocycle 2/3 (medium_repair): CCC=0.0337, mean Q=0.7369, low-tail Q=0.5661, worst atoms=[6, 2, 13, 0]; anchors=0, repair=2, weak/absent=0, uncertain=13
+[smart_ligand_refine]   Stage 'rigid_micro_jiggle': evaluating 26 candidate move(s).
+[smart_ligand_refine]     candidate 1: rigid_micro_jiggle, score=+0.01328, acceptable; dCCC=-0.0015, dLowQ=+0.0451, dLocal=-0.0156, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: rigid_micro_jiggle, score=+0.01271, acceptable; dCCC=-0.0011, dLowQ=+0.0415, dLocal=-0.0138, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: rigid_micro_jiggle, score=+0.01222, acceptable; dCCC=-0.0007, dLowQ=+0.0292, dLocal=-0.0034, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: rigid_micro_jiggle, score=+0.00958, acceptable; dCCC=-0.0005, dLowQ=+0.0260, dLocal=-0.0057, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 5: rigid_micro_jiggle, score=+0.00412, acceptable; dCCC=-0.0009, dLowQ=+0.0122, dLocal=-0.0021, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Stage 'rigid_micro_jiggle': generated 26, accepted 1, rejected 25, best score 0.01328204392211283
+[smart_ligand_refine]   Accepted 'rigid_micro_jiggle' with score=+0.01328; dCCC=-0.0015, dLowQ=+0.0451, dLocal=-0.0156, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Ranked 6 torsion(s) for repair in this macrocycle.
+[smart_ligand_refine] Ranked 6 torsion(s) for repair.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-19.06395, rejected: geometry_rejected; dCCC=-0.0059, dLowQ=-0.3638, dLocal=-0.0996, anchorRMSD=0.000 A, geomPenalty=37.653, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-211.27519, rejected: geometry_rejected; dCCC=-0.0126, dLowQ=-0.6678, dLocal=-0.1869, anchorRMSD=0.000 A, geomPenalty=421.669, clashPenalty=0.001
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-998758.83734, rejected: geometry_rejected; dCCC=-0.0314, dLowQ=-0.9838, dLocal=-0.2953, anchorRMSD=0.000 A, geomPenalty=1997516.269, clashPenalty=0.032
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-1554530.33962, rejected: geometry_rejected; dCCC=-0.0173, dLowQ=-0.6223, dLocal=-0.2146, anchorRMSD=0.000 A, geomPenalty=3109059.767, clashPenalty=0.021
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-8742943.95628, rejected: geometry_rejected; dCCC=-0.0268, dLowQ=-0.9245, dLocal=-0.3167, anchorRMSD=0.000 A, geomPenalty=17485886.439, clashPenalty=0.089
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score -19.06395121559624
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=5.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-6.53686, rejected: geometry_rejected; dCCC=-0.0033, dLowQ=-0.2121, dLocal=-0.0724, anchorRMSD=0.000 A, geomPenalty=12.783, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-24.81562, rejected: geometry_rejected; dCCC=-0.0063, dLowQ=-0.2766, dLocal=-0.0606, anchorRMSD=0.000 A, geomPenalty=49.281, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-1198.44675, rejected: geometry_rejected; dCCC=-0.0108, dLowQ=-0.6973, dLocal=-0.1621, anchorRMSD=0.000 A, geomPenalty=2396.012, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-194764.28258, rejected: geometry_rejected; dCCC=-0.0159, dLowQ=-0.7775, dLocal=-0.1823, anchorRMSD=0.000 A, geomPenalty=389527.490, clashPenalty=0.042
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-511857.52982, rejected: geometry_rejected; dCCC=-0.0235, dLowQ=-0.7192, dLocal=-0.2435, anchorRMSD=0.000 A, geomPenalty=1023713.996, clashPenalty=0.027
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score -6.536863843760387
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=5.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=+0.00000, rejected: score_not_improved; dCCC=+0.0000, dLowQ=+0.0000, dLocal=+0.0000, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-15.28636, rejected: geometry_rejected; dCCC=-0.0004, dLowQ=-0.1460, dLocal=-0.0247, anchorRMSD=0.000 A, geomPenalty=30.401, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-161031.79676, rejected: geometry_rejected; dCCC=-0.0072, dLowQ=-0.5455, dLocal=-0.1245, anchorRMSD=0.000 A, geomPenalty=322062.901, clashPenalty=0.004
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-231585.32018, rejected: geometry_rejected; dCCC=-0.0294, dLowQ=-0.9890, dLocal=-0.3041, anchorRMSD=0.000 A, geomPenalty=463169.271, clashPenalty=0.009
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-1228821785.61732, rejected: geometry_rejected; dCCC=-0.0209, dLowQ=-0.9582, dLocal=-0.2456, anchorRMSD=0.000 A, geomPenalty=2457643569.861, clashPenalty=0.064
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score 0.0
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=4, score_not_improved=1.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-13.39025, rejected: geometry_rejected; dCCC=-0.0007, dLowQ=-0.0966, dLocal=-0.0348, anchorRMSD=0.000 A, geomPenalty=26.648, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-61.45026, rejected: geometry_rejected; dCCC=-0.0022, dLowQ=-0.3815, dLocal=-0.0706, anchorRMSD=0.000 A, geomPenalty=122.444, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-193.23159, rejected: geometry_rejected; dCCC=-0.0041, dLowQ=-0.6922, dLocal=-0.1105, anchorRMSD=0.000 A, geomPenalty=385.642, clashPenalty=0.005
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-1189560.34231, rejected: geometry_rejected; dCCC=-0.0084, dLowQ=-0.8162, dLocal=-0.1527, anchorRMSD=0.000 A, geomPenalty=2379119.645, clashPenalty=0.027
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-20251433.20445, rejected: geometry_rejected; dCCC=-0.0108, dLowQ=-0.6890, dLocal=-0.1577, anchorRMSD=0.000 A, geomPenalty=40502865.485, clashPenalty=0.028
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score -13.390250401989281
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=5.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-0.03930, rejected: low_tail_q_degraded; dCCC=+0.0003, dLowQ=-0.0770, dLocal=-0.0023, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-1.44546, rejected: geometry_rejected; dCCC=-0.0018, dLowQ=-0.2154, dLocal=-0.0558, anchorRMSD=0.000 A, geomPenalty=2.616, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-1.67789, rejected: geometry_rejected; dCCC=+0.0013, dLowQ=-0.0959, dLocal=-0.0035, anchorRMSD=0.000 A, geomPenalty=3.259, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-14.98390, rejected: geometry_rejected; dCCC=-0.0009, dLowQ=-0.1674, dLocal=-0.0380, anchorRMSD=0.000 A, geomPenalty=29.761, clashPenalty=0.000
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-2160.20658, rejected: geometry_rejected; dCCC=-0.0035, dLowQ=-0.5369, dLocal=-0.0957, anchorRMSD=0.000 A, geomPenalty=4319.774, clashPenalty=0.000
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 0, rejected 5, best score -0.039301199527184826
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=4, low_tail_q_degraded=1.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 5 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=+0.00733, acceptable; dCCC=+0.0003, dLowQ=+0.0157, dLocal=-0.0015, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=+0.00000, rejected: score_not_improved; dCCC=+0.0000, dLowQ=+0.0000, dLocal=+0.0000, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-631.85821, rejected: geometry_rejected; dCCC=+0.0003, dLowQ=-0.0769, dLocal=-0.0109, anchorRMSD=0.000 A, geomPenalty=1263.624, clashPenalty=0.003
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-17078.38222, rejected: geometry_rejected; dCCC=-0.0049, dLowQ=-0.6763, dLocal=-0.1010, anchorRMSD=0.000 A, geomPenalty=34155.953, clashPenalty=0.012
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-1219575.29704, rejected: geometry_rejected; dCCC=-0.0024, dLowQ=-0.4771, dLocal=-0.0867, anchorRMSD=0.000 A, geomPenalty=2439150.000, clashPenalty=0.013
+[smart_ligand_refine] Stage 'torsion_minima': generated 5, accepted 1, rejected 4, best score 0.0073348485559453155
+[smart_ligand_refine]   Accepted 'torsion_minima' with score=+0.00733; dCCC=+0.0003, dLowQ=+0.0157, dLocal=-0.0015, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 2, best score 0.017085379400453682
+[smart_ligand_refine] Branch walk depth 2: generated 54, kept 11, best score 0.15912789159134041
+[smart_ligand_refine] Branch walk depth 3: generated 297, kept 16, best score 0.04690521955490112
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 2, best score 0.017085379400453682
+[smart_ligand_refine] Branch walk depth 2: generated 54, kept 11, best score 0.15912789159134041
+[smart_ligand_refine] Branch walk depth 3: generated 297, kept 16, best score 0.04690521955490112
+[smart_ligand_refine] Branch walk depth 4: generated 432, kept 16, best score 0.6479564713350476
+[smart_ligand_refine] Branch walk depth 1: generated 27, kept 4, best score 0.0
+[smart_ligand_refine] Branch walk depth 2: generated 108, kept 16, best score 0.12737826755299103
+[smart_ligand_refine] Branch walk depth 3: generated 432, kept 16, best score 0.9944257719151137
+[smart_ligand_refine] Branch walk depth 4: generated 384, kept 16, best score 0.9665139296501244
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 2, best score 0.017085379400453682
+[smart_ligand_refine] Branch walk depth 2: generated 54, kept 11, best score 0.15912789159134041
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 2, best score 0.017085379400453682
+[smart_ligand_refine]   Stage 'branch_rebuild': evaluating 61 candidate move(s).
+[smart_ligand_refine]     candidate 1: branch_rebuild, score=+0.00000, acceptable; dCCC=+0.0000, dLowQ=+0.0000, dLocal=+0.0000, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: branch_rebuild, score=+0.00000, acceptable; dCCC=+0.0000, dLowQ=+0.0000, dLocal=+0.0000, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: branch_rebuild, score=-0.01585, rejected: score_not_improved; dCCC=-0.0007, dLowQ=-0.0125, dLocal=-0.0162, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.001
+[smart_ligand_refine]     candidate 4: branch_rebuild, score=-0.02132, rejected: low_tail_q_degraded; dCCC=-0.0006, dLowQ=-0.0235, dLocal=-0.0164, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.001
+[smart_ligand_refine]     candidate 5: branch_rebuild, score=-0.02874, rejected: low_tail_q_degraded; dCCC=-0.0012, dLowQ=-0.0282, dLocal=-0.0202, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.003
+[smart_ligand_refine] Stage 'branch_rebuild': generated 61, accepted 1, rejected 60, best score 0.0
+[smart_ligand_refine]   Accepted 'branch_rebuild' with score=+0.00000; dCCC=+0.0000, dLowQ=+0.0000, dLocal=+0.0000, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]   Stage 'openmm_no_map_clean': evaluating 1 candidate move(s).
+[smart_ligand_refine]     candidate 1: openmm_no_map_clean, score=-0.05023, rejected: low_tail_q_degraded; dCCC=-0.0008, dLowQ=-0.0802, dLocal=-0.0186, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Stage 'openmm_no_map_clean': generated 1, accepted 0, rejected 1, best score -0.05023119739984555
+[smart_ligand_refine]   No move accepted in 'openmm_no_map_clean'. Rejections: low_tail_q_degraded=1.
+[smart_ligand_refine] End macrocycle 2: CCC=0.0324, mean Q=0.7483, low-tail Q=0.6269, worst atoms=[6, 13, 2, 8]
+[smart_ligand_refine] Macrocycle 3/3 (polish): CCC=0.0324, mean Q=0.7483, low-tail Q=0.6269, worst atoms=[6, 13, 2, 8]; anchors=0, repair=1, weak/absent=0, uncertain=14; geometry energy=-2082.82 kcal/mol
+[smart_ligand_refine] Macrocycle 3/3 (polish): CCC=0.0324, mean Q=0.7483, low-tail Q=0.6269, worst atoms=[6, 13, 2, 8]; anchors=0, repair=1, weak/absent=0, uncertain=14
+[smart_ligand_refine]   Stage 'rigid_micro_jiggle': evaluating 26 candidate move(s).
+[smart_ligand_refine]     candidate 1: rigid_micro_jiggle, score=+0.00942, acceptable; dCCC=+0.0011, dLowQ=-0.0050, dLocal=+0.0218, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: rigid_micro_jiggle, score=+0.00835, acceptable; dCCC=+0.0012, dLowQ=-0.0025, dLocal=+0.0168, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: rigid_micro_jiggle, score=+0.00731, acceptable; dCCC=+0.0009, dLowQ=-0.0032, dLocal=+0.0161, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: rigid_micro_jiggle, score=+0.00604, acceptable; dCCC=+0.0004, dLowQ=-0.0010, dLocal=+0.0123, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 5: rigid_micro_jiggle, score=+0.00297, acceptable; dCCC=+0.0002, dLowQ=+0.0059, dLocal=-0.0003, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Stage 'rigid_micro_jiggle': generated 26, accepted 1, rejected 25, best score 0.009424239172803169
+[smart_ligand_refine]   Accepted 'rigid_micro_jiggle' with score=+0.00942; dCCC=+0.0011, dLowQ=-0.0050, dLocal=+0.0218, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Ranked 4 torsion(s) for repair in this macrocycle.
+[smart_ligand_refine] Ranked 4 torsion(s) for repair.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 11 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-169.53676, rejected: geometry_rejected; dCCC=-0.0123, dLowQ=-0.7134, dLocal=-0.2158, anchorRMSD=0.000 A, geomPenalty=338.118, clashPenalty=0.001
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-1421.23259, rejected: geometry_rejected; dCCC=-0.0158, dLowQ=-0.9295, dLocal=-0.2578, anchorRMSD=0.000 A, geomPenalty=2841.241, clashPenalty=0.003
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-14828.23723, rejected: geometry_rejected; dCCC=-0.0173, dLowQ=-1.0753, dLocal=-0.2737, anchorRMSD=0.000 A, geomPenalty=29655.089, clashPenalty=0.001
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-1093842.75685, rejected: geometry_rejected; dCCC=-0.0206, dLowQ=-1.1074, dLocal=-0.2957, anchorRMSD=0.000 A, geomPenalty=2187684.069, clashPenalty=0.000
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-34921028.44120, rejected: geometry_rejected; dCCC=-0.0142, dLowQ=-0.8560, dLocal=-0.2101, anchorRMSD=0.000 A, geomPenalty=69842055.592, clashPenalty=0.098
+[smart_ligand_refine] Stage 'torsion_minima': generated 11, accepted 0, rejected 11, best score -169.53676221335155
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=11.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 11 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-4.99581, rejected: geometry_rejected; dCCC=-0.0047, dLowQ=-0.1925, dLocal=-0.0578, anchorRMSD=0.000 A, geomPenalty=9.732, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-6.77099, rejected: geometry_rejected; dCCC=-0.0037, dLowQ=-0.2282, dLocal=-0.0857, anchorRMSD=0.000 A, geomPenalty=13.221, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-37.35238, rejected: geometry_rejected; dCCC=-0.0063, dLowQ=-0.3051, dLocal=-0.0643, anchorRMSD=0.000 A, geomPenalty=74.323, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-897.26769, rejected: geometry_rejected; dCCC=-0.0082, dLowQ=-0.3898, dLocal=-0.0922, anchorRMSD=0.000 A, geomPenalty=1794.037, clashPenalty=0.000
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-973.17618, rejected: geometry_rejected; dCCC=-0.0108, dLowQ=-0.7013, dLocal=-0.1808, anchorRMSD=0.000 A, geomPenalty=1945.449, clashPenalty=0.000
+[smart_ligand_refine] Stage 'torsion_minima': generated 11, accepted 0, rejected 11, best score -4.995812517176142
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=11.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 11 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-5.62539, rejected: geometry_rejected; dCCC=-0.0026, dLowQ=-0.0913, dLocal=-0.0360, anchorRMSD=0.000 A, geomPenalty=11.118, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-12.02064, rejected: geometry_rejected; dCCC=-0.0039, dLowQ=-0.1495, dLocal=-0.0627, anchorRMSD=0.000 A, geomPenalty=23.821, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-17.61581, rejected: geometry_rejected; dCCC=+0.0004, dLowQ=-0.1359, dLocal=-0.0134, anchorRMSD=0.000 A, geomPenalty=35.083, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-24.12396, rejected: geometry_rejected; dCCC=-0.0048, dLowQ=-0.2206, dLocal=-0.0751, anchorRMSD=0.000 A, geomPenalty=47.943, clashPenalty=0.000
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-1187.01200, rejected: geometry_rejected; dCCC=-0.0243, dLowQ=-0.8691, dLocal=-0.3005, anchorRMSD=0.000 A, geomPenalty=2372.806, clashPenalty=0.000
+[smart_ligand_refine] Stage 'torsion_minima': generated 11, accepted 0, rejected 11, best score -5.6253851408300415
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=11.
+[smart_ligand_refine]   Stage 'torsion_minima': evaluating 11 candidate move(s).
+[smart_ligand_refine]     candidate 1: torsion_minima, score=-0.83266, rejected: anchor_rmsd_exceeded; dCCC=-0.0021, dLowQ=-0.0939, dLocal=-0.0485, anchorRMSD=0.759 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: torsion_minima, score=-1.14413, rejected: anchor_rmsd_exceeded; dCCC=-0.0026, dLowQ=-0.2028, dLocal=-0.0600, anchorRMSD=1.010 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: torsion_minima, score=-6.37750, rejected: geometry_rejected; dCCC=-0.0041, dLowQ=-0.3639, dLocal=-0.0764, anchorRMSD=1.259 A, geomPenalty=9.788, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: torsion_minima, score=-87.41727, rejected: geometry_rejected; dCCC=-0.0030, dLowQ=-0.3228, dLocal=-0.0598, anchorRMSD=1.010 A, geomPenalty=172.423, clashPenalty=0.001
+[smart_ligand_refine]     candidate 5: torsion_minima, score=-224.71516, rejected: geometry_rejected; dCCC=-0.0058, dLowQ=-0.8843, dLocal=-0.1087, anchorRMSD=1.990 A, geomPenalty=444.432, clashPenalty=0.007
+[smart_ligand_refine] Stage 'torsion_minima': generated 11, accepted 0, rejected 11, best score -0.832658195058027
+[smart_ligand_refine]   No move accepted in 'torsion_minima'. Rejections: geometry_rejected=9, anchor_rmsd_exceeded=2.
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 2, best score 0.024029082098207588
+[smart_ligand_refine] Branch walk depth 2: generated 54, kept 11, best score 0.14108848624542367
+[smart_ligand_refine] Branch walk depth 3: generated 297, kept 16, best score 0.07756363269616506
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 2, best score 0.024029082098207588
+[smart_ligand_refine] Branch walk depth 2: generated 54, kept 11, best score 0.14108848624542367
+[smart_ligand_refine] Branch walk depth 3: generated 297, kept 16, best score 0.07756363269616506
+[smart_ligand_refine] Branch walk depth 4: generated 432, kept 16, best score 0.6164763875540158
+[smart_ligand_refine] Branch walk depth 1: generated 27, kept 1, best score 0.0
+[smart_ligand_refine] Branch walk depth 2: generated 27, kept 1, best score 0.0
+[smart_ligand_refine] Branch walk depth 3: generated 27, kept 2, best score 0.024269012693489633
+[smart_ligand_refine] Branch walk depth 4: generated 48, kept 16, best score 0.0
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 2, best score 0.024029082098207588
+[smart_ligand_refine] Branch walk depth 2: generated 54, kept 11, best score 0.14108848624542367
+[smart_ligand_refine] Branch walk depth 1: generated 24, kept 2, best score 0.024029082098207588
+[smart_ligand_refine]   Stage 'branch_rebuild': evaluating 61 candidate move(s).
+[smart_ligand_refine]     candidate 1: branch_rebuild, score=+0.00000, acceptable; dCCC=+0.0000, dLowQ=+0.0000, dLocal=+0.0000, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 2: branch_rebuild, score=+0.00000, acceptable; dCCC=+0.0000, dLowQ=+0.0000, dLocal=+0.0000, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 3: branch_rebuild, score=+0.00000, acceptable; dCCC=+0.0000, dLowQ=+0.0000, dLocal=+0.0000, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 4: branch_rebuild, score=-0.00193, rejected: score_not_improved; dCCC=-0.0004, dLowQ=+0.0050, dLocal=-0.0082, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]     candidate 5: branch_rebuild, score=-0.00605, rejected: score_not_improved; dCCC=-0.0004, dLowQ=-0.0032, dLocal=-0.0082, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Stage 'branch_rebuild': generated 61, accepted 1, rejected 60, best score 0.0
+[smart_ligand_refine]   Accepted 'branch_rebuild' with score=+0.00000; dCCC=+0.0000, dLowQ=+0.0000, dLocal=+0.0000, anchorRMSD=0.000 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine]   Stage 'openmm_no_map_clean': evaluating 1 candidate move(s).
+[smart_ligand_refine]     candidate 1: openmm_no_map_clean, score=-0.46809, rejected: anchor_rmsd_exceeded; dCCC=-0.0023, dLowQ=-0.0795, dLocal=-0.0514, anchorRMSD=0.400 A, geomPenalty=0.000, clashPenalty=0.000
+[smart_ligand_refine] Stage 'openmm_no_map_clean': generated 1, accepted 0, rejected 1, best score -0.468086978239843
+[smart_ligand_refine]   No move accepted in 'openmm_no_map_clean'. Rejections: anchor_rmsd_exceeded=1.
+[smart_ligand_refine] End macrocycle 3: CCC=0.0335, mean Q=0.7516, low-tail Q=0.6219, worst atoms=[6, 13, 2, 8]
+[smart_ligand_refine] Finished: CCC 0.0331 -> 0.0335, low-tail Q 0.5127 -> 0.6219, accepted=8, rejected=366. Move log: ./slr_targeted_branch_test_raw/smart_ligand_refine/Ligand_0/smart_ligand_refine_log.json
+[smart_ligand_refine] ligand 0: CCC 0.0331 -> 0.0335; low-tail Q 0.5127 -> 0.6219; accepted 8

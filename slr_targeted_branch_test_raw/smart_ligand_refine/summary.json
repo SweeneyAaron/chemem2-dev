@@ -1,0 +1,140 @@
+[
+  {
+    "initial_ligand_ccc": 0.03307900210697483,
+    "final_ligand_ccc": 0.03351348683397714,
+    "initial_low_tail_q": 0.5127335339784622,
+    "final_low_tail_q": 0.6218628287315369,
+    "accepted_moves": 8,
+    "rejected_moves": 366,
+    "final_openmm_energy": -2112.564203616082,
+    "move_log_path": "./slr_targeted_branch_test_raw/smart_ligand_refine/Ligand_0/smart_ligand_refine_log.json",
+    "reference_comparison": {
+      "reference_sdf_path": "/Users/aaron.sweeney/Documents/chemem2_build/ChemEM2_feb26/chemem2-dev/test/Ligand_dep.sdf",
+      "available": true,
+      "input_atom_count": 31,
+      "reference_atom_count": 32,
+      "input_heavy_atom_count": 15,
+      "reference_heavy_atom_count": 15,
+      "input_formal_charge": -1,
+      "reference_formal_charge": 0,
+      "compared_heavy_atom_count": 15,
+      "atom_count_mismatch": true,
+      "heavy_atom_count_mismatch": false,
+      "formal_charge_mismatch": true,
+      "heavy_rmsd_A": 1.7999083343960187,
+      "heavy_centroid_shift_A": 0.12275167807611878,
+      "max_heavy_displacement_A": 3.971965088156622,
+      "worst_heavy_displacements": [
+        {
+          "rank": 1,
+          "atom_index": 14,
+          "reference_atom_index": 14,
+          "symbol": "C",
+          "reference_symbol": "O",
+          "distance_A": 3.971965088156622
+        },
+        {
+          "rank": 2,
+          "atom_index": 13,
+          "reference_atom_index": 13,
+          "symbol": "O",
+          "reference_symbol": "C",
+          "distance_A": 3.3438382102168958
+        },
+        {
+          "rank": 3,
+          "atom_index": 9,
+          "reference_atom_index": 9,
+          "symbol": "C",
+          "reference_symbol": "C",
+          "distance_A": 3.063232699526175
+        },
+        {
+          "rank": 4,
+          "atom_index": 12,
+          "reference_atom_index": 12,
+          "symbol": "C",
+          "reference_symbol": "O",
+          "distance_A": 2.2684796581908957
+        },
+        {
+          "rank": 5,
+          "atom_index": 10,
+          "reference_atom_index": 10,
+          "symbol": "C",
+          "reference_symbol": "C",
+          "distance_A": 1.7417061817572774
+        },
+        {
+          "rank": 6,
+          "atom_index": 11,
+          "reference_atom_index": 11,
+          "symbol": "O",
+          "reference_symbol": "C",
+          "distance_A": 1.4399220620505704
+        },
+        {
+          "rank": 7,
+          "atom_index": 6,
+          "reference_atom_index": 6,
+          "symbol": "O",
+          "reference_symbol": "O",
+          "distance_A": 0.7038865477623493
+        },
+        {
+          "rank": 8,
+          "atom_index": 2,
+          "reference_atom_index": 2,
+          "symbol": "C",
+          "reference_symbol": "C",
+          "distance_A": 0.6685598113941914
+        },
+        {
+          "rank": 9,
+          "atom_index": 3,
+          "reference_atom_index": 3,
+          "symbol": "N",
+          "reference_symbol": "N",
+          "distance_A": 0.5697975986940869
+        },
+        {
+          "rank": 10,
+          "atom_index": 4,
+          "reference_atom_index": 4,
+          "symbol": "C",
+          "reference_symbol": "C",
+          "distance_A": 0.5214856506588729
+        }
+      ],
+      "symbol_mismatches": [
+        {
+          "atom_index": 11,
+          "reference_atom_index": 11,
+          "symbol": "O",
+          "reference_symbol": "C"
+        },
+        {
+          "atom_index": 12,
+          "reference_atom_index": 12,
+          "symbol": "C",
+          "reference_symbol": "O"
+        },
+        {
+          "atom_index": 13,
+          "reference_atom_index": 13,
+          "symbol": "O",
+          "reference_symbol": "C"
+        },
+        {
+          "atom_index": 14,
+          "reference_atom_index": 14,
+          "symbol": "C",
+          "reference_symbol": "O"
+        }
+      ]
+    },
+    "diagnostics_path": "./slr_targeted_branch_test_raw/smart_ligand_refine/Ligand_0/smart_ligand_refine_diagnostics.json",
+    "ligand_index": 0,
+    "runtime_s": 1552.9285310839914
+  }
+]

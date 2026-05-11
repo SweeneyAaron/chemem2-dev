@@ -8,8 +8,20 @@
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 from scipy.ndimage import gaussian_filter
+
+try:
+    from ChemEM import ligand_fitting as _ligand_fitting
+except Exception:  # pragma: no cover - optional compiled extension
+    _ligand_fitting = None
+
+
+def _add_timing(timings: dict[str, float] | None, key: str, seconds: float) -> None:
+    if timings is not None:
+        timings[key] = float(timings.get(key, 0.0) + seconds)
 
 
 def _safe_mask(mask: np.ndarray | None, a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -188,10 +200,51 @@ def simulate_ligand_density_on_map_grid(
     resolution_A: float,
     sigma_coeff: float = 0.356,
     normalise: bool = True,
+    timings: dict[str, float] | None = None,
 ) -> np.ndarray:
     """
     Rasterize ligand atom masses onto map grid and blur by Gaussian sigma_coeff*resolution.
     Returns simulated map in (z,y,x).
+    """
+    sim_subgrid, lo_zyx, hi_zyx = simulate_ligand_density_subgrid(
+        coords_xyz_A=coords_xyz_A,
+        atom_masses=atom_masses,
+        map_origin_xyz_A=map_origin_xyz_A,
+        map_apix_xyz_A=map_apix_xyz_A,
+        map_shape_zyx=map_shape_zyx,
+        resolution_A=resolution_A,
+        sigma_coeff=sigma_coeff,
+        normalise=normalise,
+        timings=timings,
+    )
+    nz, ny, nx = [int(i) for i in map_shape_zyx]
+    grid = np.zeros((nz, ny, nx), dtype=np.float64)
+    if sim_subgrid.size:
+        z0, y0, x0 = [int(i) for i in lo_zyx]
+        z1, y1, x1 = [int(i) for i in hi_zyx]
+        grid[z0:z1, y0:y1, x0:x1] = sim_subgrid
+    return grid
+
+
+def simulate_ligand_density_subgrid(
+    coords_xyz_A: np.ndarray,
+    atom_masses: np.ndarray,
+    map_origin_xyz_A: np.ndarray,
+    map_apix_xyz_A: np.ndarray,
+    map_shape_zyx: tuple[int, int, int],
+    *,
+    resolution_A: float,
+    sigma_coeff: float = 0.356,
+    normalise: bool = True,
+    truncate: float = 4.0,
+    timings: dict[str, float] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Rasterize ligand density only over the Gaussian support subgrid.
+
+    The returned bounding box is half-open in (z,y,x): ``[lo, hi)``. The full
+    simulated map is exactly zero outside this box under scipy's constant-mode
+    Gaussian support for the same ``truncate`` value.
     """
     coords = np.asarray(coords_xyz_A, dtype=np.float64)
     masses = np.asarray(atom_masses, dtype=np.float64)
@@ -204,8 +257,20 @@ def simulate_ligand_density_on_map_grid(
     apix = np.asarray(map_apix_xyz_A, dtype=np.float64).reshape(3)
     nz, ny, nx = [int(i) for i in map_shape_zyx]
 
-    grid = np.zeros((nz, ny, nx), dtype=np.float64)
+    sigma_A = float(sigma_coeff) * float(resolution_A)
+    sigma_zyx = np.array([
+        sigma_A / max(apix[2], 1e-12),
+        sigma_A / max(apix[1], 1e-12),
+        sigma_A / max(apix[0], 1e-12),
+    ], dtype=np.float64)
+    radius_zyx = np.asarray(
+        [int(float(truncate) * float(s) + 0.5) for s in sigma_zyx],
+        dtype=int,
+    )
 
+    t0 = time.perf_counter() if timings is not None else None
+    voxel_indices = []
+    voxel_masses = []
     for xyz, mass in zip(coords, masses):
         fx = (float(xyz[0]) - origin[0]) / apix[0]
         fy = (float(xyz[1]) - origin[1]) / apix[1]
@@ -220,20 +285,57 @@ def simulate_ligand_density_on_map_grid(
         if ix >= nx or iy >= ny or iz >= nz:
             continue
 
-        grid[iz, iy, ix] += float(mass)
+        voxel_indices.append((iz, iy, ix))
+        voxel_masses.append(float(mass))
+    if timings is not None:
+        _add_timing(timings, "simulate.rasterise", time.perf_counter() - t0)
 
-    sigma_A = float(sigma_coeff) * float(resolution_A)
-    sigma_zyx = np.array([
-        sigma_A / max(apix[2], 1e-12),
-        sigma_A / max(apix[1], 1e-12),
-        sigma_A / max(apix[0], 1e-12),
-    ], dtype=np.float64)
+    if not voxel_indices:
+        empty = np.zeros((0, 0, 0), dtype=np.float64)
+        zero = np.zeros(3, dtype=int)
+        return empty, zero, zero
 
+    idx_zyx = np.asarray(voxel_indices, dtype=int)
+    shape_zyx = np.asarray([nz, ny, nx], dtype=int)
+    lo_zyx = np.maximum(np.min(idx_zyx, axis=0) - radius_zyx, 0)
+    hi_zyx = np.minimum(np.max(idx_zyx, axis=0) + radius_zyx + 1, shape_zyx)
+
+    if _ligand_fitting is not None and hasattr(
+        _ligand_fitting, "simulate_ligand_density_subgrid"
+    ):
+        try:
+            t0 = time.perf_counter() if timings is not None else None
+            sim_cpp = _ligand_fitting.simulate_ligand_density_subgrid(
+                coords,
+                masses,
+                origin,
+                apix,
+                lo_zyx,
+                hi_zyx,
+                float(sigma_A),
+                bool(normalise),
+            )
+            if timings is not None:
+                _add_timing(timings, "simulate.cpp_total", time.perf_counter() - t0)
+            return np.asarray(sim_cpp, dtype=np.float64), lo_zyx.astype(int), hi_zyx.astype(int)
+        except Exception:
+            pass
+
+    grid = np.zeros(tuple((hi_zyx - lo_zyx).tolist()), dtype=np.float64)
+    for (iz, iy, ix), mass in zip(idx_zyx, voxel_masses):
+        grid[int(iz - lo_zyx[0]), int(iy - lo_zyx[1]), int(ix - lo_zyx[2])] += mass
+
+    t0 = time.perf_counter() if timings is not None else None
     sim = gaussian_filter(grid, sigma=sigma_zyx, mode="constant", cval=0.0)
+    if timings is not None:
+        _add_timing(timings, "simulate.gaussian_filter", time.perf_counter() - t0)
 
     if normalise:
+        t0 = time.perf_counter() if timings is not None else None
         vmax = float(np.max(sim))
         if vmax > 0.0:
             sim = sim / vmax
+        if timings is not None:
+            _add_timing(timings, "simulate.normalise", time.perf_counter() - t0)
 
-    return np.asarray(sim, dtype=np.float64)
+    return np.asarray(sim, dtype=np.float64), lo_zyx.astype(int), hi_zyx.astype(int)

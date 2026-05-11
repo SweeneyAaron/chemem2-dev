@@ -4,6 +4,8 @@
 #include <random>
 #include <cmath>
 #include <tuple>
+#include <algorithm>
+#include <limits>
 
 // Namespace for pybind11
 namespace py = pybind11;
@@ -396,6 +398,320 @@ std::tuple<double, std::vector<Eigen::Vector3d>, std::vector<double>> global_sea
     return std::make_tuple(best_ccc, best_coords, all_cccs);
 }
 
+std::vector<double> gaussian_kernel_1d(double sigma) {
+    if (sigma <= 1e-12) {
+        return std::vector<double>{1.0};
+    }
+    int radius = static_cast<int>(4.0 * sigma + 0.5);
+    radius = std::max(radius, 0);
+    std::vector<double> kernel(static_cast<size_t>(2 * radius + 1), 0.0);
+    double sum = 0.0;
+    for (int i = -radius; i <= radius; ++i) {
+        double v = std::exp(-0.5 * (static_cast<double>(i) * static_cast<double>(i)) / (sigma * sigma));
+        kernel[static_cast<size_t>(i + radius)] = v;
+        sum += v;
+    }
+    if (sum > 0.0) {
+        for (double& v : kernel) {
+            v /= sum;
+        }
+    }
+    return kernel;
+}
+
+void convolve_axis_constant(
+    const std::vector<double>& input,
+    std::vector<double>& output,
+    size_t nz,
+    size_t ny,
+    size_t nx,
+    const std::vector<double>& kernel,
+    int axis
+) {
+    const int radius = static_cast<int>(kernel.size() / 2);
+    std::fill(output.begin(), output.end(), 0.0);
+    auto offset = [ny, nx](size_t z, size_t y, size_t x) {
+        return (z * ny * nx) + (y * nx) + x;
+    };
+
+    for (size_t z = 0; z < nz; ++z) {
+        for (size_t y = 0; y < ny; ++y) {
+            for (size_t x = 0; x < nx; ++x) {
+                double acc = 0.0;
+                for (int k = -radius; k <= radius; ++k) {
+                    long zz = static_cast<long>(z);
+                    long yy = static_cast<long>(y);
+                    long xx = static_cast<long>(x);
+                    if (axis == 0) zz += k;
+                    if (axis == 1) yy += k;
+                    if (axis == 2) xx += k;
+                    if (zz < 0 || yy < 0 || xx < 0) {
+                        continue;
+                    }
+                    if (zz >= static_cast<long>(nz) || yy >= static_cast<long>(ny) || xx >= static_cast<long>(nx)) {
+                        continue;
+                    }
+                    acc += input[offset(static_cast<size_t>(zz), static_cast<size_t>(yy), static_cast<size_t>(xx))]
+                           * kernel[static_cast<size_t>(k + radius)];
+                }
+                output[offset(z, y, x)] = acc;
+            }
+        }
+    }
+}
+
+py::array_t<double> simulate_ligand_density_subgrid_cpp(
+    py::array_t<double, py::array::c_style | py::array::forcecast> coords_in,
+    py::array_t<double, py::array::c_style | py::array::forcecast> masses_in,
+    py::array_t<double, py::array::c_style | py::array::forcecast> origin_in,
+    py::array_t<double, py::array::c_style | py::array::forcecast> apix_in,
+    py::array_t<int, py::array::c_style | py::array::forcecast> bbox_lo_in,
+    py::array_t<int, py::array::c_style | py::array::forcecast> bbox_hi_in,
+    double sigma_A,
+    bool normalise
+) {
+    auto coords = coords_in.unchecked<2>();
+    auto masses = masses_in.unchecked<1>();
+    auto origin = origin_in.unchecked<1>();
+    auto apix = apix_in.unchecked<1>();
+    auto lo = bbox_lo_in.unchecked<1>();
+    auto hi = bbox_hi_in.unchecked<1>();
+    if (coords.shape(1) != 3 || masses.shape(0) != coords.shape(0)) {
+        throw std::runtime_error("coords must be (N,3) and masses length N");
+    }
+
+    const int z0 = lo(0), y0 = lo(1), x0 = lo(2);
+    const int z1 = hi(0), y1 = hi(1), x1 = hi(2);
+    const size_t nz = static_cast<size_t>(std::max(0, z1 - z0));
+    const size_t ny = static_cast<size_t>(std::max(0, y1 - y0));
+    const size_t nx = static_cast<size_t>(std::max(0, x1 - x0));
+    py::array_t<double> out({
+        static_cast<py::ssize_t>(nz),
+        static_cast<py::ssize_t>(ny),
+        static_cast<py::ssize_t>(nx),
+    });
+    if (nz == 0 || ny == 0 || nx == 0) {
+        return out;
+    }
+
+    std::vector<double> grid(nz * ny * nx, 0.0);
+    auto offset = [ny, nx](size_t z, size_t y, size_t x) {
+        return (z * ny * nx) + (y * nx) + x;
+    };
+
+    for (py::ssize_t i = 0; i < coords.shape(0); ++i) {
+        int ix = static_cast<int>(std::nearbyint((coords(i, 0) - origin(0)) / apix(0)));
+        int iy = static_cast<int>(std::nearbyint((coords(i, 1) - origin(1)) / apix(1)));
+        int iz = static_cast<int>(std::nearbyint((coords(i, 2) - origin(2)) / apix(2)));
+        if (iz < z0 || iy < y0 || ix < x0 || iz >= z1 || iy >= y1 || ix >= x1) {
+            continue;
+        }
+        grid[offset(static_cast<size_t>(iz - z0), static_cast<size_t>(iy - y0), static_cast<size_t>(ix - x0))] += masses(i);
+    }
+
+    const double sigma_z = sigma_A / std::max(std::abs(apix(2)), 1e-12);
+    const double sigma_y = sigma_A / std::max(std::abs(apix(1)), 1e-12);
+    const double sigma_x = sigma_A / std::max(std::abs(apix(0)), 1e-12);
+    std::vector<double> tmp1(grid.size(), 0.0);
+    std::vector<double> tmp2(grid.size(), 0.0);
+    convolve_axis_constant(grid, tmp1, nz, ny, nx, gaussian_kernel_1d(sigma_z), 0);
+    convolve_axis_constant(tmp1, tmp2, nz, ny, nx, gaussian_kernel_1d(sigma_y), 1);
+    convolve_axis_constant(tmp2, grid, nz, ny, nx, gaussian_kernel_1d(sigma_x), 2);
+
+    if (normalise) {
+        double vmax = 0.0;
+        for (double v : grid) {
+            vmax = std::max(vmax, v);
+        }
+        if (vmax > 0.0) {
+            for (double& v : grid) {
+                v /= vmax;
+            }
+        }
+    }
+
+    auto out_mut = out.mutable_unchecked<3>();
+    for (size_t z = 0; z < nz; ++z) {
+        for (size_t y = 0; y < ny; ++y) {
+            for (size_t x = 0; x < nx; ++x) {
+                out_mut(z, y, x) = grid[offset(z, y, x)];
+            }
+        }
+    }
+    return out;
+}
+
+double ccc_from_sums_cpp(
+    size_t n,
+    double sum_a,
+    double sumsq_a,
+    double sum_b,
+    double sumsq_b,
+    double sum_ab
+) {
+    if (n < 4) {
+        return 0.0;
+    }
+    const double nf = static_cast<double>(n);
+    const double numerator = sum_ab - ((sum_a * sum_b) / nf);
+    double var_a = sumsq_a - ((sum_a * sum_a) / nf);
+    double var_b = sumsq_b - ((sum_b * sum_b) / nf);
+    if (var_a < 0.0 && var_a > -1e-9) var_a = 0.0;
+    if (var_b < 0.0 && var_b > -1e-9) var_b = 0.0;
+    const double denom = std::sqrt(std::max(0.0, var_a) * std::max(0.0, var_b));
+    if (denom < 1e-12) {
+        return 0.0;
+    }
+    double cc = numerator / denom;
+    if (!std::isfinite(cc)) {
+        return 0.0;
+    }
+    return std::max(0.0, cc);
+}
+
+double compute_ligand_ccc_decomposed_cpp(
+    py::array_t<double, py::array::c_style | py::array::forcecast> exp_sub_in,
+    py::array_t<double, py::array::c_style | py::array::forcecast> sim_sub_in,
+    size_t full_nonzero_n,
+    double full_nonzero_sum,
+    double full_nonzero_sumsq,
+    size_t full_finite_n,
+    double full_finite_sum,
+    double full_finite_sumsq
+) {
+    auto exp_sub = exp_sub_in.unchecked<3>();
+    auto sim_sub = sim_sub_in.unchecked<3>();
+    if (exp_sub.shape(0) != sim_sub.shape(0) ||
+        exp_sub.shape(1) != sim_sub.shape(1) ||
+        exp_sub.shape(2) != sim_sub.shape(2)) {
+        throw std::runtime_error("exp_sub and sim_sub shape mismatch");
+    }
+
+    size_t bbox_nonzero_n = 0;
+    double bbox_nonzero_sum = 0.0;
+    double bbox_nonzero_sumsq = 0.0;
+    size_t inside_n = 0;
+    double inside_sum_a = 0.0;
+    double inside_sumsq_a = 0.0;
+    double sum_b = 0.0;
+    double sumsq_b = 0.0;
+    double sum_ab = 0.0;
+    size_t finite_n = 0;
+    double finite_sum_b = 0.0;
+    double finite_sumsq_b = 0.0;
+    double finite_sum_ab = 0.0;
+
+    for (py::ssize_t z = 0; z < exp_sub.shape(0); ++z) {
+        for (py::ssize_t y = 0; y < exp_sub.shape(1); ++y) {
+            for (py::ssize_t x = 0; x < exp_sub.shape(2); ++x) {
+                const double a = exp_sub(z, y, x);
+                const double b = sim_sub(z, y, x);
+                const bool finite = std::isfinite(a) && std::isfinite(b);
+                if (!finite) {
+                    continue;
+                }
+                ++finite_n;
+                finite_sum_b += b;
+                finite_sumsq_b += b * b;
+                finite_sum_ab += a * b;
+                if (a != 0.0) {
+                    ++bbox_nonzero_n;
+                    bbox_nonzero_sum += a;
+                    bbox_nonzero_sumsq += a * a;
+                }
+                if (a != 0.0 || b != 0.0) {
+                    ++inside_n;
+                    inside_sum_a += a;
+                    inside_sumsq_a += a * a;
+                    sum_b += b;
+                    sumsq_b += b * b;
+                    sum_ab += a * b;
+                }
+            }
+        }
+    }
+
+    size_t n = full_nonzero_n - bbox_nonzero_n + inside_n;
+    double sum_a = full_nonzero_sum - bbox_nonzero_sum + inside_sum_a;
+    double sumsq_a = full_nonzero_sumsq - bbox_nonzero_sumsq + inside_sumsq_a;
+    if (n < 64) {
+        n = full_finite_n;
+        sum_a = full_finite_sum;
+        sumsq_a = full_finite_sumsq;
+        sum_b = finite_sum_b;
+        sumsq_b = finite_sumsq_b;
+        sum_ab = finite_sum_ab;
+    }
+    return ccc_from_sums_cpp(n, sum_a, sumsq_a, sum_b, sumsq_b, sum_ab);
+}
+
+py::array_t<double> compute_local_ccc_per_atom_cpp(
+    py::array_t<double, py::array::c_style | py::array::forcecast> coords_in,
+    py::array_t<double, py::array::c_style | py::array::forcecast> density_padded_in,
+    py::array_t<double, py::array::c_style | py::array::forcecast> origin_in,
+    py::array_t<double, py::array::c_style | py::array::forcecast> apix_in,
+    py::array_t<double, py::array::c_style | py::array::forcecast> kernel_centred_in,
+    double kernel_norm,
+    int radius_vox
+) {
+    auto coords = coords_in.unchecked<2>();
+    auto density = density_padded_in.unchecked<3>();
+    auto origin = origin_in.unchecked<1>();
+    auto apix = apix_in.unchecked<1>();
+    auto kernel = kernel_centred_in.unchecked<1>();
+    const int k = (2 * radius_vox) + 1;
+    const size_t patch_n = static_cast<size_t>(k * k * k);
+    if (kernel.shape(0) != static_cast<py::ssize_t>(patch_n)) {
+        throw std::runtime_error("kernel_centred length does not match radius");
+    }
+    const int nz = static_cast<int>(density.shape(0)) - (2 * radius_vox);
+    const int ny = static_cast<int>(density.shape(1)) - (2 * radius_vox);
+    const int nx = static_cast<int>(density.shape(2)) - (2 * radius_vox);
+    py::array_t<double> out(static_cast<py::ssize_t>(coords.shape(0)));
+    auto out_mut = out.mutable_unchecked<1>();
+
+    for (py::ssize_t atom = 0; atom < coords.shape(0); ++atom) {
+        int ix = static_cast<int>(std::nearbyint((coords(atom, 0) - origin(0)) / apix(0)));
+        int iy = static_cast<int>(std::nearbyint((coords(atom, 1) - origin(1)) / apix(1)));
+        int iz = static_cast<int>(std::nearbyint((coords(atom, 2) - origin(2)) / apix(2)));
+        if (ix < 0 || iy < 0 || iz < 0 || ix >= nx || iy >= ny || iz >= nz || kernel_norm < 1e-12) {
+            out_mut(atom) = 0.0;
+            continue;
+        }
+        double sum_patch = 0.0;
+        size_t idx = 0;
+        for (int dz = 0; dz < k; ++dz) {
+            for (int dy = 0; dy < k; ++dy) {
+                for (int dx = 0; dx < k; ++dx) {
+                    sum_patch += density(iz + dz, iy + dy, ix + dx);
+                    ++idx;
+                }
+            }
+        }
+        const double mean_patch = sum_patch / static_cast<double>(patch_n);
+        double numerator = 0.0;
+        double norm_patch_sq = 0.0;
+        idx = 0;
+        for (int dz = 0; dz < k; ++dz) {
+            for (int dy = 0; dy < k; ++dy) {
+                for (int dx = 0; dx < k; ++dx) {
+                    const double centred = density(iz + dz, iy + dy, ix + dx) - mean_patch;
+                    numerator += centred * kernel(static_cast<py::ssize_t>(idx));
+                    norm_patch_sq += centred * centred;
+                    ++idx;
+                }
+            }
+        }
+        const double denom = std::sqrt(norm_patch_sq) * kernel_norm;
+        if (denom < 1e-12) {
+            out_mut(atom) = 0.0;
+        } else {
+            out_mut(atom) = std::max(-1.0, std::min(1.0, numerator / denom));
+        }
+    }
+    return out;
+}
+
 // Pybind11 module
 PYBIND11_MODULE(ligand_fitting, m) {
     m.def("compute_ccc_vector", &compute_ccc_vector, "Compute the normalized cross-correlation (CCC) between two vectors");
@@ -432,4 +748,33 @@ PYBIND11_MODULE(ligand_fitting, m) {
           py::arg("initial_step_size"),
           py::arg("max_steps"),
           py::arg("max_translation"));
+    m.def("simulate_ligand_density_subgrid", &simulate_ligand_density_subgrid_cpp,
+          "Simulate ligand density on a bounded subgrid",
+          py::arg("coords"),
+          py::arg("masses"),
+          py::arg("origin"),
+          py::arg("apix"),
+          py::arg("bbox_lo_zyx"),
+          py::arg("bbox_hi_zyx"),
+          py::arg("sigma_A"),
+          py::arg("normalise") = true);
+    m.def("compute_ligand_ccc_decomposed", &compute_ligand_ccc_decomposed_cpp,
+          "Compute truncated full-grid ligand CCC from subgrid statistics",
+          py::arg("exp_subgrid"),
+          py::arg("sim_subgrid"),
+          py::arg("full_nonzero_n"),
+          py::arg("full_nonzero_sum"),
+          py::arg("full_nonzero_sumsq"),
+          py::arg("full_finite_n"),
+          py::arg("full_finite_sum"),
+          py::arg("full_finite_sumsq"));
+    m.def("compute_local_ccc_per_atom", &compute_local_ccc_per_atom_cpp,
+          "Compute local CCC for each atom from a padded density map",
+          py::arg("coords"),
+          py::arg("density_padded"),
+          py::arg("origin"),
+          py::arg("apix"),
+          py::arg("kernel_centred"),
+          py::arg("kernel_norm"),
+          py::arg("radius_vox"));
 }

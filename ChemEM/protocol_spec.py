@@ -348,6 +348,118 @@ def add_search_refine_args(p):
     g.add_argument("--sr-directed-kick-angle-deg", type=float, default=90.0,
                    help="Rotation magnitude (degrees) applied by the directed basin-hopping kick")
 
+
+def smart_ligand_refine_deps(args):
+    return tuple()
+
+
+def add_smart_ligand_refine_args(p):
+    g = p.add_argument_group("Smart Ligand Refinement")
+    g.add_argument("--slr-map-source", type=str, default="confidence",
+                   choices=["confidence", "raw", "difference"],
+                   help="Map source policy: confidence | raw | difference")
+    g.add_argument("--slr-max-macrocycles", type=int, default=3,
+                   help="Maximum smart ligand refinement macrocycles")
+    g.add_argument("--slr-smoke-test", action="store_true", default=False,
+                   help="Run a small SmartLigandRefinement search for quick pipeline testing")
+    g.add_argument("--slr-debug", action="store_true", default=False,
+                   help="Print human-readable SmartLigandRefinement progress messages")
+    g.add_argument("--slr-progress", action="store_true", default=False,
+                   help="Print concise SmartLigandRefinement progress without verbose candidate dumps")
+    g.add_argument("--slr-write-diagnostics", action="store_true", default=False,
+                   help="Write SmartLigandRefinement diagnostic JSON sidecar")
+    g.add_argument("--slr-profile-timings", action="store_true", default=False,
+                   help="Collect SmartLigandRefinement timing diagnostics")
+    g.add_argument("--slr-reference-sdf", type=str, default=None,
+                   help="Reference SDF used only for SmartLigandRefinement diagnostics")
+    g.add_argument("--slr-debug-candidate-limit", type=int, default=5,
+                   help="Maximum top-ranked candidates printed per stage when --slr-debug is enabled")
+    g.add_argument("--slr-pocket-radius", type=float, default=12.0,
+                   help="Pocket radius for the local OpenMM geometry environment (Å)")
+    g.add_argument("--slr-pin-k", type=float, default=5000.0,
+                   help="Protein pin strength in the no-map OpenMM geometry environment")
+    g.add_argument("--slr-use-openmm-geometry", dest="slr_use_openmm_geometry",
+                   action="store_true", default=True,
+                   help="Use a no-map OpenMM context for geometry evaluation when available")
+    g.add_argument("--slr-no-openmm-geometry", dest="slr_use_openmm_geometry",
+                   action="store_false",
+                   help="Disable OpenMM geometry context creation; use RDKit/simple checks")
+    g.add_argument("--slr-clean-candidates", action="store_true", default=False,
+                   help="Run short no-map geometry clean-up on generated candidates before scoring")
+    g.add_argument("--slr-clean-each-macrocycle", dest="slr_clean_each_macrocycle",
+                   action="store_true", default=True,
+                   help="Run short no-map geometry clean-up after accepted macrocycle moves")
+    g.add_argument("--slr-no-clean-each-macrocycle", dest="slr_clean_each_macrocycle",
+                   action="store_false",
+                   help="Disable no-map geometry clean-up after macrocycles")
+    g.add_argument("--slr-branch-rebuild", action="store_true", default=False,
+                   help="Enable targeted worst-atom branch rebuild")
+    g.add_argument("--slr-branch-beam-width", type=int, default=16,
+                   help="Beam width for SmartLigandRefinement branch rebuild")
+    g.add_argument("--slr-max-branch-torsions", type=int, default=6,
+                   help="Maximum torsions walked by SmartLigandRefinement branch rebuild")
+    g.add_argument("--slr-branch-minimum-offsets-deg", type=float, nargs="+", default=None,
+                   help="Offsets added to each branch-rebuild torsion-profile minimum "
+                        "(default: -20 -10 0 10 20)")
+    g.add_argument("--slr-no-ring-flips", dest="slr_enable_ring_flip_proposals",
+                   action="store_false", default=True,
+                   help="Disable exocyclic ring-flip proposals during branch rebuild")
+    g.add_argument("--slr-branch-rebuild-verbose", action="store_true", default=False,
+                   help="Emit per-seed/per-torsion/per-angle diagnostics for branch rebuild "
+                        "(requires --slr-write-diagnostics to surface in JSON)")
+    g.add_argument("--slr-branch-aggressive-angle-search", action="store_true", default=False,
+                   help="Add coarse 30 deg grid plus current+/-60/+/-120/180 flips on every "
+                        "branch-rebuild torsion (and ungate ring-flip on non-exocyclic torsions)")
+    g.add_argument("--slr-branch-aggressive-grid-step-deg", type=float, default=30.0,
+                   help="Coarse-grid step for --slr-branch-aggressive-angle-search")
+    g.add_argument("--slr-branch-aggressive-flip-offsets-deg", type=float, nargs="+", default=None,
+                   help="Flip offsets relative to current angle when "
+                        "--slr-branch-aggressive-angle-search is on (default: -120 -60 60 120 180)")
+    g.add_argument("--slr-branch-relative-q-seeding", action="store_true", default=False,
+                   help="Make atom badness use the per-ligand max-Q as floor so highish-Q "
+                        "atoms still produce non-zero badness")
+    g.add_argument("--slr-branch-relative-q-percentile", type=float, default=0.25,
+                   help="Bottom percentile of per-ligand Q distribution that becomes seeds when "
+                        "--slr-branch-use-anchor-seeds is on (default: 0.25)")
+    g.add_argument("--slr-branch-use-anchor-seeds", action="store_true", default=False,
+                   help="Allow ANCHOR-classified atoms to be branch-rebuild seeds when their Q "
+                        "lags the ligand's best (relaxes the repair-like downstream filter)")
+    g.add_argument("--slr-branch-min-acceptance-improvement", type=float, default=-1e-3,
+                   help="Score-improvement floor used only for branch_rebuild candidates "
+                        "(default: -1e-3, looser than the global 1e-4)")
+    g.add_argument("--slr-branch-max-anchor-rmsd", type=float, default=0.6,
+                   help="Anchor RMSD cap (Å) used only for branch_rebuild candidates "
+                        "(default: 0.6, looser than the global 0.25)")
+    g.add_argument("--slr-branch-no-accept-on-q-improvement",
+                   dest="slr_branch_accept_on_q_improvement",
+                   action="store_false", default=True,
+                   help="Disable the branch_rebuild fallback that accepts a candidate when "
+                        "low_tail_q AND mean Q both strictly improve")
+    g.add_argument("--slr-max-candidates-per-stage", type=int, default=256,
+                   help="Maximum candidates retained/scored per SmartLigandRefinement stage")
+    g.add_argument("--slr-max-torsion-profile-count", type=int, default=64,
+                   help="Maximum torsions scanned while building SmartLigandRefinement torsion profiles")
+    g.add_argument("--slr-torsion-scan-step-deg", type=float, default=10.0,
+                   help="Angular step for SmartLigandRefinement torsion profile scans")
+    g.add_argument("--slr-no-subregion-proposals", dest="slr_enable_subregion_proposals",
+                   action="store_false", default=True,
+                   help="Disable connected bad-atom subregion rigid-body proposals")
+    g.add_argument("--slr-torsion-profile-source", type=str, default="auto",
+                   choices=["auto", "openmm", "openff", "rdkit"],
+                   help="Torsion profile source: auto prefers OpenMM/OpenFF and falls back to RDKit")
+    g.add_argument("--slr-write-accepted-sdf", action="store_true", default=False,
+                   help="Reserved for writing accepted intermediate SDF snapshots")
+
+    g.add_argument("--slr-anchor-q-min", type=float, default=0.75)
+    g.add_argument("--slr-anchor-local-ccc-min", type=float, default=0.60)
+    g.add_argument("--slr-repair-q-max", type=float, default=0.55)
+    g.add_argument("--slr-min-halfmap-agreement", type=float, default=0.50)
+    g.add_argument("--slr-min-density-value", type=float, default=1e-6)
+    g.add_argument("--slr-target-q", type=float, default=0.75)
+    g.add_argument("--slr-min-torsion-badness", type=float, default=0.05)
+    g.add_argument("--slr-clash-distance-a", type=float, default=1.6,
+                   help="Soft protein-ligand clash distance threshold (Å)")
+
     
     
 def mapq_score_deps(args):
@@ -527,6 +639,10 @@ def add_lining_refine_args(p):
     g.add_argument("--lr-repel-k", type=float, default=500.0,
                    help="Strength of the pocket-repulsive force applied to flagged atoms")
 
+def smart_ligand_refine2_deps(args):
+    return tuple()
+def add_smart_ligand_refine2_args(p):
+    pass
 
 def export_deps(args):
     return tuple()
@@ -561,8 +677,10 @@ SHORT_ALIASES = {
     "alpha_mask" : "-am",
     "lining_refine": "-lr",
     "search_refine": "-sr",
+    "smart_ligand_refine": "-slr",
     "ion_template_search": "-its",
     "orchestrate": "-o",
+    "smart_ligand_refine2" : "-slr2"
 }
 
 
@@ -604,12 +722,27 @@ REGISTRY = {
         deps=refine_deps,
         add_args=add_refine_args,
         help="MD-Refine ligand to density map"),
+
     "search_refine": ProtocolSpec(
         name="search_refine",
         class_path="ChemEM.protocols.refine.search_refine:SearchRefine",
         deps=search_refine_deps,
         add_args=add_search_refine_args,
         help="Iterative SCI-guided trust-region MD refinement from input conformer"),
+
+    "smart_ligand_refine": ProtocolSpec(
+        name="smart_ligand_refine",
+        class_path="ChemEM.protocols.refine.smart_ligand_refine:SmartLigandRefinement",
+        deps=smart_ligand_refine_deps,
+        add_args=add_smart_ligand_refine_args,
+        help="Q-score/CCC-guided near-fit ligand repair with OpenMM geometry filtering"),
+
+    "smart_ligand_refine2": ProtocolSpec(
+        name="smart_ligand_refine",
+        class_path="ChemEM.protocols.smart_refine_2.smart_refine:SmartRefine2",
+        deps=smart_ligand_refine2_deps,
+        add_args=add_smart_ligand_refine2_args,
+        help="Q-score/CCC-guided near-fit ligand repair with OpenMM geometry filtering"),
 
     "ion_template_search": ProtocolSpec(
         name="ion_template_search",
