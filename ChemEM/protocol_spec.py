@@ -642,7 +642,13 @@ def add_lining_refine_args(p):
 def smart_ligand_refine2_deps(args):
     return tuple()
 def add_smart_ligand_refine2_args(p):
-    pass
+    g = p.add_argument_group("Smart Ligand Refinement 2")
+    g.add_argument(
+        "--sr2-final-minimise",
+        action="store_true",
+        default=False,
+        help="Run a final local OpenMM map-biased minimisation after SmartRefine2",
+    )
 
 def export_deps(args):
     return tuple()

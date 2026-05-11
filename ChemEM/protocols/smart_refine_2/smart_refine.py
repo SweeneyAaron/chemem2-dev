@@ -73,6 +73,15 @@ from .scorers import get_scorer, ScoreResult
 from ChemEM.protocols.mapQ_score.mapq_utils import compute_qscores_from_emmap
 
 
+ChemEMSimulationSetup = None
+MinimiseInPlace = None
+submap_from_structure = None
+update_global_positions = None
+update_ligand_positions = None
+get_residue_positions = None
+get_residue_subset_from_points = None
+
+
 @dataclass
 class ProteinCoordinateIndex:
     coords_A: np.ndarray
@@ -209,14 +218,17 @@ def _is_protein_context_atom(atom, ligand_residue_names=None):
 
 
 class RefineLigand:
-    def __init__(self, 
-                ligand,
-                protein_index=None,
-                map_reference=None,
-                cutoff_A=9.0):
-        self._ligand = ligand 
-        
-        self._atom_positions = None 
+    def __init__(
+        self,
+        ligand,
+        protein_index=None,
+        map_reference=None,
+        cutoff_A=9.0,
+    ):
+        self._ligand = ligand
+        self._ligand_object = ligand
+
+        self._atom_positions = None
         self._atom_elements = None
         self._atom_indices = None
         self._atom_row_by_mol_index = None
@@ -373,7 +385,100 @@ class SmartRefine2:
             self.ligands.append(RefineLigand(lig,
                                             self._protein_index,
                                             self.system.density_map))
-   
+
+    def _final_minimise_enabled(self):
+        options = getattr(self.system, "options", None)
+        return bool(getattr(options, "sr2_final_minimise", False))
+
+    def _refresh_refine_ligand_contexts(self):
+        for ligand in self.ligands:
+            if hasattr(ligand, "_init_local_protein"):
+                ligand._protein_index = self._protein_index
+                ligand._init_local_protein(self._protein_index)
+
+    def _final_map_minimise_ligand(self, refine_ligand, result):
+        if not self._final_minimise_enabled():
+            return refine_ligand, result
+
+        density_map = getattr(self.system, "density_map", None)
+        options = getattr(self.system, "options", None)
+        if bool(getattr(options, "no_map", False)) or density_map is None:
+            print("[smart_refine_2] final minimisation skipped: no density map available")
+            return refine_ligand, result
+
+        try:
+            deps = _final_minimisation_dependencies()
+            (
+                setup_cls,
+                minimiser_cls,
+                make_submap,
+                copy_global_positions,
+                copy_ligand_positions,
+                residue_positions,
+                residue_subset,
+            ) = deps
+
+            ligand = _sync_ligand_object_from_refine_ligand(refine_ligand)
+            protein_structure = self.system.protein.complex_structure
+            ligand_points = residue_positions(ligand.complex_structure.residues[0])
+            local_structure = residue_subset(
+                ligand_points,
+                protein_structure,
+                distance_cutoff=float(getattr(options, "local_radius", 12.0)),
+            )
+            local_map = make_submap(local_structure, density_map)
+
+            env = setup_cls(
+                protein_structure=local_structure,
+                ligand_structure=[ligand],
+                density_map=local_map,
+                platform_name=getattr(self.system, "platform", "CPU"),
+                protein_restraint="protein",
+                pin_k=5000.0,
+                localise=False,
+                global_k=150.0,
+                pin_specs=getattr(options, "pin_specs", []),
+                distance_specs=getattr(options, "distance_specs", []),
+            )
+            final_energy = minimiser_cls(env).run(
+                do_biased_md=getattr(options, "do_biased_md", False),
+                md_ps=5.0,
+                max_iters=200,
+            )
+            if final_energy is None:
+                print(
+                    "[smart_refine_2] final minimisation skipped: minimiser returned no energy"
+                )
+                return refine_ligand, result
+
+            copy_global_positions(
+                full_structure=protein_structure,
+                local_structure=env.complex_structure,
+            )
+            copy_ligand_positions(
+                local_structure=env.complex_structure,
+                ligand_objects=[ligand],
+            )
+
+            self.get_protein_complex()
+            self._refresh_refine_ligand_contexts()
+            _refresh_refine_ligand_from_ligand_object(
+                refine_ligand,
+                protein_index=self._protein_index,
+                result=result,
+                final_energy=final_energy,
+            )
+            print(
+                "[smart_refine_2] final minimisation finished "
+                f"E={float(final_energy):.2f} kcal/mol"
+            )
+        except Exception as exc:
+            print(
+                "[smart_refine_2] final minimisation failed; "
+                f"keeping pre-minimised pose: {exc}"
+            )
+        return refine_ligand, result
+
 
     def run(self):
         self.get_protein_complex()
@@ -390,6 +495,7 @@ class SmartRefine2:
                 debug_dir=getattr(self.system, "output", None),
             )
             result = ligand._last_fit_in_map_result
+            ligand, result = self._final_map_minimise_ligand(ligand, result)
             self.fit_results.append(result)
             self.ligands[ligand_index - 1] = ligand
             self.debug_sdf_paths.append(
@@ -404,7 +510,133 @@ class SmartRefine2:
             filename = f"smart_refine_2_fit_in_map_ligand_{int(ligand_index):03d}.sdf"
         return write_refined_ligand_sdf(refine_ligand, result, output_dir, filename)
 
-        
+
+def _final_minimisation_dependencies():
+    global ChemEMSimulationSetup
+    global MinimiseInPlace
+    global submap_from_structure
+    global update_global_positions
+    global update_ligand_positions
+    global get_residue_positions
+    global get_residue_subset_from_points
+
+    if ChemEMSimulationSetup is None or MinimiseInPlace is None:
+        from ChemEM.protocols.refine.pose_minimiser import (
+            ChemEMSimulationSetup as _ChemEMSimulationSetup,
+            MinimiseInPlace as _MinimiseInPlace,
+        )
+
+        ChemEMSimulationSetup = _ChemEMSimulationSetup
+        MinimiseInPlace = _MinimiseInPlace
+    if submap_from_structure is None:
+        from ChemEM.protocols.core.density import (
+            submap_from_structure as _submap_from_structure,
+        )
+
+        submap_from_structure = _submap_from_structure
+    if update_global_positions is None or update_ligand_positions is None:
+        from ChemEM.protocols.core.simulation import (
+            update_global_positions as _update_global_positions,
+            update_ligand_positions as _update_ligand_positions,
+        )
+
+        update_global_positions = _update_global_positions
+        update_ligand_positions = _update_ligand_positions
+    if get_residue_positions is None or get_residue_subset_from_points is None:
+        from ChemEM.protocols.refine.refine_utils import (
+            get_residue_positions as _get_residue_positions,
+            get_residue_subset_from_points as _get_residue_subset_from_points,
+        )
+
+        get_residue_positions = _get_residue_positions
+        get_residue_subset_from_points = _get_residue_subset_from_points
+
+    return (
+        ChemEMSimulationSetup,
+        MinimiseInPlace,
+        submap_from_structure,
+        update_global_positions,
+        update_ligand_positions,
+        get_residue_positions,
+        get_residue_subset_from_points,
+    )
+
+
+def _sync_ligand_object_from_refine_ligand(refine_ligand):
+    working_ligand = getattr(refine_ligand, "_ligand", None)
+    ligand_object = getattr(refine_ligand, "_ligand_object", working_ligand)
+    if (
+        ligand_object is None
+        or not hasattr(ligand_object, "set_positions")
+        or working_ligand is None
+        or not hasattr(working_ligand, "mol")
+    ):
+        raise RuntimeError("RefineLigand does not expose a syncable ligand object")
+
+    try:
+        from rdkit import Chem
+        from rdkit.Geometry import Point3D
+    except Exception as exc:
+        raise RuntimeError("RDKit is required to sync ligand coordinates") from exc
+
+    mol = Chem.Mol(working_ligand.mol)
+    if mol.GetNumConformers() == 0:
+        mol.AddConformer(Chem.Conformer(mol.GetNumAtoms()), assignId=True)
+
+    conf = mol.GetConformer(0)
+    coords = np.asarray(conf.GetPositions(), dtype=np.float64)
+    atom_indices = np.asarray(refine_ligand._atom_indices, dtype=int)
+    heavy_coords = np.asarray(refine_ligand._atom_positions, dtype=np.float64)
+    if heavy_coords.shape[0] != atom_indices.shape[0]:
+        raise ValueError("RefineLigand heavy atom coordinates do not match atom indices")
+
+    coords[atom_indices] = heavy_coords
+    for atom_idx, xyz in enumerate(coords):
+        conf.SetAtomPosition(
+            int(atom_idx),
+            Point3D(float(xyz[0]), float(xyz[1]), float(xyz[2])),
+        )
+    _refresh_hydrogen_positions_from_heavy_geometry(mol, Chem)
+
+    ligand_object.mol = mol
+    ligand_object.set_positions(
+        np.asarray(mol.GetConformer(0).GetPositions(), dtype=np.float64)
+    )
+    return ligand_object
+
+
+def _refresh_refine_ligand_from_ligand_object(
+    refine_ligand,
+    protein_index=None,
+    result=None,
+    final_energy=None,
+):
+    ligand_object = getattr(refine_ligand, "_ligand_object", None)
+    working_ligand = getattr(refine_ligand, "_ligand", None)
+    if ligand_object is not None and hasattr(ligand_object, "mol"):
+        if working_ligand is None:
+            refine_ligand._ligand = ligand_object
+        elif hasattr(working_ligand, "mol"):
+            working_ligand.mol = ligand_object.mol
+
+    refine_ligand._init_atoms()
+    if protein_index is not None:
+        refine_ligand._protein_index = protein_index
+        refine_ligand._init_local_protein(protein_index)
+    if hasattr(refine_ligand, "update_atom_qscores"):
+        refine_ligand.update_atom_qscores()
+    if hasattr(refine_ligand, "get_best_block_by_qscore"):
+        refine_ligand.get_best_block_by_qscore()
+
+    if result is not None:
+        result.best_coords_A = np.asarray(refine_ligand._atom_positions, dtype=np.float64).copy()
+        result.best_rotation_matrix = None
+        result.best_translation_A = None
+        if isinstance(getattr(result, "score_terms", None), dict) and final_energy is not None:
+            result.score_terms["final_minimise_energy_kcal"] = float(final_energy)
+    return refine_ligand
+
+
 
 def refine_ligand(
     refine_ligand,
@@ -633,6 +865,7 @@ def _clone_refine_ligand(rl):
 
     clone = copy.copy(rl)
     clone._ligand = SimpleNamespace(mol=Chem.Mol(rl._ligand.mol))
+    clone._ligand_object = getattr(rl, "_ligand_object", rl._ligand)
     clone._atom_positions = np.asarray(rl._atom_positions, dtype=np.float64).copy()
     clone._excluded_root_blocks = set(getattr(rl, "_excluded_root_blocks", set()))
     return clone
