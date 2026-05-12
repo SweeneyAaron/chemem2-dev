@@ -14,16 +14,29 @@ _HAS_RDKIT = importlib.util.find_spec("rdkit") is not None
 if _HAS_NUMPY:
     import numpy as np
 
+    from protocols.smart_refine_2 import map_metrics as sr2_map_metrics
     from protocols.smart_refine_2 import optimisers, scorers
 else:
     np = None
+    sr2_map_metrics = None
     optimisers = None
     scorers = None
 
 
 class DummyMap:
-    def __init__(self, apix=1.0):
+    def __init__(
+        self,
+        apix=1.0,
+        *,
+        density_map=None,
+        origin=(0.0, 0.0, 0.0),
+        resolution=3.0,
+    ):
         self.apix = apix
+        self.origin = np.asarray(origin, dtype=np.float64)
+        self.resolution = float(resolution)
+        if density_map is not None:
+            self.density_map = np.asarray(density_map, dtype=np.float64)
 
 
 class DummyRefineLigand:
@@ -94,6 +107,20 @@ def _fit_result(raw, coords=None):
         converged=False,
         final_step_size_A=0.5,
     )
+
+
+def _blob(shape=(24, 24, 24), center_xyz=(12.0, 12.0, 12.0), sigma=2.5):
+    nz, ny, nx = shape
+    z = np.arange(nz, dtype=np.float64)
+    y = np.arange(ny, dtype=np.float64)
+    x = np.arange(nx, dtype=np.float64)
+    zz, yy, xx = np.meshgrid(z, y, x, indexing="ij")
+    d2 = (
+        (xx - center_xyz[0]) ** 2
+        + (yy - center_xyz[1]) ** 2
+        + (zz - center_xyz[2]) ** 2
+    )
+    return np.exp(-0.5 * d2 / (sigma * sigma))
 
 
 class _DummyBlock:
@@ -311,8 +338,8 @@ class TestSmartRefine2FitInMap(unittest.TestCase):
             calls.update(kwargs)
             return np.array([0.2, 0.4], dtype=np.float32)
 
-        old_func = scorers.compute_qscores_from_emmap
-        scorers.compute_qscores_from_emmap = fake_qscores_from_emmap
+        old_func = sr2_map_metrics.compute_qscores_from_emmap
+        sr2_map_metrics.compute_qscores_from_emmap = fake_qscores_from_emmap
         try:
             ligand = DummyRefineLigand(
                 [[0, 0, 0], [1, 0, 0]],
@@ -324,11 +351,47 @@ class TestSmartRefine2FitInMap(unittest.TestCase):
                 np.array([[0.1, 0, 0], [1.1, 0, 0]], dtype=np.float64),
             )
         finally:
-            scorers.compute_qscores_from_emmap = old_func
+            sr2_map_metrics.compute_qscores_from_emmap = old_func
 
         self.assertAlmostEqual(result.value, 0.3, places=6)
         self.assertEqual(calls["atoms_xyz"].shape, (3, 3))
         np.testing.assert_array_equal(calls["score_indices"], np.array([0, 1]))
+
+    def test_score_spec_parser_handles_weighted_combinations(self):
+        names, weights = scorers.parse_score_spec("CCC,MI", "0.2, 0.8")
+
+        self.assertEqual(names, ["ccc", "mi"])
+        self.assertEqual(weights, [0.2, 0.8])
+        self.assertEqual(scorers.parse_score_spec(None, None), (["qscore"], [1.0]))
+        with self.assertRaises(ValueError):
+            scorers.parse_score_spec("CCC,MI", "1.0")
+        with self.assertRaises(ValueError):
+            scorers.parse_score_spec("not_a_score", None)
+
+    def test_density_metric_scorers_prefer_aligned_coordinates(self):
+        density = _blob()
+        emmap = DummyMap(
+            apix=(1.0, 1.0, 1.0),
+            density_map=density,
+            origin=(0.0, 0.0, 0.0),
+            resolution=3.0,
+        )
+        aligned = np.array(
+            [[12.0, 12.0, 12.0], [12.5, 12.0, 12.0], [12.0, 12.5, 12.0]],
+            dtype=np.float64,
+        )
+        shifted = aligned + np.array([2.0, 0.0, 0.0])
+        ligand = DummyRefineLigand(aligned, apix=(1.0, 1.0, 1.0))
+        ligand._map_reference = emmap
+
+        options = SimpleNamespace(sr2_use_amp_eq=False)
+        for scorer_cls in (scorers.CCCScorer, scorers.MIScorer, scorers.SCIScorer):
+            scorer = scorer_cls(options=options)
+            aligned_score = scorer.score(ligand, aligned).value
+            shifted_score = scorer.score(ligand, shifted).value
+            self.assertTrue(np.isfinite(aligned_score))
+            self.assertTrue(np.isfinite(shifted_score))
+            self.assertGreater(aligned_score, shifted_score)
 
     def test_accepter_updates_ligand_when_score_improves_and_no_clash(self):
         smart_refine = importlib.import_module("protocols.smart_refine_2.smart_refine")
@@ -663,6 +726,56 @@ class TestSmartRefine2FitInMap(unittest.TestCase):
             smart_refine.get_scorer = old_get_scorer
             smart_refine.fit_in_map = old_fit_in_map
 
+    def test_acceptance_scorer_can_reject_optimisation_improvement(self):
+        smart_refine = importlib.import_module("protocols.smart_refine_2.smart_refine")
+
+        class OptimisationScorer(scorers.BaseScorer):
+            def score(self, refine_ligand, coords_A):
+                return scorers.ScoreResult(value=float(np.mean(coords_A[:, 0])))
+
+        class AcceptanceScorer(scorers.BaseScorer):
+            def score(self, refine_ligand, coords_A):
+                return scorers.ScoreResult(value=-float(np.mean(coords_A[:, 0])))
+
+        fit_result = optimisers.FitInMapResult(
+            best_coords_A=np.array([[1.0, 0.0, 0.0]], dtype=np.float64),
+            initial_raw_score=0.0,
+            best_raw_score=1.0,
+            initial_objective=0.0,
+            best_objective=1.0,
+            initial_clash_penalty=0.0,
+            best_clash_penalty=0.0,
+            initial_clash_count=0,
+            best_clash_count=0,
+            best_max_overlap_A=0.0,
+            steps=1,
+            evaluations=2,
+            converged=False,
+            final_step_size_A=0.5,
+        )
+        ligand = DummyRefineLigand([[0, 0, 0]], apix=1.0)
+        before = ligand._atom_positions.copy()
+
+        old_fit_in_map = smart_refine.fit_in_map
+        smart_refine.fit_in_map = lambda ligand, scorer=None, config=None: fit_result
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                out = smart_refine.refine_ligand(
+                    ligand,
+                    optimisation_scorer=OptimisationScorer(),
+                    acceptance_scorer=AcceptanceScorer(),
+                )
+            self.assertIs(out, ligand)
+            np.testing.assert_allclose(ligand._atom_positions, before)
+            self.assertAlmostEqual(fit_result.initial_raw_score, 0.0)
+            self.assertAlmostEqual(fit_result.best_raw_score, -1.0)
+            self.assertAlmostEqual(
+                fit_result.score_terms["optimisation_best_raw_score"],
+                1.0,
+            )
+        finally:
+            smart_refine.fit_in_map = old_fit_in_map
+
     def test_refine_ligand_patience_stops_after_no_improvements(self):
         smart_refine = importlib.import_module("protocols.smart_refine_2.smart_refine")
 
@@ -804,10 +917,33 @@ class TestSmartRefine2FitInMap(unittest.TestCase):
         parser = argparse.ArgumentParser()
         protocol_spec.add_smart_ligand_refine2_args(parser)
 
-        self.assertFalse(parser.parse_args([]).sr2_final_minimise)
+        defaults = parser.parse_args([])
+        self.assertEqual(defaults.sr2_optimisation_score, "qscore")
+        self.assertIsNone(defaults.sr2_optimisation_weights)
+        self.assertEqual(defaults.sr2_acceptance_score, "qscore")
+        self.assertIsNone(defaults.sr2_acceptance_weights)
+        self.assertFalse(defaults.sr2_final_minimise)
         self.assertTrue(
             parser.parse_args(["--sr2-final-minimise"]).sr2_final_minimise
         )
+        args = parser.parse_args(
+            [
+                "--sr2-optimisation-score",
+                "CCC,MI",
+                "--sr2-optimisation-weights",
+                "0.2,",
+                "0.8",
+                "--sr2-acceptance-score",
+                "qscore,SCI",
+                "--sr2-acceptance-weights",
+                "1,",
+                "0.5",
+            ]
+        )
+        self.assertEqual(args.sr2_optimisation_score, ["CCC,MI"])
+        self.assertEqual(args.sr2_optimisation_weights, ["0.2,", "0.8"])
+        self.assertEqual(args.sr2_acceptance_score, ["qscore,SCI"])
+        self.assertEqual(args.sr2_acceptance_weights, ["1,", "0.5"])
 
     def test_final_minimisation_flag_off_does_not_sync_ligand(self):
         smart_refine = importlib.import_module("protocols.smart_refine_2.smart_refine")

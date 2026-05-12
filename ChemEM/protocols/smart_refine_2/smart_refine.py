@@ -356,6 +356,19 @@ class SmartRefine2:
         self.system = system 
         self.ligands = []
         self.scorer = "qscore"
+        options = getattr(system, "options", None)
+        self.optimisation_score = getattr(
+            options,
+            "sr2_optimisation_score",
+            getattr(options, "sr2_optimization_score", None),
+        )
+        self.optimisation_weights = getattr(
+            options,
+            "sr2_optimisation_weights",
+            getattr(options, "sr2_optimization_weights", None),
+        )
+        self.acceptance_score = getattr(options, "sr2_acceptance_score", None)
+        self.acceptance_weights = getattr(options, "sr2_acceptance_weights", None)
         self.fit_config = FitInMapConfig(
             clash_mode="soft",  # "off", "soft", or "hard"
             debug=False,
@@ -479,6 +492,10 @@ class SmartRefine2:
             )
         return refine_ligand, result
 
+    def get_output(self):
+        self.output = os.path.join(self.system.output, 'smart_refine')
+        os.makedirs(self.output, exist_ok=True)
+
 
     def run(self):
         self.get_protein_complex()
@@ -486,10 +503,16 @@ class SmartRefine2:
         
         self.fit_results = []
         self.debug_sdf_paths = []
+
         for ligand_index, ligand in enumerate(list(self.ligands), start=1):
             ligand = refine_ligand(
                 ligand,
                 scorer=self.scorer,
+                optimisation_scorer=self.optimisation_score,
+                optimisation_weights=self.optimisation_weights,
+                acceptance_scorer=self.acceptance_score,
+                acceptance_weights=self.acceptance_weights,
+                scorer_options=getattr(self.system, "options", None),
                 fit_config=self.fit_config,
                 patience=self.patience,
                 debug_dir=getattr(self.system, "output", None),
@@ -505,9 +528,9 @@ class SmartRefine2:
         return self.fit_results
 
     def write_refined_ligand_sdf(self, refine_ligand, result, ligand_index=1, filename=None):
-        output_dir = getattr(self.system, "output", ".")
+        output_dir = getattr(self, "output", ".")
         if filename is None:
-            filename = f"smart_refine_2_fit_in_map_ligand_{int(ligand_index):03d}.sdf"
+            filename = f"Ligand_{int(ligand_index):03d}.sdf"
         return write_refined_ligand_sdf(refine_ligand, result, output_dir, filename)
 
 
@@ -641,11 +664,16 @@ def _refresh_refine_ligand_from_ligand_object(
 def refine_ligand(
     refine_ligand,
     scorer="qscore",
+    optimisation_scorer=None,
+    optimisation_weights=None,
+    acceptance_scorer=None,
+    acceptance_weights=None,
+    scorer_options=None,
     fit_config=None,
     branch_config=None,
     min_score_improvement=0.0,
     max_clash_penalty_increase=1e-6,
-    max_iters=10,
+    max_iters=25,
     patience=3,
     selection="branches",
     debug_dir=None,
@@ -667,11 +695,19 @@ def refine_ligand(
     """
     if selection not in {"greedy", "branches"}:
         raise ValueError(f"selection must be 'greedy' or 'branches', got {selection!r}")
-    scorer = get_scorer(scorer)
+    optimisation_scorer, acceptance_scorer = _resolve_refine_scorers(
+        scorer,
+        optimisation_scorer=optimisation_scorer,
+        optimisation_weights=optimisation_weights,
+        acceptance_scorer=acceptance_scorer,
+        acceptance_weights=acceptance_weights,
+        scorer_options=scorer_options,
+    )
 
     refine_ligand = _fit_and_accept(
         refine_ligand,
-        scorer,
+        optimisation_scorer,
+        acceptance_scorer,
         fit_config,
         min_score_improvement,
         max_clash_penalty_increase,
@@ -709,15 +745,25 @@ def refine_ligand(
             rotor_tree[refine_ligand.get_best_block_by_qscore()].block_id
         )
 
-        branch_results = branch_walker(refine_ligand, scorer=scorer, config=branch_config)
+        branch_results = branch_walker(
+            refine_ligand,
+            scorer=acceptance_scorer,
+            config=branch_config,
+        )
         refine_ligand._last_branch_walker_result = branch_results
         if not branch_results:
             stop_reason = "no_branch_results"
             break
 
         refine_ligand = _refit_branch_candidates(
-            refine_ligand, branch_results, scorer, fit_config,
-            min_score_improvement, selection, max_clash_penalty_increase,
+            refine_ligand,
+            branch_results,
+            optimisation_scorer,
+            acceptance_scorer,
+            fit_config,
+            min_score_improvement,
+            selection,
+            max_clash_penalty_increase,
         )
         iterations_completed = iteration + 1
 
@@ -794,14 +840,67 @@ def _set_refine_loop_diagnostics(refine_ligand, iterations_completed, no_improve
     refine_ligand._sr2_stop_reason = str(stop_reason)
 
 
+def _resolve_refine_scorers(
+    scorer,
+    *,
+    optimisation_scorer=None,
+    optimisation_weights=None,
+    acceptance_scorer=None,
+    acceptance_weights=None,
+    scorer_options=None,
+):
+    role_specific = any(
+        value is not None
+        for value in (
+            optimisation_scorer,
+            optimisation_weights,
+            acceptance_scorer,
+            acceptance_weights,
+        )
+    )
+    if not role_specific:
+        resolved = _get_scorer_for_role(scorer, options=scorer_options)
+        return resolved, resolved
+
+    fit_source = optimisation_scorer if optimisation_scorer is not None else scorer
+    accept_source = acceptance_scorer if acceptance_scorer is not None else "qscore"
+    fit_scorer = _get_scorer_for_role(
+        fit_source,
+        weights=optimisation_weights,
+        options=scorer_options,
+    )
+    accept_scorer = _get_scorer_for_role(
+        accept_source,
+        weights=acceptance_weights,
+        options=scorer_options,
+    )
+    if getattr(fit_scorer, "spec_key", None) == getattr(accept_scorer, "spec_key", None):
+        accept_scorer = fit_scorer
+    return fit_scorer, accept_scorer
+
+
+def _get_scorer_for_role(scorer, weights=None, options=None):
+    if weights is None and options is None:
+        return get_scorer(scorer)
+    return get_scorer(scorer, weights=weights, options=options)
+
+
 def _fit_and_accept(
     rl,
-    scorer,
+    optimisation_scorer,
+    acceptance_scorer,
     config,
     min_score_improvement,
     max_clash_penalty_increase=1e-6,
 ):
-    result = fit_in_map(rl, scorer=scorer, config=config)
+    result = fit_in_map(rl, scorer=optimisation_scorer, config=config)
+    _rescore_fit_result_for_acceptance(
+        rl,
+        result,
+        acceptance_scorer=acceptance_scorer,
+        optimisation_scorer=optimisation_scorer,
+        config=config,
+    )
     rl._last_fit_in_map_result = result
     _log_fit_in_map(result)
     return accepter(
@@ -815,7 +914,8 @@ def _fit_and_accept(
 def _refit_branch_candidates(
     base_rl,
     branch_results,
-    scorer,
+    optimisation_scorer,
+    acceptance_scorer,
     config,
     min_score_improvement,
     selection,
@@ -829,7 +929,14 @@ def _refit_branch_candidates(
     for branch_result in branch_results:
         clone = _clone_refine_ligand(base_rl)
         clone = apply_refinement(clone, branch_result)
-        fit_result = fit_in_map(clone, scorer=scorer, config=config)
+        fit_result = fit_in_map(clone, scorer=optimisation_scorer, config=config)
+        _rescore_fit_result_for_acceptance(
+            clone,
+            fit_result,
+            acceptance_scorer=acceptance_scorer,
+            optimisation_scorer=optimisation_scorer,
+            config=config,
+        )
         clone._last_fit_in_map_result = fit_result
         _log_fit_in_map(fit_result)
         clone = accepter(
@@ -844,6 +951,97 @@ def _refit_branch_candidates(
         candidates.append((base_rl, base_rl._last_fit_in_map_result))
 
     return _pick_best_ligand(candidates)
+
+
+def _score_as_result(scorer, refine_ligand, coords_A):
+    score_out = scorer.score(refine_ligand, coords_A)
+    score_result = (
+        score_out
+        if isinstance(score_out, ScoreResult)
+        else ScoreResult(value=float(score_out), terms={})
+    )
+    raw = float(score_result.value)
+    if not np.isfinite(raw):
+        raw = float("-inf")
+    return ScoreResult(value=raw, terms=dict(score_result.terms))
+
+
+def _objective_from_raw_and_clash(raw, clash_count, clash_penalty, mode, weight, n_atoms):
+    raw = float(raw)
+    if not np.isfinite(raw):
+        return float("-inf")
+    mode = str(mode).lower().strip()
+    if mode == "off":
+        return raw
+    if mode == "hard":
+        return raw if int(clash_count) == 0 else float("-inf")
+    normalized_penalty = float(clash_penalty) / max(1, int(n_atoms))
+    return float(raw) - float(weight) * normalized_penalty
+
+
+def _rescore_fit_result_for_acceptance(
+    refine_ligand,
+    result,
+    *,
+    acceptance_scorer,
+    optimisation_scorer,
+    config,
+):
+    if acceptance_scorer is optimisation_scorer:
+        return result
+
+    initial_coords = np.asarray(refine_ligand._atom_positions, dtype=np.float64)
+    best_coords = np.asarray(result.best_coords_A, dtype=np.float64)
+    initial_score = _score_as_result(acceptance_scorer, refine_ligand, initial_coords)
+    best_score = _score_as_result(acceptance_scorer, refine_ligand, best_coords)
+
+    score_terms = dict(getattr(result, "score_terms", {}) or {})
+    clash_mode = score_terms.get(
+        "fit_clash_mode",
+        getattr(config, "clash_mode", "off") if config is not None else "off",
+    )
+    clash_weight = float(
+        score_terms.get(
+            "fit_clash_weight",
+            getattr(config, "clash_weight", 1.0) if config is not None else 1.0,
+        )
+    )
+    n_atoms = initial_coords.shape[0]
+
+    optimisation_terms = dict(score_terms)
+    result.score_terms = score_terms
+    result.score_terms.update(
+        {
+            "optimisation_initial_raw_score": float(result.initial_raw_score),
+            "optimisation_best_raw_score": float(result.best_raw_score),
+            "optimisation_initial_objective": float(result.initial_objective),
+            "optimisation_best_objective": float(result.best_objective),
+            "optimisation_score_terms": optimisation_terms,
+            "acceptance_initial_raw_score": float(initial_score.value),
+            "acceptance_best_raw_score": float(best_score.value),
+            "acceptance_initial_score_terms": dict(initial_score.terms),
+            "acceptance_best_score_terms": dict(best_score.terms),
+        }
+    )
+    result.initial_raw_score = float(initial_score.value)
+    result.best_raw_score = float(best_score.value)
+    result.initial_objective = _objective_from_raw_and_clash(
+        result.initial_raw_score,
+        result.initial_clash_count,
+        result.initial_clash_penalty,
+        clash_mode,
+        clash_weight,
+        n_atoms,
+    )
+    result.best_objective = _objective_from_raw_and_clash(
+        result.best_raw_score,
+        result.best_clash_count,
+        result.best_clash_penalty,
+        clash_mode,
+        clash_weight,
+        n_atoms,
+    )
+    return result
 
 
 def _pick_best_ligand(candidates):

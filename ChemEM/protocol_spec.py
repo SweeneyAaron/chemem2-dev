@@ -644,6 +644,42 @@ def smart_ligand_refine2_deps(args):
 def add_smart_ligand_refine2_args(p):
     g = p.add_argument_group("Smart Ligand Refinement 2")
     g.add_argument(
+        "--sr2-optimisation-score",
+        "--sr2-optimization-score",
+        dest="sr2_optimisation_score",
+        type=str,
+        nargs="+",
+        default="qscore",
+        metavar="SCORES",
+        help="Comma-separated SmartRefine2 fit score(s): qscore, ccc, mi, sci",
+    )
+    g.add_argument(
+        "--sr2-optimisation-weights",
+        "--sr2-optimization-weights",
+        dest="sr2_optimisation_weights",
+        type=str,
+        nargs="+",
+        default=None,
+        metavar="WEIGHTS",
+        help="Comma-separated weights for --sr2-optimisation-score",
+    )
+    g.add_argument(
+        "--sr2-acceptance-score",
+        type=str,
+        nargs="+",
+        default="qscore",
+        metavar="SCORES",
+        help="Comma-separated SmartRefine2 acceptance score(s): qscore, ccc, mi, sci",
+    )
+    g.add_argument(
+        "--sr2-acceptance-weights",
+        type=str,
+        nargs="+",
+        default=None,
+        metavar="WEIGHTS",
+        help="Comma-separated weights for --sr2-acceptance-score",
+    )
+    g.add_argument(
         "--sr2-final-minimise",
         action="store_true",
         default=False,
