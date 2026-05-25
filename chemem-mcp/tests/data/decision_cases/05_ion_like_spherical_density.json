@@ -1,0 +1,23 @@
+{
+  "schema_version": "0.1",
+  "case_id": "ion_like_spherical_density",
+  "description": "Compact spherical density with peak 5.1σ; three protein donor atoms (ASP carboxylate + ATP O1G) within 2.1 Å. No plausible ligand fit.",
+  "stage": "density_assignment",
+  "input_evidence": {
+    "segment_id": "site_002_blob_011",
+    "shape": "compact_spherical",
+    "volume_angstrom3": 22.0,
+    "peak_density": 5.1,
+    "donor_atoms_within_3A": ["ASP87:OD1", "ASP87:OD2", "ATP:O1G"],
+    "best_ligand_candidate_ccc": 0.31,
+    "rate_limits_remaining": {"run_ion_search": 3, "detect_ion_like_density": 5}
+  },
+  "expected_decision": {
+    "next_action": "run_tool",
+    "tool_name": "run_ion_search",
+    "tool_tier": "monolithic",
+    "stage_after": "ion_analysis",
+    "rationale": "Density shape and donor environment match a metal coordination site. Trigger ion search to enumerate metal templates from PDB homologs."
+  },
+  "notes": "Acceptable alternates: detect_ion_like_density (atomic primitive) as a precursor."
+}

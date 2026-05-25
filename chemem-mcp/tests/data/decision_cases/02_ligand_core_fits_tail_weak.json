@@ -1,0 +1,35 @@
+{
+  "schema_version": "0.1",
+  "case_id": "ligand_core_fits_tail_weak",
+  "description": "Per-atom Q-scores high on the ligand core (adenine/ribose) but very low at the terminal phosphate. Mean CCC still 0.74 but density coverage is uneven.",
+  "stage": "density_assignment",
+  "input_evidence": {
+    "segment_id": "site_001_blob_004",
+    "best_candidate": {
+      "ligand_id": "ATP",
+      "pose_id": "ATP_pose_007_min",
+      "scores": {
+        "ccc": 0.74,
+        "mapq_mean": 0.62,
+        "density_coverage": 0.71,
+        "clash_count": 1,
+        "severe_clash_count": 0
+      },
+      "per_atom_qscore": {"min": 0.18, "max": 0.82},
+      "warnings": ["terminal phosphate Q-scores < 0.25"]
+    },
+    "rate_limits_remaining": {
+      "subtract_ligand_density": 5,
+      "render_snapshot": 200,
+      "compute_qscore_per_atom": 2
+    }
+  },
+  "expected_decision": {
+    "next_action": "run_tool",
+    "tool_name": "subtract_ligand_density",
+    "tool_tier": "atomic",
+    "stage_after": "density_assignment",
+    "rationale": "Tail under-fits; compute residual density to see whether tail belongs elsewhere (could be alternative conformer or solvent)."
+  },
+  "notes": "Acceptable alternates: render_snapshot, compute_qscore_per_atom."
+}

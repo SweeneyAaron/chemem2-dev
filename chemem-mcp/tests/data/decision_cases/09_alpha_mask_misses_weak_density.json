@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1",
+  "case_id": "alpha_mask_misses_weak_density",
+  "description": "Binding site site_003 has visible weak ligand-like density but generate_alpha_masks emitted zero segments at the default threshold of 2.5σ.",
+  "stage": "density_assignment",
+  "input_evidence": {
+    "site_id": "site_003",
+    "segments_at_site": [],
+    "site_density_summary": {
+      "peak_density": 2.1,
+      "mean_density": 0.9,
+      "volume_above_1sigma_angstrom3": 380.0
+    },
+    "rate_limits_remaining": {"loosen_alpha_mask": 3, "generate_alpha_masks": 4}
+  },
+  "expected_decision": {
+    "next_action": "run_tool",
+    "tool_name": "loosen_alpha_mask",
+    "tool_tier": "parameter_tweak",
+    "stage_after": "density_assignment",
+    "rationale": "Density is below the current threshold but volume + position suggest a real but weak ligand. Loosen the alpha-mask to capture it before any docking can happen."
+  },
+  "notes": "Directly calling generate_alpha_masks with reduced threshold_sigma is also acceptable."
+}

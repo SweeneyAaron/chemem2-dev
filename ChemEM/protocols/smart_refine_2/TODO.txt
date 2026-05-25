@@ -22,7 +22,7 @@ Exo torsions?
 3. Add a best-solution cache.
 4. Add patience / early stopping. DONE!
 5. Propagate multiple solutions through iterations.
-6. Add richer and multiple scoring functions.
+6. Add richer and multiple scoring functions DONE.
 7. Make hydrogen handling configurable and hydrogen-ready Done.
 8. Add optional OpenMM minimisation Done.
 9. Optimise speed after the algorithm shape is stable.

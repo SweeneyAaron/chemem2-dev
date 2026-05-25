@@ -1,0 +1,24 @@
+{
+  "schema_version": "0.1",
+  "controller_step_id": "controller_0021",
+  "stage": "density_assignment",
+  "next_action": "run_tool",
+  "tool_name": "increase_docking_diversity",
+  "tool_tier": "parameter_tweak",
+  "tool_arguments": {
+    "site_id": "site_001",
+    "ligand_id": "ATP"
+  },
+  "reason": "All current candidates for site_001_blob_006 have low density coverage but segment shape is elongated and ligand-like; docking rerun count is 1 of allowed 3.",
+  "evidence_used": [
+    "site_001_blob_006 has ligand-like elongated density",
+    "all current candidates have coverage < 0.5",
+    "rate-limit remaining for dock_ligands_to_segment[site_001:ATP] = 2"
+  ],
+  "uncertainties": [
+    "ligand identity may still be wrong; ATP and ADP both plausible"
+  ],
+  "self_critique": "I am favouring a docking rerun before considering whether the segment is actually two overlapping densities. If the next rerun still fails, switch to loosen_alpha_mask before exhausting docking budget.",
+  "red_flags": ["docking diversity may not be the bottleneck"],
+  "confidence": 0.62
+}

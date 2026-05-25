@@ -500,7 +500,7 @@ class SmartRefine2:
     def run(self):
         self.get_protein_complex()
         self.get_refine_ligands()
-        
+        self.get_output()
         self.fit_results = []
         self.debug_sdf_paths = []
 
@@ -790,17 +790,17 @@ def refine_ligand(
         )
 
         #debug writer here!!!
-        if branch_dir:
-            iter_branch_dir = os.path.join(branch_dir, f"iter_{iteration}")
-            os.makedirs(iter_branch_dir, exist_ok=True)
-            _debug_write_branch_results(
-                refine_ligand,
-                branch_results,
-                iter_branch_dir,
-                iteration=iteration,
-            )
+        #if branch_dir:
+        #    iter_branch_dir = os.path.join(branch_dir, f"iter_{iteration}")
+        #    os.makedirs(iter_branch_dir, exist_ok=True)
+        #    _debug_write_branch_results(
+        #        refine_ligand,
+        #        branch_results,
+        #        iter_branch_dir,
+        #        iteration=iteration,
+        #    )
         #add per iteration debugger here
-        _debug_write_iteration_ligand(refine_ligand, iter_dir, iteration=iteration)
+        #_debug_write_iteration_ligand(refine_ligand, iter_dir, iteration=iteration)
         if stop_reason == "patience":
             print(
                 "[smart_refine_2] early stopping: "

@@ -1,0 +1,28 @@
+{
+  "schema_version": "0.1",
+  "refinement_id": "smart_refine_2_run_003",
+  "status": "ok",
+  "inputs": {
+    "pose_ids": ["ATP_pose_012_min"],
+    "ion_candidate_ids": ["ion_site_002_blob_011_candidate_001"]
+  },
+  "stability": {
+    "nan_detected": false,
+    "max_ligand_rmsd_from_start": 0.9,
+    "max_protein_local_rmsd": 0.4,
+    "energy_exploded": false,
+    "coordination_restraints_stable": true
+  },
+  "score_deltas": {
+    "mean_ligand_ccc_delta": 0.08,
+    "mean_mapq_delta": 0.05,
+    "severe_clash_delta": -1,
+    "ligand_strain_delta": 0.7
+  },
+  "files": {
+    "refined_model_pdb": "runs/case001/refine/smart_refine_2_run_003/model.pdb",
+    "refined_ligands_sdf": "runs/case001/refine/smart_refine_2_run_003/ligands.sdf",
+    "summary_json": "runs/case001/refine/smart_refine_2_run_003/summary.json"
+  },
+  "warnings": []
+}

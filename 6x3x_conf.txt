@@ -1,0 +1,7 @@
+protein = /Users/aaron.sweeney/Documents/ChemEM2/docking/test_data//6x3x_protein.pdb
+#ligand = CN1c2ccc(cc2C(=NCC1=O)c3ccccc3)Cl
+ligand = NCCCC(O)=O
+ligand = /Users/aaron.sweeney/Documents/ChemEM2/docking/test_data/6x3x_ligand_renum.sdf
+output = /Users/aaron.sweeney/Documents/chemem2_build/ChemEM2_feb26/chemem2-dev/test/multi_ligand/6x3x
+densmap = /Users/aaron.sweeney/Documents/ChemEM2/high_res/6x3x.mrc
+resolution = 2.92

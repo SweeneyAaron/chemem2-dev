@@ -1,0 +1,30 @@
+{
+  "schema_version": "0.1",
+  "ion_candidate_id": "ion_site_002_blob_011_candidate_001",
+  "segment_id": "site_002_blob_011",
+  "proposed_identity": "Mg2+",
+  "confidence": 0.61,
+  "density": {
+    "peak_density": 5.2,
+    "shape": "compact_spherical",
+    "volume_angstrom3": 22.0
+  },
+  "coordination": {
+    "geometry": "octahedral_partial",
+    "coordination_number": 5,
+    "donor_atoms": [
+      "ASP87:OD1",
+      "ASP87:OD2",
+      "ATP:O1G",
+      "HOH301:O",
+      "HOH302:O"
+    ],
+    "mean_distance_angstrom": 2.13,
+    "distance_std_angstrom": 0.18
+  },
+  "red_flags": ["one expected coordination position missing"],
+  "recommended_next_checks": [
+    "try Mg2+ and water alternative",
+    "run ion coordination refinement"
+  ]
+}

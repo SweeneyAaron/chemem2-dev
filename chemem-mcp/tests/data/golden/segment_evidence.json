@@ -1,0 +1,59 @@
+{
+  "schema_version": "0.1",
+  "segment_id": "site_001_blob_004",
+  "center_xyz": [12.4, 8.1, -3.2],
+  "volume_angstrom3": 420.0,
+  "peak_density": 4.8,
+  "mean_density": 1.7,
+  "local_background_mean": 0.35,
+  "local_background_std": 0.12,
+  "nearby_residues": ["LYS42", "ASP87", "TYR120"],
+  "possible_binding_site_ids": ["site_001"],
+  "alpha_mask_parameters": {
+    "threshold_sigma": 2.5,
+    "smoothing": 1.0,
+    "min_blob_volume": 50.0
+  },
+  "candidate_assignments": [
+    {
+      "assignment_id": "site_001_blob_004_ATP_pose_012_min",
+      "segment_id": "site_001_blob_004",
+      "ligand_id": "ATP",
+      "pose_id": "ATP_pose_012_min",
+      "status": "ok",
+      "scores": {
+        "dock_score": -8.4,
+        "minimised_score": -10.1,
+        "ccc": 0.72,
+        "mi": 0.31,
+        "mapq_mean": 0.64,
+        "density_coverage": 0.81,
+        "segment_ligand_volume_ratio": 1.12,
+        "clash_count": 1,
+        "severe_clash_count": 0,
+        "ligand_strain_kcal_mol": 3.2
+      },
+      "interactions": {
+        "hbonds": 3,
+        "salt_bridges": 1,
+        "pi_stacking": 0,
+        "metal_coordination": 0,
+        "key_residues": ["LYS42", "ASP87", "TYR120"]
+      },
+      "warnings": ["terminal phosphate has weaker density than adenine/ribose core"]
+    }
+  ],
+  "non_ligand_hypotheses": [
+    {
+      "type": "solvent_or_noise",
+      "confidence": 0.22,
+      "reason": "segment volume and local peak are compatible with weak solvent-like density"
+    },
+    {
+      "type": "ion_or_metal",
+      "confidence": 0.05,
+      "reason": "no clear coordination geometry found"
+    }
+  ],
+  "warnings": []
+}

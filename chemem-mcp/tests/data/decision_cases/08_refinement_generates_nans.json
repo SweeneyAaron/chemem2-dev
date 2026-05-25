@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1",
+  "case_id": "refinement_generates_nans",
+  "description": "smart_refine_2 returned nan_detected=True and energy_exploded=True. The refinement budget for this assignment set is exhausted.",
+  "stage": "smart_refine_2",
+  "input_evidence": {
+    "refinement_id": "smart_refine_2_set001_run02",
+    "stability": {"nan_detected": true, "energy_exploded": true, "max_ligand_rmsd_from_start": 9.7},
+    "score_deltas": {"mean_ligand_ccc_delta": null, "severe_clash_delta": null},
+    "rate_limits_remaining": {"run_smart_refine_2": 0, "rerun_smart_refine_softer_restraints": 0}
+  },
+  "expected_decision": {
+    "next_action": "stop_ambiguous",
+    "tool_name": null,
+    "tool_tier": null,
+    "stage_after": "final_report",
+    "rationale": "Refinement diverged and no rerun budget remains. Mark this assignment as ambiguous and advance to a final report flagging the failure for human inspection."
+  },
+  "notes": "If any rerun budget remains, choosing rerun_smart_refine_softer_restraints is also acceptable."
+}

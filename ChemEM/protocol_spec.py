@@ -206,261 +206,6 @@ def add_refine_args(p):
     g.add_argument('--com_restrain_alpha_per_nm', type=float, default=80.0)
 
     
-def search_refine_deps(args):
-    return tuple()
-
-def add_search_refine_args(p):
-    g = p.add_argument_group("Search Refine (map-metric guided)")
-
-    g.add_argument("--sr-map-source", type=str, default="confidence",
-                   help="Map source policy: confidence | raw | difference")
-
-    g.add_argument("--sr-scorer", type=str, default="sci",
-                   choices=["sci", "ccc", "mi", "qscore"],
-                   help="Goodness-of-fit metric driving both direction and scoring")
-    g.add_argument("--sr-accept-strategy", type=str, default="greedy",
-                   choices=["greedy", "metropolis", "basin_hopping"],
-                   help="Proposal acceptance strategy")
-
-    g.add_argument("--sr-max-outer-iter", type=int, default=50)
-    g.add_argument("--sr-patience", type=int, default=4)
-    g.add_argument("--sr-min-delta", type=float, default=1e-6)
-
-    g.add_argument("--sr-proposals-per-iter", type=int, default=6)
-    g.add_argument("--sr-md-steps-per-iter", type=int, default=250)
-    g.add_argument("--sr-minimise-max-iters", type=int, default=200)
-    g.add_argument("--sr-md-temp-k", type=float, default=150.0)
-    g.add_argument("--sr-seed", type=int, default=1)
-
-    g.add_argument("--sr-pocket-radius", dest="sr_pocket_radius", type=float, default=12.0,
-                   help="Pocket-shell radius for local subset selection (Å)")
-    g.add_argument("--sr-map-pad-a", type=float, default=3.0,
-                   help="Padding for local map extraction around the local structure (Å)")
-
-    g.add_argument("--sr-global-k", type=float, default=0.0,
-                   help="OpenMM map potential weight for search_refine")
-    g.add_argument("--sr-pin-k", type=float, default=5000.0,
-                   help="Protein pin strength for local environment")
-
-    g.add_argument("--sr-max-atom-delta-a", type=float, default=1.5,#from 0.5
-                   help="Maximum per-proposal displacement cap per ligand heavy atom when building pull targets (Å)")
-    g.add_argument("--sr-trust-k", type=float, default=250.0,
-                   help="Harmonic pull strength toward per-atom target coordinates (kcal/mol/Å^2)")
-
-    # Gradient estimation
-    g.add_argument("--sr-fd-step-a", type=float, default=0.25, #from 0.1
-                   help="Finite-difference step (Å) for metric-gradient estimation")
-    g.add_argument("--sr-fd-mode", type=str, default="central",
-                   choices=["central", "forward"],
-                   help="Finite-difference scheme for metric gradients")
-
-    # Acceptance (metropolis / basin-hopping)
-    g.add_argument("--sr-accept-temp-start", type=float, default=0.05,
-                   help="Metropolis temperature at outer-iter 1")
-    g.add_argument("--sr-accept-temp-end", type=float, default=0.005,
-                   help="Metropolis temperature at max_outer_iter")
-    g.add_argument("--sr-basin-hop-stale", type=int, default=3,
-                   help="Consecutive rejects before basin-hopping emits a perturb")
-    g.add_argument("--sr-basin-hop-sigma-a", type=float, default=0.3,
-                   help="Per-atom Gaussian kick sigma (Å) on a basin-hopping perturb")
-
-    # MI-specific
-    g.add_argument("--sr-mi-fd-step-a", type=float, default=0.1,
-                   help="FD step (Å) for MI gradient (histogram MI is discontinuous)")
-    g.add_argument("--sr-mi-nbins", type=int, default=20,
-                   help="Number of histogram bins for MI")
-    g.add_argument("--sr-mi-normalized", action="store_true", default=False,
-                   help="Use normalized MI (NMI) as the MI score")
-
-    # Q-score specific
-    g.add_argument("--sr-qscore-sigma-ref", type=float, default=0.6,
-                   help="Reference Gaussian sigma for Q-score")
-    g.add_argument("--sr-qscore-radii", type=str, default=None,
-                   help="Comma-separated radii (Å) for Q-score; default uses built-in shells")
-
-    # CCC-specific
-    g.add_argument("--sr-ccc-mask-mode", type=str, default="nonzero",
-                   choices=["nonzero", "full"],
-                   help="Voxel mask mode for truncated CC")
-
-    # SCI-specific knobs (consumed only when --sr-scorer sci)
-    g.add_argument("--sr-use-amp-eq", dest="sr_use_amp_eq", action="store_true", default=True,
-                   help="Enable Fourier amplitude equalization before SCI channel scoring")
-    g.add_argument("--sr-no-amp-eq", dest="sr_use_amp_eq", action="store_false",
-                   help="Disable Fourier amplitude equalization before SCI channel scoring")
-    g.add_argument("--sr-sci-sigma", type=float, default=1.0,
-                   help="Gaussian derivative scale (pixels) used for SCI channels")
-    g.add_argument("--sr-sigma-coeff", type=float, default=0.356,
-                   help="Sigma coefficient for simulated ligand density blur")
-    g.add_argument("--sr-sci-eps", type=float, default=1e-8,
-                   help="Numerical epsilon for log-domain SCI fusion")
-    g.add_argument("--sr-normalise-sim-map", dest="sr_normalise_sim_map", action="store_true", default=True,
-                   help="Normalize simulated ligand map before SCI scoring")
-    g.add_argument("--sr-no-normalise-sim-map", dest="sr_normalise_sim_map", action="store_false",
-                   help="Disable normalization of simulated ligand map before SCI scoring")
-
-    g.add_argument("--sr-w0", type=float, default=1.0,
-                   help="SCI weight for 0th-derivative CC channel")
-    g.add_argument("--sr-w1", type=float, default=1.0,
-                   help="SCI weight for first-derivative CC channels")
-    g.add_argument("--sr-w2", type=float, default=1.0,
-                   help="SCI weight for second-derivative CC channels")
-    g.add_argument("--sr-w-energy", type=float, default=0.0,
-                   help="Hybrid score penalty weight for z-scored MM energy")
-    g.add_argument("--sr-w-clash", type=float, default=0.0,
-                   help="Hybrid score penalty weight for z-scored clash penalty")
-    g.add_argument("--sr-clash-distance-a", type=float, default=1.6,
-                   help="Soft clash distance threshold for clash penalty (Å)")
-
-    g.add_argument("--sr-rmsd-dedupe", type=float, default=0.5,
-                   help="RMSD threshold (Å) for deduplicating ranked refined poses")
-    g.add_argument("--sr-return-n", type=int, default=1,
-                   help="Maximum number of refined poses to keep per ligand. 1 (default) emits only the best pose. Larger values emit additional poses only if they are within --sr-return-score-margin of the best AND separated by more than --sr-rmsd-dedupe")
-    g.add_argument("--sr-return-score-margin", type=float, default=0.01,
-                   help="Maximum final-score gap from the best pose for an additional pose to be returned when --sr-return-n > 1")
-    g.add_argument("--sr-stage", type=str, default="v2",
-                   choices=["v2", "legacy"],
-                   help="Refinement stage preset. 'v2' (default) enables analytical CCC gradient, diagnostic, dihedral / sub-region proposals, and directed basin-hopping kicks when their respective flags are set. 'legacy' forces the pre-refactor FD/tether/random-kick path bit-exact for A/B regression")
-    g.add_argument("--sr-verbose", action="store_true", default=False,
-                   help="Enable per-iteration/proposal debug output for search_refine")
-    g.add_argument("--sr-log-every", type=int, default=1,
-                   help="When --sr-verbose is enabled, print outer-loop updates every N iterations")
-    g.add_argument("--sr-debug-relax", action="store_true", default=False,
-                   help="With --sr-verbose, print per-stage OpenMM diagnostics (energy/forces/displacements) for each proposal")
-    g.add_argument("--sr-diagnostic", action="store_true", default=False,
-                   help="Per-iter per-atom fit diagnostic (Q-score + |∇CCC|, classified by Q thresholds). Requires --sr-verbose to be printed")
-    g.add_argument("--sr-q-good-thresh", type=float, default=0.7,
-                   help="Q-score threshold above which an atom is classified 'good' in the diagnostic")
-    g.add_argument("--sr-q-bad-thresh", type=float, default=0.3,
-                   help="Q-score threshold below which an atom is classified 'bad' in the diagnostic")
-    g.add_argument("--sr-target-bad-only", action="store_true", default=False,
-                   help="Apply gradient-driven tether displacement only to atoms classified 'bad' by the Q-score diagnostic; all other atoms are pinned at their current position. Implies the diagnostic is computed each iter")
-    g.add_argument("--sr-dihedral-proposals-per-iter", type=int, default=0,
-                   help="Per iter, replace up to N gradient proposals with dihedral-rotation proposals targeting bad atoms along their gradient direction. 0 disables. Implies the diagnostic is computed each iter")
-    g.add_argument("--sr-subregion-proposals-per-iter", type=int, default=0,
-                   help="Per iter, replace up to N proposals with sub-region rigid-body tweaks (closed-form Kabsch fit) applied to contiguous clusters of bad atoms. 0 disables. Implies the diagnostic is computed each iter")
-    g.add_argument("--sr-subregion-min-size", type=int, default=3,
-                   help="Minimum cluster size (in heavy atoms) for a sub-region rigid-body proposal to be considered")
-    g.add_argument("--sr-subregion-max-size", type=int, default=8,
-                   help="Maximum cluster size (in heavy atoms) for a sub-region rigid-body proposal; larger clusters are skipped to keep moves local")
-    g.add_argument("--sr-directed-kick", action="store_true", default=False,
-                   help="Replace the basin-hopping Gaussian kick with a directed dihedral delta on the worst-Q atom aligned with its CCC gradient. Falls back to Gaussian if no viable rotatable bond exists")
-    g.add_argument("--sr-directed-kick-angle-deg", type=float, default=90.0,
-                   help="Rotation magnitude (degrees) applied by the directed basin-hopping kick")
-
-
-def smart_ligand_refine_deps(args):
-    return tuple()
-
-
-def add_smart_ligand_refine_args(p):
-    g = p.add_argument_group("Smart Ligand Refinement")
-    g.add_argument("--slr-map-source", type=str, default="confidence",
-                   choices=["confidence", "raw", "difference"],
-                   help="Map source policy: confidence | raw | difference")
-    g.add_argument("--slr-max-macrocycles", type=int, default=3,
-                   help="Maximum smart ligand refinement macrocycles")
-    g.add_argument("--slr-smoke-test", action="store_true", default=False,
-                   help="Run a small SmartLigandRefinement search for quick pipeline testing")
-    g.add_argument("--slr-debug", action="store_true", default=False,
-                   help="Print human-readable SmartLigandRefinement progress messages")
-    g.add_argument("--slr-progress", action="store_true", default=False,
-                   help="Print concise SmartLigandRefinement progress without verbose candidate dumps")
-    g.add_argument("--slr-write-diagnostics", action="store_true", default=False,
-                   help="Write SmartLigandRefinement diagnostic JSON sidecar")
-    g.add_argument("--slr-profile-timings", action="store_true", default=False,
-                   help="Collect SmartLigandRefinement timing diagnostics")
-    g.add_argument("--slr-reference-sdf", type=str, default=None,
-                   help="Reference SDF used only for SmartLigandRefinement diagnostics")
-    g.add_argument("--slr-debug-candidate-limit", type=int, default=5,
-                   help="Maximum top-ranked candidates printed per stage when --slr-debug is enabled")
-    g.add_argument("--slr-pocket-radius", type=float, default=12.0,
-                   help="Pocket radius for the local OpenMM geometry environment (Å)")
-    g.add_argument("--slr-pin-k", type=float, default=5000.0,
-                   help="Protein pin strength in the no-map OpenMM geometry environment")
-    g.add_argument("--slr-use-openmm-geometry", dest="slr_use_openmm_geometry",
-                   action="store_true", default=True,
-                   help="Use a no-map OpenMM context for geometry evaluation when available")
-    g.add_argument("--slr-no-openmm-geometry", dest="slr_use_openmm_geometry",
-                   action="store_false",
-                   help="Disable OpenMM geometry context creation; use RDKit/simple checks")
-    g.add_argument("--slr-clean-candidates", action="store_true", default=False,
-                   help="Run short no-map geometry clean-up on generated candidates before scoring")
-    g.add_argument("--slr-clean-each-macrocycle", dest="slr_clean_each_macrocycle",
-                   action="store_true", default=True,
-                   help="Run short no-map geometry clean-up after accepted macrocycle moves")
-    g.add_argument("--slr-no-clean-each-macrocycle", dest="slr_clean_each_macrocycle",
-                   action="store_false",
-                   help="Disable no-map geometry clean-up after macrocycles")
-    g.add_argument("--slr-branch-rebuild", action="store_true", default=False,
-                   help="Enable targeted worst-atom branch rebuild")
-    g.add_argument("--slr-branch-beam-width", type=int, default=16,
-                   help="Beam width for SmartLigandRefinement branch rebuild")
-    g.add_argument("--slr-max-branch-torsions", type=int, default=6,
-                   help="Maximum torsions walked by SmartLigandRefinement branch rebuild")
-    g.add_argument("--slr-branch-minimum-offsets-deg", type=float, nargs="+", default=None,
-                   help="Offsets added to each branch-rebuild torsion-profile minimum "
-                        "(default: -20 -10 0 10 20)")
-    g.add_argument("--slr-no-ring-flips", dest="slr_enable_ring_flip_proposals",
-                   action="store_false", default=True,
-                   help="Disable exocyclic ring-flip proposals during branch rebuild")
-    g.add_argument("--slr-branch-rebuild-verbose", action="store_true", default=False,
-                   help="Emit per-seed/per-torsion/per-angle diagnostics for branch rebuild "
-                        "(requires --slr-write-diagnostics to surface in JSON)")
-    g.add_argument("--slr-branch-aggressive-angle-search", action="store_true", default=False,
-                   help="Add coarse 30 deg grid plus current+/-60/+/-120/180 flips on every "
-                        "branch-rebuild torsion (and ungate ring-flip on non-exocyclic torsions)")
-    g.add_argument("--slr-branch-aggressive-grid-step-deg", type=float, default=30.0,
-                   help="Coarse-grid step for --slr-branch-aggressive-angle-search")
-    g.add_argument("--slr-branch-aggressive-flip-offsets-deg", type=float, nargs="+", default=None,
-                   help="Flip offsets relative to current angle when "
-                        "--slr-branch-aggressive-angle-search is on (default: -120 -60 60 120 180)")
-    g.add_argument("--slr-branch-relative-q-seeding", action="store_true", default=False,
-                   help="Make atom badness use the per-ligand max-Q as floor so highish-Q "
-                        "atoms still produce non-zero badness")
-    g.add_argument("--slr-branch-relative-q-percentile", type=float, default=0.25,
-                   help="Bottom percentile of per-ligand Q distribution that becomes seeds when "
-                        "--slr-branch-use-anchor-seeds is on (default: 0.25)")
-    g.add_argument("--slr-branch-use-anchor-seeds", action="store_true", default=False,
-                   help="Allow ANCHOR-classified atoms to be branch-rebuild seeds when their Q "
-                        "lags the ligand's best (relaxes the repair-like downstream filter)")
-    g.add_argument("--slr-branch-min-acceptance-improvement", type=float, default=-1e-3,
-                   help="Score-improvement floor used only for branch_rebuild candidates "
-                        "(default: -1e-3, looser than the global 1e-4)")
-    g.add_argument("--slr-branch-max-anchor-rmsd", type=float, default=0.6,
-                   help="Anchor RMSD cap (Å) used only for branch_rebuild candidates "
-                        "(default: 0.6, looser than the global 0.25)")
-    g.add_argument("--slr-branch-no-accept-on-q-improvement",
-                   dest="slr_branch_accept_on_q_improvement",
-                   action="store_false", default=True,
-                   help="Disable the branch_rebuild fallback that accepts a candidate when "
-                        "low_tail_q AND mean Q both strictly improve")
-    g.add_argument("--slr-max-candidates-per-stage", type=int, default=256,
-                   help="Maximum candidates retained/scored per SmartLigandRefinement stage")
-    g.add_argument("--slr-max-torsion-profile-count", type=int, default=64,
-                   help="Maximum torsions scanned while building SmartLigandRefinement torsion profiles")
-    g.add_argument("--slr-torsion-scan-step-deg", type=float, default=10.0,
-                   help="Angular step for SmartLigandRefinement torsion profile scans")
-    g.add_argument("--slr-no-subregion-proposals", dest="slr_enable_subregion_proposals",
-                   action="store_false", default=True,
-                   help="Disable connected bad-atom subregion rigid-body proposals")
-    g.add_argument("--slr-torsion-profile-source", type=str, default="auto",
-                   choices=["auto", "openmm", "openff", "rdkit"],
-                   help="Torsion profile source: auto prefers OpenMM/OpenFF and falls back to RDKit")
-    g.add_argument("--slr-write-accepted-sdf", action="store_true", default=False,
-                   help="Reserved for writing accepted intermediate SDF snapshots")
-
-    g.add_argument("--slr-anchor-q-min", type=float, default=0.75)
-    g.add_argument("--slr-anchor-local-ccc-min", type=float, default=0.60)
-    g.add_argument("--slr-repair-q-max", type=float, default=0.55)
-    g.add_argument("--slr-min-halfmap-agreement", type=float, default=0.50)
-    g.add_argument("--slr-min-density-value", type=float, default=1e-6)
-    g.add_argument("--slr-target-q", type=float, default=0.75)
-    g.add_argument("--slr-min-torsion-badness", type=float, default=0.05)
-    g.add_argument("--slr-clash-distance-a", type=float, default=1.6,
-                   help="Soft protein-ligand clash distance threshold (Å)")
-
-    
     
 def mapq_score_deps(args):
     return tuple() 
@@ -641,6 +386,7 @@ def add_lining_refine_args(p):
 
 def smart_ligand_refine2_deps(args):
     return tuple()
+
 def add_smart_ligand_refine2_args(p):
     g = p.add_argument_group("Smart Ligand Refinement 2")
     g.add_argument(
@@ -700,17 +446,69 @@ def orchestrate_deps(args):
 def add_orchestrate_args(p):
     g = p.add_argument_group("Smart Orchestrator")
     g.add_argument("--orch-gate1-topk", type=int, default=5,
-                   help="Per site, keep top-K candidates after Gate 1 (Q-score triage).")
+                   help="Per site, keep top-K candidates after Gate 1 ranking.")
     g.add_argument("--orch-gate2-topk", type=int, default=2,
-                   help="Per site, keep top-K candidates after Gate 2 (Q-score + MMGBSA).")
-    g.add_argument("--orch-w-qscore", type=float, default=1.0,
-                   help="Weight on z(qscore) in Gate 2/3 composite (higher = better).")
+                   help="Per site, keep top-K candidates after Gate 2 ranking.")
+    g.add_argument("--orch-audit-mode",
+                   choices=["full", "scores", "selected", "off"],
+                   default="full",
+                   help="Persist orchestrator audit outputs: full, scores, selected, or off.")
+    g.add_argument("--orch-score-mode",
+                   choices=["absolute", "coverage", "qscore"],
+                   default="absolute",
+                   help="Pose ranking mode: absolute map fit, legacy coverage z-score, or Q-score.")
+    g.add_argument("--orch-w-qscore", type=float, default=0.5,
+                   help="Weight on Q-score in map-fit ranking.")
+    g.add_argument("--orch-w-qtail", type=float, default=0.25,
+                   help="Weight on low-tail Q-score in map-fit ranking.")
+    g.add_argument("--orch-w-density-coverage", type=float, default=5.0,
+                   help="Weight on site-density coverage in map-fit ranking.")
+    g.add_argument("--orch-w-density-overlap", type=float, default=1.0,
+                   help="Weight on density overlap in absolute map-fit ranking.")
+    g.add_argument("--orch-w-density-precision", type=float, default=0.5,
+                   help="Weight on ligand-density precision in legacy coverage ranking.")
+    g.add_argument("--orch-w-density-ccc", type=float, default=1.0,
+                   help="Weight on local density correlation in map-fit ranking.")
     g.add_argument("--orch-w-mmgbsa", type=float, default=0.5,
-                   help="Weight on -z(mmgbsa deltaG) in Gate 2/3 composite (lower deltaG = better).")
+                   help="Weight on -z(mmgbsa deltaG) in legacy Gate 2/3 composite.")
+    g.add_argument("--orch-density-threshold-frac", type=float, default=0.05,
+                   help="Fraction of site-map max density used for coverage/precision masks.")
+    g.add_argument("--orch-density-sci-mode",
+                   choices=["auto", "on", "off"],
+                   default="auto",
+                   help="Compute density SCI diagnostics: auto, on, or off.")
+    g.add_argument("--orch-shape-metrics",
+                   choices=["off", "gate3", "all"],
+                   default="gate3",
+                   help="Compute diagnostic density-shape metrics: off, Gate 3 only, or all density-scored stages.")
+    g.add_argument("--orch-mmgbsa-pose-window", type=float, default=0.15,
+                   help="Map-fit score window where MMGBSA may choose between poses of the same ligand.")
+    g.add_argument("--orch-min-assignment-score", type=float, default=3.25,
+                   help="Reject final sites below this absolute assignment score.")
+    g.add_argument("--orch-min-density-coverage", type=float, default=0.30,
+                   help="Reject final sites below this density coverage.")
+    g.add_argument("--orch-min-assignment-margin", type=float, default=0.15,
+                   help="Reject final sites when the best ligand margin is below this value.")
+    g.add_argument("--orch-expected-assignments", type=str, default=None,
+                   help="Optional labelled assignments for audit evaluation, e.g. '7:1,19:1'.")
+    g.add_argument("--orch-compute-density-sci", action="store_true",
+                   help="Compatibility alias for --orch-density-sci-mode on.")
     g.add_argument("--orch-skip-mmgbsa", action="store_true",
-                   help="Skip MMGBSA scoring at Gate 2/3 (use Q-score alone).")
-    g.add_argument("--orch-skip-search-refine", action="store_true",
-                   help="Skip the SearchRefine stage; pick final assembly straight from Gate 2.")
+                   help="Skip MMGBSA scoring at Gate 2/3.")
+    g.add_argument(
+        "--orch-final-refiner",
+        choices=["smart_refine_2", "search_refine", "none"],
+        default="smart_refine_2",
+        help="Final post-Gate-2 refinement stage before Gate 3 selection.",
+    )
+    g.add_argument(
+        "--orch-skip-final-refine",
+        "--orch-skip-search-refine",
+        dest="orch_final_refiner",
+        action="store_const",
+        const="none",
+        help="Skip the final refinement stage; pick final assembly straight from Gate 2.",
+    )
 
 
 SHORT_ALIASES = {
@@ -718,8 +516,6 @@ SHORT_ALIASES = {
     "dock": "-d",
     "alpha_mask" : "-am",
     "lining_refine": "-lr",
-    "search_refine": "-sr",
-    "smart_ligand_refine": "-slr",
     "ion_template_search": "-its",
     "orchestrate": "-o",
     "smart_ligand_refine2" : "-slr2"
@@ -764,23 +560,9 @@ REGISTRY = {
         deps=refine_deps,
         add_args=add_refine_args,
         help="MD-Refine ligand to density map"),
-
-    "search_refine": ProtocolSpec(
-        name="search_refine",
-        class_path="ChemEM.protocols.refine.search_refine:SearchRefine",
-        deps=search_refine_deps,
-        add_args=add_search_refine_args,
-        help="Iterative SCI-guided trust-region MD refinement from input conformer"),
-
-    "smart_ligand_refine": ProtocolSpec(
-        name="smart_ligand_refine",
-        class_path="ChemEM.protocols.refine.smart_ligand_refine:SmartLigandRefinement",
-        deps=smart_ligand_refine_deps,
-        add_args=add_smart_ligand_refine_args,
-        help="Q-score/CCC-guided near-fit ligand repair with OpenMM geometry filtering"),
-
+    
     "smart_ligand_refine2": ProtocolSpec(
-        name="smart_ligand_refine",
+        name="smart_ligand_refine2",
         class_path="ChemEM.protocols.smart_refine_2.smart_refine:SmartRefine2",
         deps=smart_ligand_refine2_deps,
         add_args=add_smart_ligand_refine2_args,
@@ -826,7 +608,7 @@ REGISTRY = {
         class_path="ChemEM.protocols.orchestrator:SmartOrchestrator",
         deps=orchestrate_deps,
         add_args=add_orchestrate_args,
-        help="Smart 3-gate funnel: dock -> qscore-triage -> refine -> qscore+mmgbsa -> search_refine -> assemble",
+        help="Smart 3-gate funnel: dock -> qscore-triage -> refine -> qscore+mmgbsa -> smart_refine_2 -> assemble",
     ),
 
 

@@ -1,0 +1,23 @@
+{
+  "schema_version": "0.1",
+  "case_id": "docking_diversity_too_low_elongated",
+  "description": "Elongated segment with volume 620 Å³ but all 5 docking poses for the candidate ligand cluster within RMSD 0.3 Å and cover only 45% of the segment volume.",
+  "stage": "density_assignment",
+  "input_evidence": {
+    "segment_id": "site_001_blob_006",
+    "shape": "elongated",
+    "volume_angstrom3": 620.0,
+    "pose_cluster_rmsd_angstrom": 0.3,
+    "pose_count": 5,
+    "best_density_coverage": 0.45,
+    "rate_limits_remaining": {"increase_docking_diversity": 3, "dock_ligands_to_segment": 1}
+  },
+  "expected_decision": {
+    "next_action": "run_tool",
+    "tool_name": "increase_docking_diversity",
+    "tool_tier": "parameter_tweak",
+    "stage_after": "density_assignment",
+    "rationale": "Poses are too clustered for an elongated segment. Increase docking diversity (more global search, looser RMSD clustering) to explore alternative orientations before assuming the ligand is wrong."
+  },
+  "notes": "If diversity budget is exhausted, narrow_docking_search around the under-covered tail is acceptable."
+}

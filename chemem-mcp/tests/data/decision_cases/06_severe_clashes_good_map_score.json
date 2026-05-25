@@ -1,0 +1,29 @@
+{
+  "schema_version": "0.1",
+  "case_id": "severe_clashes_good_map_score",
+  "description": "Best pose has CCC 0.82 and MapQ 0.74 but 3 severe clashes and ligand strain 18 kcal/mol — geometrically implausible despite map fit.",
+  "stage": "density_assignment",
+  "input_evidence": {
+    "segment_id": "site_001_blob_004",
+    "best_candidate": {
+      "ligand_id": "ATP",
+      "pose_id": "ATP_pose_004_min",
+      "scores": {
+        "ccc": 0.82,
+        "mapq_mean": 0.74,
+        "clash_count": 5,
+        "severe_clash_count": 3,
+        "ligand_strain_kcal_mol": 18.0
+      }
+    },
+    "rate_limits_remaining": {"analyse_clashes": 2, "analyse_ligand_strain": 2, "increase_docking_diversity": 3}
+  },
+  "expected_decision": {
+    "next_action": "run_tool",
+    "tool_name": "increase_docking_diversity",
+    "tool_tier": "parameter_tweak",
+    "stage_after": "density_assignment",
+    "rationale": "Map-fit is high but chemistry is broken. The current pose is overfit to density. Rerun docking with greater diversity to find a chemically plausible pose before accepting."
+  },
+  "notes": "Acceptable alternates: analyse_ligand_strain to confirm, then increase_docking_diversity."
+}
