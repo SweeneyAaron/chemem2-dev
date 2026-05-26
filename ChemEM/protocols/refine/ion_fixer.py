@@ -28,7 +28,8 @@ from ChemEM.parsers.parametised_ions import (
 )
 
 from ChemEM.parsers.parse_forcefield import ff_load
-from openmm import app, unit, LangevinMiddleIntegrator, Platform
+from openmm import app, unit, LangevinMiddleIntegrator
+from ChemEM.tools.resources import make_openmm_simulation
 
 import os
 import copy
@@ -1836,21 +1837,14 @@ class IonFixer:
         if random_seed is not None:
             integrator.setRandomNumberSeed(int(random_seed))
     
-        if platform_name is not None:
-            platform = Platform.getPlatformByName(str(platform_name))
-            simulation = app.Simulation(
-                topology,
-                self.openmm_system,
-                integrator,
-                platform,
-                platform_properties or {},
-            )
-        else:
-            simulation = app.Simulation(
-                topology,
-                self.openmm_system,
-                integrator,
-            )
+        simulation = make_openmm_simulation(
+            topology,
+            self.openmm_system,
+            integrator,
+            platform_name=platform_name,
+            source=getattr(self, "system", None),
+            platform_properties=platform_properties,
+        )
     
         simulation.context.setPositions(positions)
     

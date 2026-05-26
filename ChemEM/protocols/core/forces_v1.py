@@ -20,11 +20,11 @@ from openmm import (
     Continuous3DFunction,
     unit,
     LangevinIntegrator,
-    app, 
-    Platform
+    app,
 )
 from scipy.spatial import cKDTree
 from .biomolecule import find_atoms_outside_ligand
+from ChemEM.tools.resources import make_openmm_simulation, resolve_cpu_budget, thread_limit_env
 
 
 def add_sse_rmsd_forces(
@@ -429,17 +429,25 @@ def export_torsion_profile(ligand,
                            platform = 'OpenCL',
                            output = './',
                            normalise = True,
-                           write = False
+                           write = False,
+                           resource_owner=None,
+                           ncpu=None,
                            ):
     
     integrator = LangevinIntegrator(300*unit.kelvin, 1/unit.picoseconds, 2*unit.femtoseconds)
-    _platform = Platform.getPlatformByName(platform)
     system = ligand.complex_structure.createSystem()
     
     
     
-    simulation = app.Simulation(ligand.complex_structure.topology, 
-                            system, integrator, _platform)
+    with thread_limit_env(resolve_cpu_budget(ncpu if ncpu is not None else resource_owner)):
+        simulation = make_openmm_simulation(
+            ligand.complex_structure.topology,
+            system,
+            integrator,
+            platform_name=platform,
+            source=resource_owner,
+            ncpu=ncpu,
+        )
     
     simulation.context.setPositions(ligand.complex_structure.positions)
     force_group = 0

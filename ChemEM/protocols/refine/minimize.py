@@ -159,6 +159,7 @@ class Refine:
                 localise=False,
                 pin_specs=getattr(self.system.options, 'pin_specs', []),
                 distance_specs=getattr(self.system.options, 'distance_specs', []),
+                resource_owner=self.system,
             )
     
             final_energy = self._minimiser(env)
@@ -248,6 +249,5 @@ class Refine:
         self.refine()   
         
         self.write_output()
-
 
 

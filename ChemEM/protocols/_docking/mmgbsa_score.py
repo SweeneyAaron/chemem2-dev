@@ -12,7 +12,6 @@ from openmm import( unit,
                    CustomNonbondedForce,
                    NonbondedForce, 
                    CustomGBForce, 
-                   Context, 
                    VerletIntegrator, 
                    CustomExternalForce, 
                    GBSAOBCForce,
@@ -26,6 +25,7 @@ from dataclasses import dataclass
 from typing import Dict, List
 from rdkit import Chem
 from rdkit.Geometry import Point3D
+from ChemEM.tools.resources import make_openmm_context
 
 GAMMA= 0.005 
 BETA = 0.0
@@ -116,7 +116,11 @@ def ligand_traj_to_sdf(traj ,ligand ,outfile):
 def score_single_pose(positions,
                       ligand,
                       protein,
-                      pose_idx: str | None = None ):
+                      pose_idx: str | None = None,
+                      resource_owner=None,
+                      platform_name=None,
+                      ncpu=None,
+                      platform_properties=None):
     
     
     if pose_idx is None:
@@ -127,7 +131,14 @@ def score_single_pose(positions,
                                    positions)
     
     traj = parmed_structure_to_single_frame_traj(complex_struct) 
-    comps, deltaG = mmgbsa_from_traj(complex_struct, traj)
+    comps, deltaG = mmgbsa_from_traj(
+        complex_struct,
+        traj,
+        resource_owner=resource_owner,
+        platform_name=platform_name,
+        ncpu=ncpu,
+        platform_properties=platform_properties,
+    )
     
     return PoseScore(ligand_name = ligand.ligand_int,
                      pose_idx    = pose_idx,
@@ -170,7 +181,16 @@ def build_complex(protein_struct, ligand, pose_xyz_A):
     return copy.deepcopy(protein_struct) + lig
 
 
-def mmgbsa_from_traj(complex_struct, traj, gamma = GAMMA, beta = BETA):
+def mmgbsa_from_traj(
+    complex_struct,
+    traj,
+    gamma=GAMMA,
+    beta=BETA,
+    resource_owner=None,
+    platform_name=None,
+    ncpu=None,
+    platform_properties=None,
+):
     totals = {"EEL": [], "VDW": [], "EGB": [], "ECAV": []}
     rec_sys, lig_sys, cmp_sys, rec_idx, lig_idx = make_system_triplet(complex_struct)
     
@@ -182,7 +202,11 @@ def mmgbsa_from_traj(complex_struct, traj, gamma = GAMMA, beta = BETA):
 
         dEEL, dVDW, dEGB, dECAV = frame_mmgbsa(
                                     cmp_sys, rec_sys, lig_sys,
-                                    pos_nm, rec_pos, lig_pos, frame, gamma, beta)
+                                    pos_nm, rec_pos, lig_pos, frame, gamma, beta,
+                                    resource_owner=resource_owner,
+                                    platform_name=platform_name,
+                                    ncpu=ncpu,
+                                    platform_properties=platform_properties)
         
         for k,v in zip(totals, (dEEL,dVDW,dEGB,dECAV)):
             totals[k].append(v)
@@ -192,11 +216,21 @@ def mmgbsa_from_traj(complex_struct, traj, gamma = GAMMA, beta = BETA):
     return avg, avg["deltaG"]
 
 def frame_mmgbsa( cmp_sys, rec_sys, lig_sys,
-              pos, rec_pos, lig_pos, frame, gamma, beta):
+              pos, rec_pos, lig_pos, frame, gamma, beta,
+              resource_owner=None,
+              platform_name=None,
+              ncpu=None,
+              platform_properties=None):
 
-    eel_c, vdw_c, egb_c, ecav_c = compute_frame_energies(cmp_sys, pos,      frame, gamma, beta)
-    eel_r, vdw_r, egb_r, ecav_r = compute_frame_energies(rec_sys, rec_pos, frame, gamma, beta)
-    eel_l, vdw_l, egb_l, ecav_l = compute_frame_energies(lig_sys, lig_pos, frame, gamma, beta)
+    kwargs = dict(
+        resource_owner=resource_owner,
+        platform_name=platform_name,
+        ncpu=ncpu,
+        platform_properties=platform_properties,
+    )
+    eel_c, vdw_c, egb_c, ecav_c = compute_frame_energies(cmp_sys, pos,      frame, gamma, beta, **kwargs)
+    eel_r, vdw_r, egb_r, ecav_r = compute_frame_energies(rec_sys, rec_pos, frame, gamma, beta, **kwargs)
+    eel_l, vdw_l, egb_l, ecav_l = compute_frame_energies(lig_sys, lig_pos, frame, gamma, beta, **kwargs)
 
     return (eel_c - (eel_r + eel_l),
             vdw_c - (vdw_r + vdw_l),
@@ -253,9 +287,27 @@ def make_system_triplet(complex_struct: pmd.Structure):
 # ---------------------------------------------------------------------
 
 
-def compute_frame_energies(system, positions, frame, gamma, beta):
+def compute_frame_energies(
+    system,
+    positions,
+    frame,
+    gamma,
+    beta,
+    resource_owner=None,
+    platform_name=None,
+    ncpu=None,
+    platform_properties=None,
+):
     intg   = VerletIntegrator(0.002*unit.picoseconds)
-    ctx    = Context(system, intg)
+    platform_name = platform_name if platform_name is not None else getattr(resource_owner, "platform", None)
+    ctx    = make_openmm_context(
+        system,
+        intg,
+        platform_name=platform_name,
+        source=resource_owner,
+        ncpu=ncpu,
+        platform_properties=platform_properties,
+    )
     ctx.setPositions(positions)
 
     EEL   = ctx.getState(getEnergy=True, groups={1}).getPotentialEnergy()

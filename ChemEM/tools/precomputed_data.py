@@ -59,7 +59,7 @@ from openmm import MonteCarloBarostat, XmlSerializer, app, unit, CustomCompoundB
 from openmm.app import HBonds, NoCutoff, PDBFile, Modeller, Topology, PME, StateDataReporter, PDBReporter
 from openmm.unit.quantity import Quantity
 from openmm.unit import norm
-from openmm import LangevinIntegrator, Platform
+from openmm import LangevinIntegrator
 from openmm.app import ForceField as OpenMMForceField
 from openmm import NonbondedForce
 from pdbfixer import PDBFixer
@@ -86,6 +86,12 @@ from rdkit.Chem import rdMolDescriptors
 from scipy.ndimage import gaussian_filter
 from scipy.ndimage import distance_transform_edt, binary_dilation
 from scipy import signal
+from ChemEM.tools.resources import (
+    make_openmm_simulation,
+    resolve_cpu_budget,
+    set_native_thread_limit,
+    thread_limit_env,
+)
 
 
 def _attach_attributes(dst, src, *, prefix: str = "") -> None:
@@ -156,7 +162,7 @@ class PreCompDataLigand:
     '''
     
     
-    def __init__(self, ligand, platform, flexible_rings = False):
+    def __init__(self, ligand, platform, flexible_rings = False, resource_owner=None, ncpu=None):
         # ------------------------------------------------------------------ #
         # basic per-atom arrays                                              #
         # ------------------------------------------------------------------ #
@@ -177,7 +183,13 @@ class PreCompDataLigand:
         self.torsion_lists = get_torsion_lists(ligand.mol)
         self.end_torsions = len(self.torsion_lists)
         
-        self.ligand_torsion_profile = export_torsion_profile(ligand, self.torsion_lists, platform)
+        self.ligand_torsion_profile = export_torsion_profile(
+            ligand,
+            self.torsion_lists,
+            platform,
+            resource_owner=resource_owner,
+            ncpu=ncpu,
+        )
         self.ligand_torsion_idxs = [i[1] for i in self.ligand_torsion_profile]
         self.ligand_torsion_scores = [i[2] for i in self.ligand_torsion_profile]
         new_torsions = [list(i) for i in new_torsions if list(i) not in self.ligand_torsion_idxs ]
@@ -377,7 +389,8 @@ class PreCompDataProtein:
         #-----docking setup-----
         self.n_global_search = system.options.n_global_search 
         self.n_local_search = system.options.n_local_search 
-        self.ncpu = os.cpu_count() - 2 
+        self.ncpu = resolve_cpu_budget(system)
+        set_native_thread_limit(self.ncpu)
         self.repCap0 = system.options.repulsion_cap_0
         self.repCap1 = system.options.repulsion_cap_1
         
@@ -2367,17 +2380,25 @@ def export_torsion_profile(ligand,
                            platform,
                            output = './',
                            normalise = True,
-                           write = False
+                           write = False,
+                           resource_owner=None,
+                           ncpu=None,
                            ):
     
     integrator = LangevinIntegrator(300*unit.kelvin, 1/unit.picoseconds, 2*unit.femtoseconds)
-    _platform = Platform.getPlatformByName(platform)
     system = ligand.complex_structure.createSystem()
     
     
     
-    simulation = app.Simulation(ligand.complex_structure.topology, 
-                            system, integrator, _platform)
+    with thread_limit_env(resolve_cpu_budget(ncpu if ncpu is not None else resource_owner)):
+        simulation = make_openmm_simulation(
+            ligand.complex_structure.topology,
+            system,
+            integrator,
+            platform_name=platform,
+            source=resource_owner,
+            ncpu=ncpu,
+        )
     
     simulation.context.setPositions(ligand.complex_structure.positions)
     force_group = 0
@@ -4312,5 +4333,3 @@ def build_site_maps_standalone(
     }
 
     return site_maps
-
-

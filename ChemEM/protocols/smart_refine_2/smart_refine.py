@@ -452,6 +452,7 @@ class SmartRefine2:
                 global_k=150.0,
                 pin_specs=getattr(options, "pin_specs", []),
                 distance_specs=getattr(options, "distance_specs", []),
+                resource_owner=self.system,
             )
             final_energy = minimiser_cls(env).run(
                 do_biased_md=getattr(options, "do_biased_md", False),

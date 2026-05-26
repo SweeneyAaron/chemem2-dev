@@ -576,7 +576,11 @@ class SmartOrchestrator:
                 self._log(f"[orchestrator] MMGBSA {done}/{n_total}: {label}")
                 ligand = self.system.ligand[c.ligand_idx]
                 ps = scoring.mmgbsa_single_frame(
-                    c.coords, ligand, self.system.protein, pose_idx=c.pose_idx
+                    c.coords,
+                    ligand,
+                    self.system.protein,
+                    pose_idx=c.pose_idx,
+                    resource_owner=self.system,
                 )
                 if ps is None:
                     c.mmgbsa = None

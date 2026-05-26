@@ -17,7 +17,7 @@ from typing import List, Optional, Union
 
 from openmm import (
     unit, app, 
-    LangevinIntegrator, Platform, 
+    LangevinIntegrator,
     MonteCarloBarostat,
     Vec3
 )
@@ -25,6 +25,7 @@ from openmm.app import NoCutoff, HBonds, PDBFile
 
 from ChemEM.tools.forces import ForceBuilder
 from ChemEM.tools.biomolecule import select_atoms, find_atoms_outside_ligand, create_structure_subset
+from ChemEM.tools.resources import make_openmm_simulation
 
 from openmm import CustomExternalForce
 
@@ -78,6 +79,9 @@ class PoseMinimiser:
         global_k : float = 75.0,
         smooth_sigma_A : float = 1.0,
         do_biased_md : bool = True,
+        resource_owner=None,
+        ncpu: Optional[int] = None,
+        platform_properties: Optional[dict] = None,
     ):
         
         self.log = ProgressLogger()
@@ -116,16 +120,16 @@ class PoseMinimiser:
         )
         
         
-        self.platform = Platform.getPlatformByName(platform_name)
-        props = {"Precision": "single"} if platform_name != 'CPU' else {}
-        
-        self.simulation = app.Simulation(
+        self.simulation = make_openmm_simulation(
             self.complex_structure.topology,
             self.complex_system,
             self.integrator,
-            self.platform,
-            platformProperties=props
+            platform_name=platform_name,
+            source=resource_owner,
+            ncpu=ncpu,
+            platform_properties=platform_properties,
         )
+        self.platform = self.simulation.context.getPlatform()
         
         self.simulation.context.setPositions(self.complex_structure.positions)
         self.restraint_config = {

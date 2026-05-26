@@ -27,6 +27,7 @@ from ChemEM.tools.precomputed_data import PreCompDataLigand, PreCompDataProtein 
 from ChemEM.tools.docking import energy_cutoff, write_results, dock_worker#move
 from ChemEM.tools.ligand import  mol_with_positions #stay
 from ChemEM.tools.geometry import rmsd_cluster #stay
+from ChemEM.tools.resources import resolve_cpu_budget, thread_limit_env
 #refactored
 from .mmgbsa_score import mmgbsa_score_docked_poses, write_mmgbsa_scores
 from ChemEM.protocols.refine.pose_minimiser import BatchPoseMinimizer, ChemEMSimulationSetup
@@ -246,7 +247,12 @@ class Docking:
         
         
         return [
-            (mol, PreCompDataLigand(mol,self.system.platform, flexible_rings=self.system.options.flexible_rings))
+            (mol, PreCompDataLigand(
+                mol,
+                self.system.platform,
+                flexible_rings=self.system.options.flexible_rings,
+                resource_owner=self.system,
+            ))
             for mol in self.system.ligand
         ]
 
@@ -337,7 +343,8 @@ class Docking:
             platform_name=getattr(self.system, 'platform', 'CPU'),
             protein_restraint='protein',
             pin_k=5000.0,
-            localise=False
+            localise=False,
+            resource_owner=self.system,
         )
         
         
@@ -407,11 +414,16 @@ class Docking:
         jobs = list(enumerate(combined.split_site_translation_centroid_raidus))
         n_jobs = len(jobs)
 
-        max_jobs = max(1, (os.cpu_count() or 1) // self.system.CPUS_PER_SITE)
+        total_cpus = resolve_cpu_budget(self.system)
+        cpus_per_site = max(1, min(int(self.system.CPUS_PER_SITE), total_cpus))
+        max_jobs = max(1, total_cpus // cpus_per_site)
         max_jobs = min(max_jobs, n_jobs)
 
         if max_jobs > 1 and not self.system.options.no_para:
-            self.system.log(f"Running {max_jobs} split-site jobs in parallel.")
+            self.system.log(
+                f"Running {max_jobs} split-site jobs in parallel "
+                f"({cpus_per_site} CPU(s) per job, {total_cpus} total)."
+            )
             with ProcessPoolExecutor(max_workers=max_jobs) as pool:
                 futs = [
                     pool.submit(
@@ -420,7 +432,7 @@ class Docking:
                         combined,
                         centroid,
                         radius,
-                        self.system.CPUS_PER_SITE,
+                        cpus_per_site,
                     )
                     for _, (centroid, radius) in jobs
                 ]
@@ -433,12 +445,14 @@ class Docking:
                 self.system.log(f"Docking split-site {idx} serially.")
                 local = combined.copy()
                 local.add_multi_site_bias(centroid, radius)
-                results.extend(self.dock(block, local))
+                results.extend(self.dock(block, local, ncpu=cpus_per_site))
 
         return sorted(results, key=lambda r: r[0])
 
-    def dock(self, block, precomp_echo):
-        docked_solutions = docking.run_aco_docking(precomp_echo, block)
+    def dock(self, block, precomp_echo, ncpu=None):
+        budget = ncpu if ncpu is not None else resolve_cpu_budget(getattr(self, "system", None))
+        with thread_limit_env(budget):
+            docked_solutions = docking.run_aco_docking(precomp_echo, block)
         return sorted(docked_solutions, key=lambda x: x[0])
 
     def _post_process(self, ligand, poses):
@@ -629,5 +643,3 @@ def multi_conf_to_sdf_string(mol):
     
     # Join them with the standard SDF separator
     return "\n$$$$\n".join(sdf_blocks) + "\n$$$$\n"
-
-

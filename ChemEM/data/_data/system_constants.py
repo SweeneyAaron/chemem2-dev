@@ -10,7 +10,7 @@
 SYSTEM_ATTRS = ['centroid', 'segment_centroid', 'exclude', 'segment_dimensions', 'output', 'auto_split_radius',
                 'ligand_id','difference_map_id', 'full_map_id','protein_id',
                 'mi_weight', 'global_k', 'docking_radius', 'multiligand','platform', 'cutoff',
-                'flexible_side_chains', 'solvent', 'n_cpu', 'label_threshold_sigma', 'label_threshold',
+                'flexible_side_chains', 'solvent', 'ncpu', 'n_cpu', 'n_cpus', 'label_threshold_sigma', 'label_threshold',
                 'n_ants', 'theta',  'rho', 'sigma' , 'max_iterations',
                 'post_process_num_solutions', 'post_process_solution', 'refine_side_chains',
                 'cycles', 'start_temp', 'norm_temp', 'top_temp', 'temperature_step',

@@ -471,6 +471,7 @@ class LiningRefine:
             restrain_side_chains=False,
             protein_restraint="none",
             global_k=float(opts.lr_global_k),
+            resource_owner=self.system,
         )
 
         flagged_subset_indices = []

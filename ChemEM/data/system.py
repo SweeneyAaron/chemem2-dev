@@ -6,6 +6,7 @@
 # This module was developed by:
 #   Aaron Sweeney    <aaron.sweeney AT cssb-hamburg.de>
 from ChemEM.messages import Messages
+from ChemEM.tools.resources import default_cpu_budget
 import sys 
 import os 
 
@@ -34,6 +35,9 @@ class System:
         
         #running options 
         self.CPUS_PER_SITE = 10
+        self.ncpu = default_cpu_budget()
+        self.n_cpu = self.ncpu
+        self.n_cpus = self.ncpu
         self._log = ''
    
     def run(self):

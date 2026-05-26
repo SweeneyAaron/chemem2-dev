@@ -13,7 +13,6 @@ from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 import ast
 import copy
-import multiprocessing
 import os
 
 from ChemEM.data.system import System
@@ -26,6 +25,7 @@ from ChemEM.parsers.covalent_fragment import (
     build_and_parameterize_fragment,
 )
 from ChemEM.data.data import SYSTEM_ATTRS
+from ChemEM.tools.resources import apply_cpu_budget, default_cpu_budget
 
 
 @dataclass
@@ -53,6 +53,8 @@ class Config:
     cutoff: Optional[float] = None
     flexible_side_chains: Optional[bool] = None
     solvent: Optional[bool] = None
+    ncpu: Optional[int] = None
+    n_cpu: Optional[int] = None
     n_cpus: Optional[int] = None
     post_process_solution: List[str] = field(default_factory=list)
     hold_fragment: List[str] = field(default_factory=list)
@@ -131,6 +133,8 @@ class Config:
         ".smi",
     }
 
+    CPU_FIELDS = {"ncpu", "n_cpu", "n_cpus"}
+
     # ---------- Generic setters / loaders ----------
 
     def reset(self) -> "Config":
@@ -191,6 +195,12 @@ class Config:
         - append_list_fields=True reproduces config-file repeated-line behaviour
         - append_list_fields=False replaces list fields (better for Python API)
         """
+        if attr_id in self.CPU_FIELDS:
+            budget = apply_cpu_budget(self, value)
+            if mark_provided:
+                self._provided.update(self.CPU_FIELDS)
+            return
+
         if not hasattr(self, attr_id):
             raise RuntimeError(f"[Error] Unknown attribute '{attr_id}'.")
 
@@ -219,12 +229,17 @@ class Config:
             self._provided.add(attr_id)
 
     def _ensure_default_ncpus(self) -> None:
-        """Set n_cpus if not explicitly provided."""
-        if self.n_cpus is None:
-            self.n_cpus = max(1, multiprocessing.cpu_count() - 2)
-            # Marking provided is optional; I usually leave it unmarked because it's implicit.
-            # But if you want it propagated via SYSTEM_ATTRS, mark it:
-            self._provided.add("n_cpus")
+        """Set ncpu and legacy aliases if not explicitly provided."""
+        if self.ncpu is None and self.n_cpu is None and self.n_cpus is None:
+            apply_cpu_budget(self, default_cpu_budget())
+        else:
+            apply_cpu_budget(
+                self,
+                self.ncpu if self.ncpu is not None
+                else self.n_cpu if self.n_cpu is not None
+                else self.n_cpus,
+            )
+        self._provided.update(self.CPU_FIELDS)
 
     def apply_inputs(
         self,
@@ -403,6 +418,8 @@ class Config:
                 value = getattr(self, attr, None)
                 if value is not None:
                     setattr(system, attr, value)
+
+        apply_cpu_budget(system, self.ncpu)
 
         # Platform selection
         try:

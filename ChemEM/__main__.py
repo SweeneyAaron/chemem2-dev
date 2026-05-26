@@ -18,6 +18,7 @@ import traceback
 import ChemEM
 from ChemEM.protocol_spec import REGISTRY, SHORT_ALIASES
 from ChemEM.messages import Messages
+from ChemEM.tools.resources import apply_cpu_budget, default_cpu_budget
 
 
 
@@ -120,7 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     shared.add_argument("--output", type=str, default=None,
                         help="Output directory")
     
-    shared.add_argument("--ncpu", type=int, default=int(max(1, os.cpu_count() - 2)))
+    shared.add_argument("--ncpu", type=int, default=default_cpu_budget())
     
     shared.add_argument("--no-map", action="store_true",
                         help="Disable density map usage")
@@ -173,8 +174,12 @@ def resolve_protocol_order(selected: list[str], args: argparse.Namespace) -> lis
 
 def apply_overrides(system, args: argparse.Namespace) -> None:
     # Keep this as the only place you mutate the System from CLI
+    if getattr(args, "ncpu", None) is not None:
+        budget = apply_cpu_budget(system, args.ncpu)
+        print(f"[CONFIG] using CPU budget: {budget}")
+
     if args.platform is not None:
-        print(f"[COFIG] overriding platform {system.platform } with {args.platform}")
+        print(f"[CONFIG] overriding platform {system.platform } with {args.platform}")
         system.platform = args.platform
         
     if getattr(args, "no_map", False):
@@ -223,6 +228,4 @@ def main() -> None:
     #    sys.exit(1)
 if __name__ == "__main__":
     main()
-
-
 

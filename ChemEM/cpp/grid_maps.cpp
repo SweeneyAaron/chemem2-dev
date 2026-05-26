@@ -15,6 +15,24 @@
 
 namespace py = pybind11;
 
+int get_omp_max_threads_cpp() {
+#ifdef _OPENMP
+    return omp_get_max_threads();
+#else
+    return 1;
+#endif
+}
+
+void set_omp_num_threads_cpp(int n_threads) {
+#ifdef _OPENMP
+    if (n_threads > 0) {
+        omp_set_num_threads(n_threads);
+    }
+#else
+    (void)n_threads;
+#endif
+}
+
 //---------------------------------------------------------------------
 // Helper Function: Distance-dependent dielectric
 //---------------------------------------------------------------------
@@ -1958,6 +1976,11 @@ py::array_t<float> build_delta_sasa_generic_grid_cpp(
 //---------------------------------------------------------------------
 PYBIND11_MODULE(grid_maps, m) {
     m.doc() = "Compute 3D electrostatic and hydrophobic grids using optimized C++ and pybind11";
+    m.def("set_omp_num_threads", &set_omp_num_threads_cpp,
+          "Set the OpenMP thread count used by grid map kernels",
+          py::arg("n_threads"));
+    m.def("get_omp_max_threads", &get_omp_max_threads_cpp,
+          "Return the current OpenMP max thread count for grid map kernels");
     
     m.def("compute_electostatic_grid", &compute_electostatic_grid,
           "Compute the electrostatic potential grid with cutoff",

@@ -383,6 +383,7 @@ def mmgbsa_single_frame(
     ligand,
     protein,
     pose_idx: int = 0,
+    resource_owner=None,
 ):
     """Single-frame MMGBSA on one pose. Returns PoseScore or None on failure.
 
@@ -391,6 +392,12 @@ def mmgbsa_single_frame(
     without integrating — no MD sampling.
     """
     try:
-        return score_single_pose(np.asarray(coords, dtype=float), ligand, protein, pose_idx)
+        return score_single_pose(
+            np.asarray(coords, dtype=float),
+            ligand,
+            protein,
+            pose_idx,
+            resource_owner=resource_owner,
+        )
     except Exception:
         return None

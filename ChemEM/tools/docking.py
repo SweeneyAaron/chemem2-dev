@@ -17,6 +17,7 @@ from rdkit.Geometry import Point3D
 from ChemEM.tools.ligand import write_to_sdf
 from ChemEM.tools.geometry import rmsd_cluster
 from ChemEM.data.data import HALOGEN_DONOR_ATOM_IDXS
+from ChemEM.tools.resources import thread_limit_env
 Pose = Tuple[float, np.ndarray]  # (score, coords[N,3])
 
 def compute_halogen_bond_data(mol,atom_types, valid_atom_types = HALOGEN_DONOR_ATOM_IDXS):
@@ -92,13 +93,10 @@ def dock_worker(block, echo_serialised, centroid, radius, cpus_per_site: int):
     One split-site docking run executed in its own process.
     NOTE: echo_serialised.copy() must be picklable.
     """
-    os.environ["OMP_NUM_THREADS"] = str(cpus_per_site)
-    os.environ["MKL_NUM_THREADS"] = str(cpus_per_site)
-    os.environ["OPENBLAS_NUM_THREADS"] = str(cpus_per_site)
+    with thread_limit_env(cpus_per_site):
+        pre = echo_serialised.copy()
+        pre.add_multi_site_bias(centroid, radius)
 
-    pre = echo_serialised.copy()
-    pre.add_multi_site_bias(centroid, radius)
-
-    # Keep import inside worker so the subprocess starts cleanly.
-    from ChemEM import docking2
-    return docking2.run_aco_docking(pre, block)
+        # Keep import inside worker so the subprocess starts cleanly.
+        from ChemEM import docking2
+        return docking2.run_aco_docking(pre, block)
