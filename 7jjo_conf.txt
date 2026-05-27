@@ -9,6 +9,4 @@ densmap = /Users/aaron.sweeney/Documents/ChemEM_benchmark/7jjo/7jjo.mrc
 resolution = 3.0  
 
 centroid = (134.087, 133.507, 174.180)output = ./test/test_outputsweeneya
-ZtaKS-PFWb8-47CfT-djE7X-Z8nr8
 
-https://syncandshare.desy.de/remote.php/dav/files/sweeneya

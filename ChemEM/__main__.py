@@ -18,7 +18,11 @@ import traceback
 import ChemEM
 from ChemEM.protocol_spec import REGISTRY, SHORT_ALIASES
 from ChemEM.messages import Messages
-from ChemEM.tools.resources import apply_cpu_budget, default_cpu_budget
+from ChemEM.tools.resources import (
+    apply_cpu_budget,
+    apply_cpus_per_site,
+    default_cpu_budget,
+)
 
 
 
@@ -122,7 +126,19 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Output directory")
     
     shared.add_argument("--ncpu", type=int, default=default_cpu_budget())
-    
+
+    shared.add_argument(
+        "--cpus-per-site",
+        type=int,
+        default=None,
+        help=(
+            "CPUs allocated per split-site docking job. Defaults to "
+            "max(2, ncpu // 4) to keep multi-job parallelism alive on small "
+            "machines; raise it to give each site more cores at the cost of "
+            "fewer parallel sites."
+        ),
+    )
+
     shared.add_argument("--no-map", action="store_true",
                         help="Disable density map usage")
     #now sure we will use this any more but leave it here untill the correct time.
@@ -177,6 +193,10 @@ def apply_overrides(system, args: argparse.Namespace) -> None:
     if getattr(args, "ncpu", None) is not None:
         budget = apply_cpu_budget(system, args.ncpu)
         print(f"[CONFIG] using CPU budget: {budget}")
+
+    if getattr(args, "cpus_per_site", None) is not None:
+        per_site = apply_cpus_per_site(system, args.cpus_per_site)
+        print(f"[CONFIG] using cpus_per_site: {per_site}")
 
     if args.platform is not None:
         print(f"[CONFIG] overriding platform {system.platform } with {args.platform}")

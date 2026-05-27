@@ -45,6 +45,8 @@ from scipy.spatial import cKDTree, distance
 from skimage import morphology
 from skimage.filters import threshold_otsu
 
+from ChemEM.tools.resources import resolve_cpu_budget
+
 # -----------------------
 # Small shared utilities
 # -----------------------
@@ -2207,19 +2209,26 @@ def _feature_distance_com(mp_a: "EMMap", mp_b: "EMMap", thr: float = 0.0) -> flo
     return float(np.linalg.norm(ca - cb))
 
 
-def _feature_distance_voxels(mp_a: "EMMap", mp_b: "EMMap", thr: float = 0.0) -> float:
+def _feature_distance_voxels(
+    mp_a: "EMMap",
+    mp_b: "EMMap",
+    thr: float = 0.0,
+    ncpu: Optional[int] = None,
+) -> float:
     A = _map_nonzero_xyz(mp_a, thr=thr)
     B = _map_nonzero_xyz(mp_b, thr=thr)
     if A.shape[0] == 0 or B.shape[0] == 0:
         return float("inf")
 
+    workers = int(ncpu) if ncpu is not None else 1
+
     # Build tree on the larger set, query the smaller set (usually a bit faster)
     if A.shape[0] <= B.shape[0]:
         tree = cKDTree(B)
-        d, _ = tree.query(A, k=1, workers=-1)
+        d, _ = tree.query(A, k=1, workers=workers)
     else:
         tree = cKDTree(A)
-        d, _ = tree.query(B, k=1, workers=-1)
+        d, _ = tree.query(B, k=1, workers=workers)
 
     return float(np.min(d))
 
@@ -2230,18 +2239,24 @@ def get_feature_distance(
     max_dist: float,
     mode: str = "com", #opts "voxels" and "com"
     thr: float = 0.0,
+    source: object = None,
 ) -> bool:
     """
     existing_maps is your system_sites[site_key] list: [(EMMap, feat_dict), ...]
+
+    ``source`` may be a System/options object; its ``ncpu`` budget is honoured
+    by the cKDTree query in voxel mode. Defaults to 1 worker when absent.
     """
     if not existing_maps:
         return True  # first feature always goes into the site
+
+    ncpu = resolve_cpu_budget(source) if source is not None else 1
 
     for (mp, _) in existing_maps:
         if mode == "com":
             d = _feature_distance_com(new_map, mp, thr=thr)
         elif mode == "voxels":
-            d = _feature_distance_voxels(new_map, mp, thr=thr)
+            d = _feature_distance_voxels(new_map, mp, thr=thr, ncpu=ncpu)
         else:
             raise ValueError(f"Unknown mode={mode!r}")
 

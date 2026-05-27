@@ -27,7 +27,11 @@ from ChemEM.tools.precomputed_data import PreCompDataLigand, PreCompDataProtein 
 from ChemEM.tools.docking import energy_cutoff, write_results, dock_worker#move
 from ChemEM.tools.ligand import  mol_with_positions #stay
 from ChemEM.tools.geometry import rmsd_cluster #stay
-from ChemEM.tools.resources import resolve_cpu_budget, thread_limit_env
+from ChemEM.tools.resources import (
+    resolve_cpu_budget,
+    resolve_cpus_per_site,
+    thread_limit_env,
+)
 #refactored
 from .mmgbsa_score import mmgbsa_score_docked_poses, write_mmgbsa_scores
 from ChemEM.protocols.refine.pose_minimiser import BatchPoseMinimizer, ChemEMSimulationSetup
@@ -415,7 +419,7 @@ class Docking:
         n_jobs = len(jobs)
 
         total_cpus = resolve_cpu_budget(self.system)
-        cpus_per_site = max(1, min(int(self.system.CPUS_PER_SITE), total_cpus))
+        cpus_per_site = resolve_cpus_per_site(self.system, total_cpus=total_cpus)
         max_jobs = max(1, total_cpus // cpus_per_site)
         max_jobs = min(max_jobs, n_jobs)
 

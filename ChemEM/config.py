@@ -19,7 +19,7 @@ from ChemEM.data.system import System
 from ChemEM.parsers.protein_parser import ProteinParser
 from ChemEM.parsers.ligand_parser import LigandParser
 from ChemEM.parsers.EMMap import EMMap
-from ChemEM.parsers.models import CovalentLinkSpec
+from ChemEM.parsers.models import CovalentLinkSpec, LigandList
 from ChemEM.parsers.covalent_fragment import (
     apply_protein_deletions,
     build_and_parameterize_fragment,
@@ -395,7 +395,7 @@ class Config:
                     )
                 lig_obj[0].covalent_link = covalent_spec
             ligand_objects += lig_obj
-        system.ligand = ligand_objects
+        system.ligand = LigandList(ligand_objects)
 
         # ---- Covalent ligands: apply protein deletions + build junction fragments.
         # Must happen after the Protein and all Ligands are built (so we can

@@ -70,8 +70,18 @@ class MapGrid:
         return MapGrid(data=data, origin_xyz=origin, apix_xyz=apix)
 
     def stats(self) -> Tuple[float, float]:
-        """Global mean and std (used for A,B in the reference Gaussian)."""
-        return float(np.mean(self.data)), float(np.std(self.data))
+        """Global mean and std (used for A,B in the reference Gaussian).
+
+        Result is memoised on the instance — the map is treated as read-only
+        for Q-score purposes, so mutating ``self.data`` in place will produce
+        stale stats.
+        """
+        cached = getattr(self, "_stats_cache", None)
+        if cached is not None:
+            return cached
+        stats = (float(np.mean(self.data)), float(np.std(self.data)))
+        self._stats_cache = stats
+        return stats
 
     def sample_trilinear(self, xyz: np.ndarray) -> np.ndarray:
         """
@@ -136,6 +146,24 @@ class MapGrid:
             val[oob] = np.nan
 
         return val
+
+
+def _cached_mapgrid(emmap) -> "MapGrid":
+    """Return a MapGrid wrapping ``emmap``, reusing the prior instance when
+    available. The cache is attached as ``_qscore_mapgrid_cache`` on the
+    emmap object so Q-score callers don't rebuild the wrapper (and don't
+    re-run the expensive ``np.std`` on the full map) per evaluation.
+    """
+    cached = getattr(emmap, "_qscore_mapgrid_cache", None)
+    if cached is not None:
+        return cached
+    mg = MapGrid.from_emmap(emmap)
+    try:
+        emmap._qscore_mapgrid_cache = mg
+    except AttributeError:
+        # emmap is frozen / __slots__-locked; fall back to no caching.
+        pass
+    return mg
 
 
 # ----------------------------
@@ -280,7 +308,7 @@ def compute_qscores_from_emmap(
     if atoms_xyz.ndim != 2 or atoms_xyz.shape[1] != 3:
         raise ValueError(f"atoms_xyz must be (N,3), got {atoms_xyz.shape}")
 
-    mapgrid = MapGrid.from_emmap(emmap)
+    mapgrid = _cached_mapgrid(emmap)
     map_mean, map_std = mapgrid.stats()
 
     kdtree = cKDTree(atoms_xyz)

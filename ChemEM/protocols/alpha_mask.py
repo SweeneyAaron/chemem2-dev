@@ -373,10 +373,11 @@ class AlphaMask:
                     
                     existing = system_sites.get(binding_site_key, [])
                     
-                    if not get_feature_distance(new_map, 
-                                                existing, 
+                    if not get_feature_distance(new_map,
+                                                existing,
                                                 self.system.options.sep_features_dist,
-                                                mode=self.system.options.sep_features_mode):
+                                                mode=self.system.options.sep_features_mode,
+                                                source=self.system):
                         # split: clone binding site under a new key and attach this feature there
                         new_key = site_id
                         site_id += 1

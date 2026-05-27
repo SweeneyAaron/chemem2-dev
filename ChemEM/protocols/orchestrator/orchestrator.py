@@ -23,6 +23,7 @@ import numpy as np
 from openmm import unit
 
 from ChemEM.messages import Messages
+from ChemEM.parsers.models import LigandList
 from ChemEM.protocols._docking.docking import Docking
 from ChemEM.protocols.refine.minimize import Refine
 #from ChemEM.protocols.refine.search_refine import SearchRefine
@@ -794,7 +795,7 @@ class SmartOrchestrator:
 
         try:
             ligand.set_positions(np.asarray(candidate.coords, dtype=float))
-            self.system.ligand = [ligand]
+            self.system.ligand = LigandList([ligand])
             self.system.options.local_refine = True
 
             runner = refiner_cls(self.system)

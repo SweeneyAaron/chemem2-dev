@@ -432,6 +432,47 @@ def add_smart_ligand_refine2_args(p):
         help="Run a final local OpenMM map-biased minimisation after SmartRefine2",
     )
 
+    # --- Performance / tuning knobs (defaults preserve current behaviour, except
+    # --- qscore-candidate-dirs which drops 256 -> 128 for ~2x Q-score speedup) ---
+    g.add_argument(
+        "--sr2-qscore-candidate-dirs",
+        type=int,
+        default=128,
+        help=(
+            "Number of Fibonacci-sphere candidate directions used when sampling "
+            "per-atom Q-scores during SmartRefine2. Lower = faster (~linear), "
+            "higher = smoother estimate. Published Q-score uses 128."
+        ),
+    )
+    g.add_argument(
+        "--sr2-fit-in-map-max-steps",
+        type=int,
+        default=64,
+        help="Maximum finite-difference gradient steps per fit_in_map call.",
+    )
+    g.add_argument(
+        "--sr2-fit-in-map-early-stop-tol",
+        type=float,
+        default=None,
+        help=(
+            "If set, stop fit_in_map early when the mean relative objective "
+            "improvement over the last 3 accepted steps falls below this tol. "
+            "Default: disabled (preserves current behaviour)."
+        ),
+    )
+    g.add_argument(
+        "--sr2-branch-coarse-step-deg",
+        type=float,
+        default=15.0,
+        help="branch_walker coarse dihedral sweep step size in degrees.",
+    )
+    g.add_argument(
+        "--sr2-branch-max-keep-per-step",
+        type=int,
+        default=3,
+        help="branch_walker beam width (candidates kept per torsion step).",
+    )
+
 def export_deps(args):
     return tuple()
 

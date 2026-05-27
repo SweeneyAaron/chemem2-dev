@@ -51,6 +51,11 @@ class FitInMapConfig:
     clash_weight: float = 1.0
     backtracking_max_halves: int = 8
     improvement_tol: float = 1e-12
+    # If set, fit_in_map stops early once the moving average of the last
+    # ``early_stop_window`` accepted-step relative objective gains drops below
+    # ``early_stop_tol``. Default None disables the check (preserves prior behaviour).
+    early_stop_tol: float | None = None
+    early_stop_window: int = 3
     debug: bool = False
     debug_stride: int = 1
     clash_diagnostics: bool = False
@@ -402,6 +407,12 @@ def fit_in_map(
     max_backtracks = max(0, int(config.backtracking_max_halves))
     improvement_tol = max(0.0, float(config.improvement_tol))
 
+    early_stop_tol = (
+        float(config.early_stop_tol) if config.early_stop_tol is not None else None
+    )
+    early_stop_window = max(1, int(config.early_stop_window))
+    recent_rel_gains: list[float] = []
+
     ligand_radius = _ligand_radius_A(base_coords)
     rotation = np.eye(3, dtype=np.float64)
     translation = np.zeros(3, dtype=np.float64)
@@ -536,6 +547,7 @@ def fit_in_map(
         accepted_step = False
         n_backtracks = 0
         trial = current
+        objective_before_step = current.objective
         if proposed is None:
             step_size *= step_decay
         else:
@@ -567,6 +579,23 @@ def fit_in_map(
             best_coords = current_coords.copy()
             best_rotation = rotation.copy()
             best_translation = translation.copy()
+
+        early_stopped = False
+        if early_stop_tol is not None and accepted_step:
+            gain = float(current.objective - objective_before_step)
+            recent_rel_gains.append(gain)
+            if len(recent_rel_gains) > early_stop_window:
+                recent_rel_gains.pop(0)
+            if (
+                len(recent_rel_gains) >= early_stop_window
+                and (sum(recent_rel_gains) / early_stop_window) < early_stop_tol
+            ):
+                early_stopped = True
+                debug_log(
+                    f"early-stop at step={steps} "
+                    f"mean_gain={sum(recent_rel_gains) / early_stop_window:+.3e} "
+                    f"tol={early_stop_tol:+.3e}"
+                )
         if bool(config.debug) and (
             steps == 1 or steps % max(1, int(config.debug_stride)) == 0
         ):
@@ -595,7 +624,10 @@ def fit_in_map(
         if accepted_step and steps % 4 == 0:
             step_size *= step_decay
 
-    converged = bool(step_size <= min_step)
+        if early_stopped:
+            break
+
+    converged = bool(step_size <= min_step or early_stopped)
     if fallback_progress:
         print(
             "[fit-in-map] finished "

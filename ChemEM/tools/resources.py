@@ -22,6 +22,7 @@ THREAD_ENV_VARS = (
 )
 
 CPU_ATTRS = ("ncpu", "n_cpu", "n_cpus")
+CPUS_PER_SITE_ATTRS = ("cpus_per_site", "CPUS_PER_SITE")
 DEVICE_ATTRS = ("openmm_device_index", "device_index", "platform_device_index")
 
 
@@ -93,6 +94,60 @@ def apply_cpu_budget(target: Any, ncpu: Any) -> int:
             except Exception:
                 pass
     return budget
+
+
+def resolve_cpus_per_site(
+    source: Any = None,
+    total_cpus: Optional[int] = None,
+    default: Optional[int] = None,
+) -> int:
+    """Return the per-site CPU allotment used by split-site docking.
+
+    Priority:
+        1. ``source`` as a direct int / numeric string.
+        2. ``cpus_per_site`` / ``CPUS_PER_SITE`` on the source or its ``options``.
+        3. ``default`` if provided.
+        4. Heuristic ``max(2, total_cpus // 4)``, which keeps multi-job
+           parallelism alive on small machines where the legacy hardcoded
+           ``10`` collapsed split-site docking to a single job.
+
+    The result is always clamped to ``[1, total_cpus]``.
+    """
+    total = int(total_cpus) if total_cpus is not None else default_cpu_budget()
+    total = max(1, total)
+
+    direct = _coerce_cpu(source) if isinstance(source, (int, float, str, bytes)) else None
+    if direct is not None:
+        return max(1, min(direct, total))
+
+    for candidate in (source, getattr(source, "options", None)):
+        if candidate is None:
+            continue
+        v = _coerce_cpu(_value_from_object(candidate, CPUS_PER_SITE_ATTRS))
+        if v is not None:
+            return max(1, min(v, total))
+
+    fallback = _coerce_cpu(default)
+    if fallback is not None:
+        return max(1, min(fallback, total))
+
+    heuristic = max(2, total // 4)
+    return max(1, min(heuristic, total))
+
+
+def apply_cpus_per_site(target: Any, cpus_per_site: Any) -> int:
+    """Write the resolved per-site CPU allotment to ``target`` and its options."""
+    total = resolve_cpu_budget(target)
+    value = resolve_cpus_per_site(cpus_per_site, total_cpus=total)
+    for obj in (target, getattr(target, "options", None)):
+        if obj is None:
+            continue
+        for attr in CPUS_PER_SITE_ATTRS:
+            try:
+                setattr(obj, attr, value)
+            except Exception:
+                pass
+    return value
 
 
 def resolve_device_index(source: Any = None) -> Optional[str]:

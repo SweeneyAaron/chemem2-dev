@@ -33,8 +33,14 @@ class System:
         #protocol flags
         self.docked = False 
         
-        #running options 
-        self.CPUS_PER_SITE = 10
+        #running options
+        # CPUS_PER_SITE is resolved at protocol-run time by
+        # ChemEM.tools.resources.resolve_cpus_per_site(), which honours an
+        # explicit override here or on system.options.cpus_per_site and
+        # otherwise picks max(2, total_cpus // 4). Leave as None so the
+        # resolver applies the heuristic on small machines instead of pinning
+        # to a value that collapses split-site parallelism.
+        self.CPUS_PER_SITE = None
         self.ncpu = default_cpu_budget()
         self.n_cpu = self.ncpu
         self.n_cpus = self.ncpu

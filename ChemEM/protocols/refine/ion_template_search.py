@@ -15,7 +15,7 @@ import os
 import re
 import shlex
 import traceback
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib import error as urlerror
@@ -49,6 +49,10 @@ class IonTemplateSearch:
     SEARCH_URL = "https://search.rcsb.org/rcsbsearch/v2/query"
     DATA_CORE_URL = "https://data.rcsb.org/rest/v1/core"
     MODELSERVER_BASE = "https://models.rcsb.org/v1"
+
+    # Cap per-instance PDB-fetch caches so a single difficult case with many
+    # entries doesn't accumulate hundreds of MB of JSON blobs / sequences.
+    _CACHE_MAX_ENTRIES = 512
 
     DEFAULT_METAL_ELEMENTS = (
         "LI", "NA", "K", "MG", "CA", "MN", "FE", "CO", "NI", "CU", "ZN", "CD",
@@ -107,8 +111,20 @@ class IonTemplateSearch:
         self.output = os.path.join(getattr(self.system, "output", "."), "ion_template_search")
         os.makedirs(self.output, exist_ok=True)
 
-        self._chain_seq_cache: Dict[Tuple[str, str], Optional[str]] = {}
-        self._entry_data_cache: Dict[str, Optional[dict]] = {}
+        self._chain_seq_cache: "OrderedDict[Tuple[str, str], Optional[str]]" = OrderedDict()
+        self._entry_data_cache: "OrderedDict[str, Optional[dict]]" = OrderedDict()
+
+    def _cache_put(self, cache: "OrderedDict", key, value) -> None:
+        """LRU-style insert with bounded size."""
+        if key in cache:
+            cache.move_to_end(key)
+        cache[key] = value
+        while len(cache) > self._CACHE_MAX_ENTRIES:
+            cache.popitem(last=False)
+
+    def _cache_clear(self) -> None:
+        self._chain_seq_cache.clear()
+        self._entry_data_cache.clear()
 
     # -----------------------
     # Public entry point
@@ -231,6 +247,10 @@ class IonTemplateSearch:
             self._log("[ion_template_search] no confident template found; wrote diagnostics only")
         else:
             self._log("[ion_template_search] failed; wrote diagnostics")
+
+        # Release PDB-fetch caches now that the search has completed so the
+        # protocol's RAM footprint doesn't persist into later orchestrator stages.
+        self._cache_clear()
 
         return {
             "status": report.get("status"),
@@ -1244,16 +1264,18 @@ class IonTemplateSearch:
     def _fetch_entry_data(self, entry_id: str) -> Optional[dict]:
         key = str(entry_id).upper()
         if key in self._entry_data_cache:
+            self._entry_data_cache.move_to_end(key)
             return self._entry_data_cache[key]
 
         url = f"{self.DATA_CORE_URL}/entry/{key}"
         data = self._get_json(url, timeout_s=15)
-        self._entry_data_cache[key] = data
+        self._cache_put(self._entry_data_cache, key, data)
         return data
 
     def _fetch_template_chain_sequence(self, entry_id: str, asym_id: str) -> Optional[str]:
         key = (str(entry_id).upper(), str(asym_id))
         if key in self._chain_seq_cache:
+            self._chain_seq_cache.move_to_end(key)
             return self._chain_seq_cache[key]
 
         sequence = None
@@ -1269,7 +1291,7 @@ class IonTemplateSearch:
         except Exception:
             sequence = None
 
-        self._chain_seq_cache[key] = sequence
+        self._cache_put(self._chain_seq_cache, key, sequence)
         return sequence
 
     def _fetch_chemcomp_smiles(self, comp_id: str) -> Optional[str]:

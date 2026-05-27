@@ -224,6 +224,7 @@ class RefineLigand:
         protein_index=None,
         map_reference=None,
         cutoff_A=9.0,
+        qscore_candidate_dirs=128,
     ):
         self._ligand = ligand
         self._ligand_object = ligand
@@ -236,6 +237,7 @@ class RefineLigand:
         self._map_referece = map_reference
         self._protein_index = protein_index
         self.cutoff_A = float(cutoff_A)
+        self._qscore_candidate_dirs = int(qscore_candidate_dirs)
         self._excluded_root_blocks = set()
         #init
         self._init_atoms()
@@ -343,6 +345,7 @@ class RefineLigand:
             sigma_ref=float(sigma_ref),
             radii=None,
             score_indices=self.ligand_score_indices(),
+            candidate_dirs=int(getattr(self, "_qscore_candidate_dirs", 128)),
         )
 
         self._per_atom_qscores = qscores
@@ -369,10 +372,23 @@ class SmartRefine2:
         )
         self.acceptance_score = getattr(options, "sr2_acceptance_score", None)
         self.acceptance_weights = getattr(options, "sr2_acceptance_weights", None)
+        self.qscore_candidate_dirs = int(
+            getattr(options, "sr2_qscore_candidate_dirs", 128) or 128
+        )
         self.fit_config = FitInMapConfig(
             clash_mode="soft",  # "off", "soft", or "hard"
             debug=False,
             clash_diagnostics=False,
+            max_steps=int(getattr(options, "sr2_fit_in_map_max_steps", 64) or 64),
+            early_stop_tol=getattr(options, "sr2_fit_in_map_early_stop_tol", None),
+        )
+        self.branch_config = BranchWalkConfig(
+            coarse_step_deg=float(
+                getattr(options, "sr2_branch_coarse_step_deg", 15.0) or 15.0
+            ),
+            max_keep_per_step=int(
+                getattr(options, "sr2_branch_max_keep_per_step", 3) or 3
+            ),
         )
         self.patience = 3
         
@@ -395,9 +411,14 @@ class SmartRefine2:
 
     def get_refine_ligands(self):
         for lig in self.system.ligand:
-            self.ligands.append(RefineLigand(lig,
-                                            self._protein_index,
-                                            self.system.density_map))
+            self.ligands.append(
+                RefineLigand(
+                    lig,
+                    self._protein_index,
+                    self.system.density_map,
+                    qscore_candidate_dirs=self.qscore_candidate_dirs,
+                )
+            )
 
     def _final_minimise_enabled(self):
         options = getattr(self.system, "options", None)
@@ -515,6 +536,7 @@ class SmartRefine2:
                 acceptance_weights=self.acceptance_weights,
                 scorer_options=getattr(self.system, "options", None),
                 fit_config=self.fit_config,
+                branch_config=self.branch_config,
                 patience=self.patience,
                 debug_dir=getattr(self.system, "output", None),
             )
@@ -525,8 +547,39 @@ class SmartRefine2:
             self.debug_sdf_paths.append(
                 self.write_refined_ligand_sdf(ligand, result, ligand_index)
             )
+            self._maybe_dump_parity_snapshot(ligand, result, ligand_index)
 
         return self.fit_results
+
+    def _maybe_dump_parity_snapshot(self, refine_ligand, result, ligand_index):
+        """If CHEMEM_SR2_PARITY_DIR is set, save a per-ligand snapshot for
+        the parity-test scaffold (per_atom_qscores, final_coords, clash info)."""
+        parity_dir = os.environ.get("CHEMEM_SR2_PARITY_DIR")
+        if not parity_dir:
+            return
+        try:
+            from ChemEM.tests.test_smart_refine_parity import save_baseline
+            out_dir = os.path.join(parity_dir, f"ligand_{int(ligand_index):03d}")
+            save_baseline(
+                out_dir,
+                per_atom_qscores=refine_ligand._per_atom_qscores,
+                final_coords_A=refine_ligand._atom_positions,
+                clash_penalty=float(getattr(result, "best_clash_penalty", 0.0)),
+                clash_count=int(getattr(result, "best_clash_count", 0)),
+                meta={
+                    "ligand_index": int(ligand_index),
+                    "qscore_candidate_dirs": int(
+                        getattr(refine_ligand, "_qscore_candidate_dirs", 128)
+                    ),
+                    "fit_max_steps": int(self.fit_config.max_steps),
+                    "fit_early_stop_tol": self.fit_config.early_stop_tol,
+                    "branch_coarse_step_deg": float(self.branch_config.coarse_step_deg),
+                    "branch_max_keep_per_step": int(self.branch_config.max_keep_per_step),
+                },
+            )
+            print(f"[smart_refine_2] parity snapshot saved -> {out_dir}")
+        except Exception as exc:
+            print(f"[smart_refine_2] parity snapshot failed: {exc}")
 
     def write_refined_ligand_sdf(self, refine_ligand, result, ligand_index=1, filename=None):
         output_dir = getattr(self, "output", ".")
@@ -1426,6 +1479,7 @@ def _frontier_qscore(refine_ligand, ligand_coords_A, frontier_rows, config):
         sigma_ref=float(config.sigma_ref),
         radii=None,
         score_indices=np.asarray(frontier_rows, dtype=int),
+        candidate_dirs=int(getattr(refine_ligand, "_qscore_candidate_dirs", 128)),
     )
     q = np.asarray(q, dtype=np.float64)
     finite = q[np.isfinite(q)]

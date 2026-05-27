@@ -22,6 +22,34 @@ class EMMap:
         self.density_map = density_map    # np.ndarray
         self.resolution = resolution
         self.map_contour = 0.0
+        self._closed = False
+
+    # ----------------------------
+    # Lifecycle
+    # ----------------------------
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        """Release the density ndarray.
+
+        Multi-map orchestrator runs accumulate cropped/masked sub-maps that
+        survive long after they are needed. Calling close() drops the array
+        reference so memory can be reclaimed by the GC at a predictable point.
+        Subsequent reads of ``density_map`` will be ``None``.
+        """
+        if self._closed:
+            return
+        self.density_map = None
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
     # ----------------------------
     # Geometry / convenience props

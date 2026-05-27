@@ -214,6 +214,7 @@ def score_qscore(
         sigma_ref=float(sigma_ref),
         radii=radii,
         score_indices=ligand_indices,
+        candidate_dirs=int(getattr(refine_ligand, "_qscore_candidate_dirs", 128)),
     )
     q_scores = np.asarray(q_scores, dtype=np.float64).reshape(-1)
     finite = q_scores[np.isfinite(q_scores)]
