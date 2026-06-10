@@ -127,10 +127,44 @@ class _DummyBlock:
     block_id = 0
 
 
+class _ConstantScorer(scorers.BaseScorer if scorers is not None else object):
+    def score(self, refine_ligand, coords_A):
+        return scorers.ScoreResult(value=1.0)
+
+
 def _make_refinable_ligand():
     ligand = DummyRefineLigand([[0, 0, 0]], apix=1.0)
     ligand._rotor_tree = [_DummyBlock()]
     ligand.get_best_block_by_qscore = lambda: 0
+    return ligand
+
+
+def _pentane_refine_ligand(coords):
+    from rdkit import Chem
+    from rdkit.Geometry import Point3D
+
+    coords = np.asarray(coords, dtype=np.float64)
+    mol = Chem.MolFromSmiles("CCCCC")
+    conf = Chem.Conformer(mol.GetNumAtoms())
+    for atom_idx, xyz in enumerate(coords):
+        conf.SetAtomPosition(
+            int(atom_idx),
+            Point3D(float(xyz[0]), float(xyz[1]), float(xyz[2])),
+        )
+    mol.AddConformer(conf, assignId=True)
+
+    ligand = DummyRefineLigand(
+        coords,
+        elements=["C"] * coords.shape[0],
+        protein_coords=np.zeros((0, 3)),
+    )
+    ligand._ligand = SimpleNamespace(mol=mol)
+    ligand._atom_indices = np.arange(coords.shape[0], dtype=int)
+    ligand._atom_row_by_mol_index = {
+        int(atom_idx): int(atom_idx) for atom_idx in ligand._atom_indices
+    }
+    ligand._map_reference = None
+    ligand._map_referece = None
     return ligand
 
 
@@ -211,6 +245,60 @@ class TestSmartRefine2FitInMap(unittest.TestCase):
         self.assertTrue(no_pair.accepted)
         self.assertGreater(cc_pair.penalty, 0.0)
         self.assertFalse(cc_pair.accepted)
+
+    @unittest.skipUnless(_HAS_RDKIT, "rdkit is required for ligand self-clash tests")
+    def test_ligand_self_clash_detects_nonbonded_contacts(self):
+        ligand = _pentane_refine_ligand(
+            [
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [20.0, 0.0, 0.0],
+                [30.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+            ]
+        )
+
+        clash = optimisers.ligand_self_clash(
+            ligand._atom_positions,
+            ligand._atom_elements,
+            ligand._ligand.mol,
+            ligand_atom_indices=ligand._atom_indices,
+            cutoff_A=5.0,
+        )
+
+        self.assertEqual(clash.count, 1)
+        self.assertGreater(clash.penalty, 0.0)
+        self.assertFalse(clash.accepted)
+
+    @unittest.skipUnless(_HAS_RDKIT, "rdkit is required for ligand self-clash tests")
+    def test_ligand_self_clash_ignores_topologically_close_atoms(self):
+        from rdkit import Chem
+
+        mol = Chem.MolFromSmiles("CC")
+        clash = optimisers.ligand_self_clash(
+            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]],
+            ["C", "C"],
+            mol,
+            ligand_atom_indices=np.array([0, 1], dtype=int),
+            cutoff_A=5.0,
+        )
+
+        self.assertEqual(clash.count, 0)
+        self.assertEqual(clash.penalty, 0.0)
+        self.assertTrue(clash.accepted)
+
+    def test_ligand_self_clash_without_topology_is_zero_for_test_doubles(self):
+        clash = optimisers.ligand_self_clash(
+            [[0.0, 0.0, 0.0], [0.5, 0.0, 0.0]],
+            ["C", "C"],
+            None,
+            ligand_atom_indices=np.array([0, 1], dtype=int),
+            cutoff_A=5.0,
+        )
+
+        self.assertEqual(clash.count, 0)
+        self.assertEqual(clash.penalty, 0.0)
+        self.assertTrue(clash.accepted)
 
     def test_hard_clash_mode_reproduces_old_stall(self):
         class XScorer(scorers.BaseScorer):
@@ -393,6 +481,104 @@ class TestSmartRefine2FitInMap(unittest.TestCase):
             self.assertTrue(np.isfinite(shifted_score))
             self.assertGreater(aligned_score, shifted_score)
 
+    @unittest.skipUnless(_HAS_RDKIT, "rdkit is required for branch-walker clash tests")
+    def test_branch_candidate_checks_frontier_against_fixed_ligand_atoms(self):
+        smart_refine = importlib.import_module("protocols.smart_refine_2.smart_refine")
+        ligand = _pentane_refine_ligand(
+            [
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [20.0, 0.0, 0.0],
+                [30.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+            ]
+        )
+        parent = smart_refine._BranchCandidate(
+            coords_A=ligand._atom_positions.copy(),
+            dihedrals_deg=(),
+            frontier_score=0.0,
+            clash_count=0,
+            clash_penalty=0.0,
+        )
+
+        candidate = smart_refine._candidate_from_conformer(
+            ligand,
+            ligand._ligand.mol.GetConformer(0),
+            parent,
+            moved_rows=np.array([4], dtype=int),
+            moved_mol_ids=np.array([4], dtype=int),
+            frontier_rows=np.array([4], dtype=int),
+            frontier_mol_ids=np.array([4], dtype=int),
+            frontier_elements=np.array(["C"], dtype=object),
+            fixed_mol_ids=np.array([0, 1, 2, 3], dtype=int),
+            angle_deg=0.0,
+            config=smart_refine.BranchWalkConfig(),
+        )
+
+        self.assertEqual(candidate.clash_count, 1)
+        self.assertGreater(candidate.clash_penalty, 0.0)
+
+    @unittest.skipUnless(_HAS_RDKIT, "rdkit is required for branch-walker clash tests")
+    def test_branch_candidate_skips_atoms_that_are_still_moving(self):
+        smart_refine = importlib.import_module("protocols.smart_refine_2.smart_refine")
+        ligand = _pentane_refine_ligand(
+            [
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [20.0, 0.0, 0.0],
+                [30.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+            ]
+        )
+        parent = smart_refine._BranchCandidate(
+            coords_A=ligand._atom_positions.copy(),
+            dihedrals_deg=(),
+            frontier_score=0.0,
+            clash_count=0,
+            clash_penalty=0.0,
+        )
+
+        candidate = smart_refine._candidate_from_conformer(
+            ligand,
+            ligand._ligand.mol.GetConformer(0),
+            parent,
+            moved_rows=np.array([0, 4], dtype=int),
+            moved_mol_ids=np.array([0, 4], dtype=int),
+            frontier_rows=np.array([4], dtype=int),
+            frontier_mol_ids=np.array([4], dtype=int),
+            frontier_elements=np.array(["C"], dtype=object),
+            fixed_mol_ids=np.array([1, 2, 3], dtype=int),
+            angle_deg=0.0,
+            config=smart_refine.BranchWalkConfig(),
+        )
+
+        self.assertEqual(candidate.clash_count, 0)
+        self.assertEqual(candidate.clash_penalty, 0.0)
+
+    @unittest.skipUnless(_HAS_RDKIT, "rdkit is required for ligand self-clash tests")
+    def test_full_ligand_evaluation_includes_self_clash_without_protein(self):
+        smart_refine = importlib.import_module("protocols.smart_refine_2.smart_refine")
+        ligand = _pentane_refine_ligand(
+            [
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [20.0, 0.0, 0.0],
+                [30.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+            ]
+        )
+
+        score_result, clash = smart_refine._full_ligand_evaluation(
+            ligand,
+            _ConstantScorer(),
+            ligand._atom_positions,
+            smart_refine.BranchWalkConfig(),
+        )
+
+        self.assertEqual(score_result.value, 1.0)
+        self.assertEqual(clash.count, 1)
+        self.assertGreater(clash.penalty, 0.0)
+
     def test_accepter_updates_ligand_when_score_improves_and_no_clash(self):
         smart_refine = importlib.import_module("protocols.smart_refine_2.smart_refine")
         ligand = DummyRefineLigand([[0, 0, 0], [1, 0, 0]], apix=1.0)
@@ -445,6 +631,59 @@ class TestSmartRefine2FitInMap(unittest.TestCase):
 
         self.assertIs(out, ligand)
         np.testing.assert_allclose(ligand._atom_positions, before)
+
+    @unittest.skipUnless(_HAS_RDKIT, "rdkit is required for ligand self-clash tests")
+    def test_accepter_rejects_ligand_self_clash_from_clean_start(self):
+        smart_refine = importlib.import_module("protocols.smart_refine_2.smart_refine")
+        initial_coords = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [20.0, 0.0, 0.0],
+                [30.0, 0.0, 0.0],
+                [40.0, 0.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        best_coords = initial_coords.copy()
+        best_coords[4] = [1.0, 0.0, 0.0]
+        ligand = _pentane_refine_ligand(initial_coords)
+        initial_clash = optimisers.ligand_self_clash(
+            initial_coords,
+            ligand._atom_elements,
+            ligand._ligand.mol,
+            ligand_atom_indices=ligand._atom_indices,
+        )
+        best_clash = optimisers.ligand_self_clash(
+            best_coords,
+            ligand._atom_elements,
+            ligand._ligand.mol,
+            ligand_atom_indices=ligand._atom_indices,
+        )
+        result = optimisers.FitInMapResult(
+            best_coords_A=best_coords,
+            initial_raw_score=0.1,
+            best_raw_score=0.2,
+            initial_objective=0.1,
+            best_objective=float("-inf"),
+            initial_clash_penalty=initial_clash.penalty,
+            best_clash_penalty=best_clash.penalty,
+            initial_clash_count=initial_clash.count,
+            best_clash_count=best_clash.count,
+            best_max_overlap_A=best_clash.max_overlap_A,
+            steps=1,
+            evaluations=2,
+            converged=False,
+            final_step_size_A=0.5,
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = smart_refine.accepter(ligand, result)
+
+        self.assertEqual(initial_clash.count, 0)
+        self.assertGreater(best_clash.count, 0)
+        self.assertIs(out, ligand)
+        np.testing.assert_allclose(ligand._atom_positions, initial_coords)
 
     def test_accepter_allows_improved_preclashed_pose_when_penalty_does_not_worsen(self):
         smart_refine = importlib.import_module("protocols.smart_refine_2.smart_refine")
@@ -795,7 +1034,7 @@ class TestSmartRefine2FitInMap(unittest.TestCase):
         old_refit = smart_refine._refit_branch_candidates
         smart_refine.get_scorer = lambda scorer: FakeScorer()
         smart_refine.fit_in_map = lambda ligand, scorer=None, config=None: _fit_result(1.0)
-        smart_refine.branch_walker = lambda ligand, scorer=None, config=None: [object()]
+        smart_refine.branch_walker = lambda ligand, *args, **kwargs: [object()]
         smart_refine._refit_branch_candidates = fake_refit
         ligand = _make_refinable_ligand()
         try:
@@ -832,7 +1071,7 @@ class TestSmartRefine2FitInMap(unittest.TestCase):
         old_refit = smart_refine._refit_branch_candidates
         smart_refine.get_scorer = lambda scorer: FakeScorer()
         smart_refine.fit_in_map = lambda ligand, scorer=None, config=None: _fit_result(1.0)
-        smart_refine.branch_walker = lambda ligand, scorer=None, config=None: [object()]
+        smart_refine.branch_walker = lambda ligand, *args, **kwargs: [object()]
         smart_refine._refit_branch_candidates = fake_refit
         ligand = _make_refinable_ligand()
         try:
@@ -868,7 +1107,7 @@ class TestSmartRefine2FitInMap(unittest.TestCase):
         old_refit = smart_refine._refit_branch_candidates
         smart_refine.get_scorer = lambda scorer: FakeScorer()
         smart_refine.fit_in_map = lambda ligand, scorer=None, config=None: _fit_result(1.0)
-        smart_refine.branch_walker = lambda ligand, scorer=None, config=None: [object()]
+        smart_refine.branch_walker = lambda ligand, *args, **kwargs: [object()]
         smart_refine._refit_branch_candidates = fake_refit
         ligand = _make_refinable_ligand()
         try:
@@ -896,7 +1135,7 @@ class TestSmartRefine2FitInMap(unittest.TestCase):
         old_branch_walker = smart_refine.branch_walker
         smart_refine.get_scorer = lambda scorer: FakeScorer()
         smart_refine.fit_in_map = lambda ligand, scorer=None, config=None: _fit_result(1.0)
-        smart_refine.branch_walker = lambda ligand, scorer=None, config=None: []
+        smart_refine.branch_walker = lambda ligand, *args, **kwargs: []
         ligand = _make_refinable_ligand()
         try:
             with contextlib.redirect_stdout(io.StringIO()):

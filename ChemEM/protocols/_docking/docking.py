@@ -157,13 +157,18 @@ class Docking:
         
         
         for site_id, binding_site in self._iter_sites():
-            
-            #import pdb 
-            #pdb.set_trace()
+
+            # Alpha-feature sites override bias_radius with --feature-site-radius so the
+            # ACO translation-point sphere and the bias penalty match the per-site mask.
+            if getattr(binding_site, "is_alpha_feature_site", False):
+                effective_bias_radius = float(self.system.options.feature_site_radius)
+            else:
+                effective_bias_radius = float(self.system.options.bias_radius)
+
             precomp_site = PreCompDataProtein(
                 binding_site,
                 self.system,
-                bias_radius=self.system.options.bias_radius,
+                bias_radius=effective_bias_radius,
                 split_site=self.system.options.split_site,
             )
             

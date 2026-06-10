@@ -47,6 +47,7 @@ class FitInMapConfig:
     clash_cutoff_A: float = 5.0
     max_vdw_overlap_A: float = 0.1
     max_hbond_overlap_A: float = 0.7
+    ligand_clash_topological_exclusion_bonds: int = 3
     clash_mode: str = "off"
     clash_weight: float = 1.0
     backtracking_max_halves: int = 8
@@ -346,6 +347,218 @@ def protein_ligand_clash(
     )
 
 
+def ligand_self_clash(
+    ligand_coords_A: np.ndarray,
+    ligand_elements,
+    mol=None,
+    *,
+    ligand_atom_indices=None,
+    query_atom_indices=None,
+    reference_atom_indices=None,
+    cutoff_A: float = 5.0,
+    max_vdw_overlap_A: float = 0.1,
+    max_hbond_overlap_A: float = 0.7,
+    topological_exclusion_bonds: int = 3,
+    diagnose_pairs: bool = False,
+    diagnostic_limit: int = 5,
+) -> ClashResult:
+    lig = _as_coords(ligand_coords_A)
+    if lig.size == 0 or mol is None:
+        return ClashResult(0.0, 0, 0.0, 0.0, 0.0, 0)
+
+    try:
+        from rdkit import Chem
+
+        topology = np.asarray(Chem.GetDistanceMatrix(mol), dtype=np.float64)
+    except Exception:
+        return ClashResult(0.0, 0, 0.0, 0.0, 0.0, 0)
+
+    lig_elements = np.asarray(ligand_elements, dtype=object).reshape(-1)
+    if lig_elements.shape[0] != lig.shape[0]:
+        lig_elements = np.full(lig.shape[0], "C", dtype=object)
+
+    ligand_atom_indices = _resolve_ligand_atom_indices(mol, ligand_atom_indices, lig.shape[0])
+    if ligand_atom_indices.shape[0] != lig.shape[0]:
+        return ClashResult(0.0, 0, 0.0, 0.0, 0.0, 0)
+
+    row_by_atom = {int(atom_idx): row for row, atom_idx in enumerate(ligand_atom_indices)}
+    query_rows = _rows_for_ligand_atom_selection(
+        row_by_atom,
+        ligand_atom_indices,
+        query_atom_indices,
+    )
+    reference_rows = _rows_for_ligand_atom_selection(
+        row_by_atom,
+        ligand_atom_indices,
+        reference_atom_indices,
+    )
+    if query_rows.size == 0 or reference_rows.size == 0:
+        return ClashResult(0.0, 0, 0.0, 0.0, 0.0, 0)
+
+    query = lig[query_rows]
+    reference = lig[reference_rows]
+    pairs: list[tuple[int, int]] = []
+    cutoff = float(cutoff_A)
+    if cKDTree is not None:
+        hits = cKDTree(reference).query_ball_point(query, r=cutoff)
+        pairs = [
+            (int(query_rows[i]), int(reference_rows[j]))
+            for i, rows in enumerate(hits)
+            for j in rows
+        ]
+    else:
+        for q_local, xyz in enumerate(query):
+            d = np.linalg.norm(reference - xyz, axis=1)
+            pairs.extend(
+                (int(query_rows[q_local]), int(reference_rows[r_local]))
+                for r_local in np.flatnonzero(d <= cutoff)
+            )
+
+    if not pairs:
+        return ClashResult(0.0, 0, 0.0, 0.0, 0.0, 0)
+
+    penalty = 0.0
+    count = 0
+    max_overlap = 0.0
+    max_allowed_overlap = 0.0
+    max_excess_overlap = 0.0
+    worst_pairs = []
+    pairs_checked = 0
+    seen_pairs = set()
+    topo_exclusion = int(topological_exclusion_bonds)
+
+    for query_row, reference_row in pairs:
+        query_atom_idx = int(ligand_atom_indices[query_row])
+        reference_atom_idx = int(ligand_atom_indices[reference_row])
+        if query_atom_idx == reference_atom_idx:
+            continue
+
+        pair_key = tuple(sorted((query_atom_idx, reference_atom_idx)))
+        if pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
+
+        if (
+            topo_exclusion >= 0
+            and 0 <= query_atom_idx < topology.shape[0]
+            and 0 <= reference_atom_idx < topology.shape[1]
+            and float(topology[query_atom_idx, reference_atom_idx]) <= topo_exclusion
+        ):
+            continue
+
+        pairs_checked += 1
+        qi = _element_key(lig_elements[query_row])
+        rj = _element_key(lig_elements[reference_row])
+        allowed_overlap = (
+            float(max_hbond_overlap_A)
+            if {qi, rj} <= {"N", "O"}
+            else float(max_vdw_overlap_A)
+        )
+        dist = float(np.linalg.norm(lig[query_row] - lig[reference_row]))
+        overlap = max(0.0, _vdw_radius_A(qi) + _vdw_radius_A(rj) - dist)
+        max_overlap = max(max_overlap, overlap)
+        max_allowed_overlap = max(max_allowed_overlap, allowed_overlap)
+        excess_overlap = max(0.0, overlap - allowed_overlap)
+        if excess_overlap <= 0.0:
+            continue
+        penalty += excess_overlap * excess_overlap
+        count += 1
+        max_excess_overlap = max(max_excess_overlap, excess_overlap)
+        if diagnose_pairs:
+            worst_pairs.append(
+                {
+                    "kind": "ligand_self",
+                    "query_ligand_row": int(query_row),
+                    "reference_ligand_row": int(reference_row),
+                    "query_ligand_atom_index": int(query_atom_idx),
+                    "reference_ligand_atom_index": int(reference_atom_idx),
+                    "query_ligand_element": qi,
+                    "reference_ligand_element": rj,
+                    "distance_A": float(dist),
+                    "overlap_A": float(overlap),
+                    "allowed_overlap_A": float(allowed_overlap),
+                    "excess_overlap_A": float(excess_overlap),
+                }
+            )
+    if worst_pairs:
+        worst_pairs.sort(key=lambda pair: pair["excess_overlap_A"], reverse=True)
+        worst_pairs = worst_pairs[: max(0, int(diagnostic_limit))]
+
+    return ClashResult(
+        penalty=float(penalty),
+        count=int(count),
+        max_overlap_A=float(max_overlap),
+        max_allowed_overlap_A=float(max_allowed_overlap),
+        max_excess_overlap_A=float(max_excess_overlap),
+        pairs_checked=int(pairs_checked),
+        worst_pairs=worst_pairs,
+    )
+
+
+def combine_clash_results(*clashes: ClashResult) -> ClashResult:
+    valid = [clash for clash in clashes if clash is not None]
+    if not valid:
+        return ClashResult(0.0, 0, 0.0, 0.0, 0.0, 0)
+
+    worst_pairs = [
+        dict(pair)
+        for clash in valid
+        for pair in list(getattr(clash, "worst_pairs", []) or [])
+    ]
+    if worst_pairs:
+        worst_pairs.sort(
+            key=lambda pair: float(pair.get("excess_overlap_A", 0.0)),
+            reverse=True,
+        )
+
+    return ClashResult(
+        penalty=float(sum(float(clash.penalty) for clash in valid)),
+        count=int(sum(int(clash.count) for clash in valid)),
+        max_overlap_A=float(max(float(clash.max_overlap_A) for clash in valid)),
+        max_allowed_overlap_A=float(
+            max(float(clash.max_allowed_overlap_A) for clash in valid)
+        ),
+        max_excess_overlap_A=float(
+            max(float(clash.max_excess_overlap_A) for clash in valid)
+        ),
+        pairs_checked=int(sum(int(clash.pairs_checked) for clash in valid)),
+        worst_pairs=worst_pairs,
+    )
+
+
+def _resolve_ligand_atom_indices(mol, ligand_atom_indices, n_coord_rows: int) -> np.ndarray:
+    if ligand_atom_indices is not None:
+        arr = np.asarray(ligand_atom_indices, dtype=int).reshape(-1)
+        return arr if arr.shape[0] == int(n_coord_rows) else np.zeros(0, dtype=int)
+
+    try:
+        heavy = [
+            int(atom.GetIdx())
+            for atom in mol.GetAtoms()
+            if int(atom.GetAtomicNum()) > 1
+        ]
+    except Exception:
+        heavy = []
+    if len(heavy) == int(n_coord_rows):
+        return np.asarray(heavy, dtype=int)
+    return np.arange(int(n_coord_rows), dtype=int)
+
+
+def _rows_for_ligand_atom_selection(
+    row_by_atom: dict[int, int],
+    ligand_atom_indices: np.ndarray,
+    atom_selection,
+) -> np.ndarray:
+    if atom_selection is None:
+        return np.arange(ligand_atom_indices.shape[0], dtype=int)
+    rows = [
+        int(row_by_atom[int(atom_idx)])
+        for atom_idx in np.asarray(atom_selection, dtype=int).reshape(-1)
+        if int(atom_idx) in row_by_atom
+    ]
+    return np.asarray(rows, dtype=int)
+
+
 def _clash_objective(raw: float, clash: ClashResult, mode: str, weight: float, n_ligand_atoms: int) -> float:
     if not np.isfinite(float(raw)):
         return float("-inf")
@@ -399,6 +612,7 @@ def fit_in_map(
     )
     ligand_atom_indices = getattr(refine_ligand, "_atom_indices", None)
     protein_atom_indices = getattr(refine_ligand, "local_rows", None)
+    ligand_mol = getattr(getattr(refine_ligand, "_ligand", None), "mol", None)
 
     step_size, min_step, fd_delta = _resolved_steps(refine_ligand, config)
     step_decay = float(config.step_decay)
@@ -435,7 +649,7 @@ def fit_in_map(
         raw = float(score_result.value)
         if not np.isfinite(raw):
             raw = float("-inf")
-        clash = protein_ligand_clash(
+        protein_clash = protein_ligand_clash(
             coords_A,
             ligand_elements,
             protein_coords,
@@ -448,6 +662,21 @@ def fit_in_map(
             diagnose_pairs=bool(config.clash_diagnostics),
             diagnostic_limit=int(config.clash_diagnostic_limit),
         )
+        self_clash = ligand_self_clash(
+            coords_A,
+            ligand_elements,
+            ligand_mol,
+            ligand_atom_indices=ligand_atom_indices,
+            cutoff_A=float(config.clash_cutoff_A),
+            max_vdw_overlap_A=float(config.max_vdw_overlap_A),
+            max_hbond_overlap_A=float(config.max_hbond_overlap_A),
+            topological_exclusion_bonds=int(
+                getattr(config, "ligand_clash_topological_exclusion_bonds", 3)
+            ),
+            diagnose_pairs=bool(config.clash_diagnostics),
+            diagnostic_limit=int(config.clash_diagnostic_limit),
+        )
+        clash = combine_clash_results(protein_clash, self_clash)
         objective = _clash_objective(
             raw,
             clash,

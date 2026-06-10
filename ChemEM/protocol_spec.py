@@ -34,6 +34,7 @@ Adding a new protocol
 """
 
 
+import argparse
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Callable, Optional
@@ -99,7 +100,7 @@ def add_dock_args(p):
     g.add_argument("--n-local-search", type=int, default=20) #change here
     g.add_argument("-br", "--bias-radius", type=float, default=12.0)
     g.add_argument("--cluster-docking", type=float, default=1.0)
-    g.add_argument("--energy-cutoff", type=float, default=1.0)
+    g.add_argument("--energy-cutoff", type=float, default=3.0)
     g.add_argument("--minimize-docking", action="store_true")
     g.add_argument("--refine-to-diff-map",action="store_true")
     g.add_argument("--aggregate-sites", action="store_true")
@@ -149,6 +150,41 @@ def add_alpha_mask_args(p):
     g = p.add_argument_group("Alpha mask: Density segmentation")
     g.add_argument("--otsu-segment", action="store_true",
                    help="Use Otsu-based density segmentation")
+    g.add_argument("--hysteresis-segment", action="store_true",
+                   help="Use hysteresis thresholding: keep voxels above a low threshold "
+                        "only if connected to a high-threshold seed. Captures weak density "
+                        "attached to strong density while rejecting unconnected noise. "
+                        "Ignored if --otsu-segment is also set.")
+    g.add_argument("--hyst-low-k", type=float, default=2.0, metavar="K",
+                   help="Low threshold for --hysteresis-segment = bg_mean + K*bg_std "
+                        "(background stats from confidence_map). Default 2.0.")
+    g.add_argument("--hyst-low-sigma-fallback", type=float, default=1.0, metavar="STD",
+                   help="Fallback low-threshold sigma multiplier on masked-density std "
+                        "when background stats are unavailable. Default 1.0.")
+    g.add_argument("--random-walker-segment", action="store_true",
+                   help="Use random-walker segmentation (skimage). Probabilistic, "
+                        "edge-aware: solves an anisotropic diffusion problem to get "
+                        "per-voxel ligand probability. Best for weakly-resolved density "
+                        "attached to strong density. Ignored if --otsu-segment is set; "
+                        "takes precedence over --hysteresis-segment.")
+    g.add_argument("--rw-beta", type=float, default=130.0, metavar="BETA",
+                   help="Random-walker edge-weight penalty on density normalized to [0,1]: "
+                        "edge_weight = exp(-BETA*(density_diff)^2). Higher BETA = sharper "
+                        "boundaries. Default 130.")
+    g.add_argument("--rw-prob-threshold", type=float, default=0.5, metavar="P",
+                   help="Cutoff on the ligand-class posterior. Voxels with "
+                        "P(ligand|seeds) >= P are kept. 0.5 = argmax; raise toward "
+                        "0.7-0.9 for stricter segmentation. Default 0.5.")
+    g.add_argument("--rw-bg-sigma-k", type=float, default=0.0, metavar="K",
+                   help="Background-seed threshold: voxels with binding_density <= "
+                        "bg_mean + K*bg_std are seeded as background. K=0 means voxels "
+                        "at or below the noise mean are background seeds. Set negative "
+                        "(e.g. -1) for stricter background seeding. Default 0.")
+    g.add_argument("--rw-mode", type=str, default="cg_j",
+                   choices=("cg_j", "cg", "cg_mg", "bf"),
+                   help="Linear-system solver for random_walker. cg_j (default) = "
+                        "conjugate gradient w/ Jacobi preconditioner; fast and robust "
+                        "for 3D volumes.")
     g.add_argument("--grad-thr", type=float, default=0.4,
                    help="Gradient threshold for density segmentation")
     g.add_argument("--sigma-coeff", type=float, default=0.356,
@@ -169,6 +205,25 @@ def add_alpha_mask_args(p):
                    help="Centroid distance threshold for feature inclusion")
     g.add_argument("--sf-sigma-thr", type=float, default=2.0, metavar="STD",
                    help="Sigma threshold for feature inclusion")
+
+    # --- Alpha-feature-as-site mode ---
+    g = p.add_argument_group("Alpha mask: alpha-feature-as-site mode")
+    g.add_argument("--alpha-feature-sites", action="store_true",
+                   help="Treat each alpha-shape ligand-density feature as its own binding site. "
+                        "Replaces BindingSite-protocol sites entirely. Per-site density submap is "
+                        "masked to the feature blob; per-site EDT confines ACO to the blob.")
+    g.add_argument("--feature-site-radius", type=float, default=6.0, metavar="Å",
+                   help="Auto-tightened bias_radius for alpha-feature sites AND padding when "
+                        "cropping the cryo-EM bbox around the blob. Default 6 Å.")
+    g.add_argument("--feature-residue-dilation", type=float, default=6.0, metavar="Å",
+                   help="Lining-residue cutoff for alpha-feature sites: residues with at least "
+                        "one heavy atom within this distance of any non-zero blob voxel are kept. "
+                        "Default 6 Å. Independent of --feature-site-radius.")
+    g.add_argument("--feature-aco-dilation", type=float, default=0.0, metavar="Å",
+                   help="Isotropic dilation (Å) of the alpha-feature blob used to build the ACO "
+                        "translation-point mask. Voxels within this distance of any blob voxel "
+                        "are also valid ligand-centroid placements. Set to 0 for strict in-blob "
+                        "search. Does NOT affect the score-side blob-masked density. Default 1.5 Å.")
 
 
 def refine_deps(args):
@@ -427,9 +482,70 @@ def add_smart_ligand_refine2_args(p):
     )
     g.add_argument(
         "--sr2-final-minimise",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "(Default ON.) Run a single OpenMM map-biased polish after "
+            "the SmartRefine2 loop finishes. Passing --no-sr2-final-minimise "
+            "disables only the post-loop polish; --sr2-no-polish disables "
+            "both this and the on-stall polish."
+        ),
+    )
+    g.add_argument(
+        "--sr2-polish-on-stall",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "(Default ON.) OpenMM polish runs when the SmartRefine2 "
+            "search stalls (patience trip OR walker returns empty), "
+            "before the score-driven kick fires. Passing "
+            "--no-sr2-polish-on-stall disables only this trigger; "
+            "--sr2-no-polish disables both this and the final polish."
+        ),
+    )
+    g.add_argument(
+        "--sr2-no-polish",
         action="store_true",
         default=False,
-        help="Run a final local OpenMM map-biased minimisation after SmartRefine2",
+        help=(
+            "Force-disable ALL OpenMM polish in SmartRefine2 — both the "
+            "on-stall recovery polish and the post-loop final polish. "
+            "With round-13 defaults both polishes are ON; this is the "
+            "simplest way to turn the entire polish system off without "
+            "touching the individual --(no-)sr2-polish-* flags."
+        ),
+    )
+    g.add_argument(
+        "--sr2-tail-aware",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "(Default ON.) Tail-aware bundle of SmartRefine2 search "
+            "defaults: lookahead=0.0, max_keep=8, kick_tries=3, "
+            "patience=6, root_tabu_size=4, clash_tradeoff_lambda=0.05, "
+            "selection=greedy. Ligands whose longest semantic walk "
+            "exceeds --sr2-tail-aware-rotor-threshold dihedrals (default "
+            "12) additionally get coarse_keep_fraction=0.40 and "
+            "angular_diversity_sectors=6. Any individual --sr2-branch-* "
+            "flag passed explicitly overrides the bundle and bypasses "
+            "the adaptive logic for that field. Pass --no-sr2-tail-aware "
+            "to fall back to the pre-tuning strict-gate defaults."
+        ),
+    )
+    g.add_argument(
+        "--sr2-tail-aware-rotor-threshold",
+        type=int,
+        default=12,
+        help=(
+            "When --sr2-tail-aware is on, ligands whose longest semantic "
+            "walk depth exceeds this many dihedrals receive a wider "
+            "walker search (coarse_keep_fraction=0.40, "
+            "angular_diversity_sectors=6). Shorter walks keep the tighter "
+            "defaults (0.20 and 0) that work better for compact ligands. "
+            "Pass --sr2-branch-coarse-keep-fraction or "
+            "--sr2-branch-angular-diversity-sectors explicitly to bypass "
+            "the adaptive logic for those fields."
+        ),
     )
 
     # --- Performance / tuning knobs (defaults preserve current behaviour, except
@@ -465,12 +581,187 @@ def add_smart_ligand_refine2_args(p):
         type=float,
         default=15.0,
         help="branch_walker coarse dihedral sweep step size in degrees.",
-    )
+    ) 
     g.add_argument(
         "--sr2-branch-max-keep-per-step",
         type=int,
-        default=3,
-        help="branch_walker beam width (candidates kept per torsion step).",
+        default=argparse.SUPPRESS,
+        help=(
+            "branch_walker beam width (candidates kept per torsion step). "
+            "(default: 3; with --sr2-tail-aware: 8)"
+        ),
+    )
+
+    # --- Opt-in search-quality knobs (all defaults reproduce current behaviour).
+    g.add_argument(
+        "--sr2-branch-coarse-keep-fraction",
+        type=float,
+        default=argparse.SUPPRESS,
+        help=(
+            "Fraction of best score used as the threshold to keep coarse "
+            "dihedral candidates: keep iff score >= best - X * |best|. "
+            "Lower X = stricter; 0.35-0.50 retains more candidates for "
+            "tail-heavy ligands. "
+            "(default: 0.20; with --sr2-tail-aware: 0.40)"
+        ),
+    )
+    g.add_argument(
+        "--sr2-branch-downstream-lookahead-weight",
+        type=float,
+        default=argparse.SUPPRESS,
+        help=(
+            "Add alpha * mean(Qscore of moved-but-not-frontier atoms) to each "
+            "candidate score so early-walk decisions are biased toward "
+            "dihedrals that swing the downstream chain toward density. "
+            "0.0 = frontier-only behaviour; 0.5-1.0 helps long tails. "
+            "(default: 0.0; with --sr2-tail-aware: 0.75)"
+        ),
+    )
+    g.add_argument(
+        "--sr2-branch-angular-diversity-sectors",
+        type=int,
+        default=argparse.SUPPRESS,
+        help=(
+            "If > 0, _select_beam buckets candidates into N angular sectors "
+            "(by the last dihedral) and keeps at least one survivor per "
+            "non-empty sector before filling remaining beam slots by score. "
+            "0 = off; 6 is a reasonable starting value. "
+            "(default: 0; with --sr2-tail-aware: 6)"
+        ),
+    )
+    g.add_argument(
+        "--sr2-branch-metropolis-temp",
+        type=float,
+        default=None,
+        help=(
+            "Optional Metropolis temperature for branch-walker beam selection. "
+            "Default None = strict greedy. A positive value lets the beam "
+            "swap in a worse candidate with prob exp(-(best - cand) / T_iter), "
+            "where T_iter decays per outer iteration."
+        ),
+    )
+    g.add_argument(
+        "--sr2-branch-metropolis-decay",
+        type=float,
+        default=0.7,
+        help=(
+            "Temperature decay per outer iteration when "
+            "--sr2-branch-metropolis-temp is set: T_iter = T0 * decay^iter."
+        ),
+    )
+
+    # --- Score-driven kick (basin-hopping after the patience break).
+    g.add_argument(
+        "--sr2-kick-tries",
+        type=int,
+        default=argparse.SUPPRESS,
+        help=(
+            "Number of basin-hopping kick attempts after the patience break. "
+            "0 = off. A kick perturbs only torsions on the walks to blocks "
+            "that are below the Q-score threshold AND not improving; "
+            "well-fit regions are not touched. "
+            "(default: 0; with --sr2-tail-aware: 3)"
+        ),
+    )
+    g.add_argument(
+        "--sr2-kick-qscore-threshold",
+        type=float,
+        default=0.5,
+        help=(
+            "Per-block Q-score below which a block is considered 'poor fit' "
+            "and eligible for kick perturbation. Q-score ranges 0-1; ~0.5 is "
+            "the conventional 'poor fit' cutoff."
+        ),
+    )
+    g.add_argument(
+        "--sr2-kick-stagnation-tol",
+        type=float,
+        default=1e-3,
+        help=(
+            "Maximum per-block Q-score improvement since the last iteration "
+            "for a block to count as 'stagnating' and be kick-eligible. "
+            "Default 1e-3 (essentially no improvement)."
+        ),
+    )
+    g.add_argument(
+        "--sr2-kick-jitter-deg",
+        type=float,
+        default=30.0,
+        help=(
+            "Uniform random jitter magnitude (degrees) applied to each "
+            "torsion on a kick-eligible walk. Default 30 degrees."
+        ),
+    )
+    g.add_argument(
+        "--sr2-kick-seed",
+        type=int,
+        default=None,
+        help=(
+            "Optional RNG seed for the kick perturbations. Provide for "
+            "reproducible benchmark runs; default None uses a fresh seed."
+        ),
+    )
+
+    # --- Outer-loop controls.
+    g.add_argument(
+        "--sr2-patience",
+        type=int,
+        default=argparse.SUPPRESS,
+        help=(
+            "Number of outer iterations without raw-score improvement before "
+            "the refine loop terminates (or triggers a kick if "
+            "--sr2-kick-tries > 0). "
+            "(default: 3; with --sr2-tail-aware: 6)"
+        ),
+    )
+    g.add_argument(
+        "--sr2-root-tabu-size",
+        type=int,
+        default=argparse.SUPPRESS,
+        help=(
+            "Size of the rolling root-block tabu deque. 1 = exclude only the "
+            "previous root. Larger values force the loop to visit other "
+            "blocks as root before reusing one — useful when poorly-fit "
+            "tail blocks have low Q-scores and would otherwise never be "
+            "selected as root. "
+            "(default: 1; with --sr2-tail-aware: 4)"
+        ),
+    )
+
+    # --- Composite acceptance gate (round 2). Trades raw_score against
+    # --- clash_penalty so the loop can accept poses with slightly lower
+    # --- Qscore in exchange for much lower clash penalty, and vice versa.
+    g.add_argument(
+        "--sr2-clash-tradeoff-lambda",
+        type=float,
+        default=argparse.SUPPRESS,
+        help=(
+            "Outer-accepter trade-off coefficient. A pose is accepted iff "
+            "(delta_raw - lambda * delta_clash_penalty) > "
+            "min_score_improvement, so the algorithm can cross small clash "
+            "barriers when the score signal is strong and conversely accept "
+            "small raw regressions when clash penalty drops a lot. The "
+            "picker uses the same composite to choose among branch "
+            "candidates. "
+            "(default: unset = strict two-ratchet gate; "
+            "with --sr2-tail-aware: 0.05)"
+        ),
+    )
+    g.add_argument(
+        "--sr2-branch-clash-tradeoff-lambda",
+        type=float,
+        default=None,
+        help=(
+            "Optional in-beam trade-off coefficient for the branch walker's "
+            "candidate ranking. Default None preserves the current "
+            "(frontier_score, clash_count) ordering. When set, candidates "
+            "are ranked by (frontier_score - lambda * clash_penalty), so "
+            "the beam keeps poses that have slightly worse Qscore but "
+            "substantially fewer clashes. Tuned independently of "
+            "--sr2-clash-tradeoff-lambda because the walker uses Qscores "
+            "(range 0-1) while the outer accepter uses raw_score with a "
+            "potentially different scale. Suggested starting value ~0.1."
+        ),
     )
 
 def export_deps(args):
@@ -561,7 +852,6 @@ SHORT_ALIASES = {
     "orchestrate": "-o",
     "smart_ligand_refine2" : "-slr2"
 }
-
 
 REGISTRY = {
     "binding_site": ProtocolSpec(

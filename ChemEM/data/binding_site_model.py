@@ -62,6 +62,9 @@ class BindingSiteModel:
     # opening points (optional)
     openings: Optional[List[np.ndarray]] = None
 
+    # True when this site was built from an alpha-shape feature (--alpha-feature-sites mode)
+    is_alpha_feature_site: bool = False
+
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "BindingSiteModel":
         obj = cls()
@@ -99,6 +102,7 @@ class BindingSiteModel:
             "apix": tuple(self.apix),
             "box_size": self.box_size,
             "openings": None if self.openings is None else [o.tolist() for o in self.openings],
+            "is_alpha_feature_site": bool(self.is_alpha_feature_site),
         }
     
 

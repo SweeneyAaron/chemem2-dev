@@ -23,6 +23,8 @@ from ChemEM.tools.density import (MapTools,
                                   find_binding_site_boundary,
                                   compute_distance_map,
                                   extract_ligand_density,
+                                  extract_ligand_density_hysteresis,
+                                  extract_ligand_density_random_walker,
                                   extract_ligand_density_otsu,
                                   get_disconected_densities,
                                   extract_min_bounding_box,
@@ -33,7 +35,8 @@ from ChemEM.tools.density import (MapTools,
 from ChemEM.data.binding_site_model import BindingSiteModel
 from ChemEM.tools.biomolecule import write_residues_to_pdb
 
-from scipy.spatial import Delaunay
+from scipy.spatial import Delaunay, cKDTree
+from scipy.ndimage import distance_transform_edt
 
 
 
@@ -253,10 +256,32 @@ class AlphaMask:
             distance_map = binding_site.distance_map
             densmap = self.sliced_density_maps[key]
              
-            ligand_dens, ligand_feat = extract_ligand_density(densmap.density_map, 
-                                                              distance_map, 
-                                                              densmap.apix,
-                                                              high_threshold_sigma=self.system.options.sf_sigma_thr)
+            if getattr(self.system.options, "random_walker_segment", False) and not self.system.options.otsu_segment:
+                bg_thr = self._random_walker_bg_threshold(densmap.density_map)
+                ligand_dens, ligand_feat = extract_ligand_density_random_walker(
+                    densmap.density_map,
+                    distance_map,
+                    densmap.apix,
+                    high_threshold_sigma=self.system.options.sf_sigma_thr,
+                    bg_threshold=bg_thr,
+                    beta=self.system.options.rw_beta,
+                    prob_threshold=self.system.options.rw_prob_threshold,
+                    mode=self.system.options.rw_mode,
+                )
+            elif getattr(self.system.options, "hysteresis_segment", False) and not self.system.options.otsu_segment:
+                low_thr = self._hysteresis_low_threshold(densmap.density_map)
+                ligand_dens, ligand_feat = extract_ligand_density_hysteresis(
+                    densmap.density_map,
+                    distance_map,
+                    densmap.apix,
+                    high_threshold_sigma=self.system.options.sf_sigma_thr,
+                    low_threshold=low_thr,
+                )
+            else:
+                ligand_dens, ligand_feat = extract_ligand_density(densmap.density_map,
+                                                                  distance_map,
+                                                                  densmap.apix,
+                                                                  high_threshold_sigma=self.system.options.sf_sigma_thr)
             
             ligand_densities += ligand_dens 
             ligand_features += ligand_feat 
@@ -426,18 +451,57 @@ class AlphaMask:
         return (max(keys) + 1) if keys else 0
     
     
+    def _hysteresis_low_threshold(self, density_map) -> float:
+        bg_std = float(getattr(self.system, "bg_std", 0.0) or 0.0)
+        if bg_std > 0.0:
+            bg_mean = float(getattr(self.system, "bg_mean", 0.0) or 0.0)
+            return bg_mean + float(self.system.options.hyst_low_k) * bg_std
+        nz = density_map[density_map > 0.0]
+        if nz.size == 0:
+            return 0.0
+        return float(np.std(nz)) * float(self.system.options.hyst_low_sigma_fallback)
+
+    def _random_walker_bg_threshold(self, density_map) -> float:
+        bg_std = float(getattr(self.system, "bg_std", 0.0) or 0.0)
+        if bg_std > 0.0:
+            bg_mean = float(getattr(self.system, "bg_mean", 0.0) or 0.0)
+            return bg_mean + float(self.system.options.rw_bg_sigma_k) * bg_std
+        return 0.0
+
     def _build_combined_map(self) -> np.ndarray:
-        
+
         combined_map = np.zeros(self.masked_density.density_map.shape, dtype=float)
     
         if not self.system.options.otsu_segment:
-            ligand_dens, ligand_feat = extract_ligand_density(
-                self.masked_density.density_map,
-                self.distance_map.density_map,
-                self.masked_density.apix,
-                high_threshold_sigma=self.system.options.sf_sigma_thr,
-                grad_threshold=self.system.options.grad_thr,
-            )
+            if getattr(self.system.options, "random_walker_segment", False):
+                bg_thr = self._random_walker_bg_threshold(self.masked_density.density_map)
+                ligand_dens, ligand_feat = extract_ligand_density_random_walker(
+                    self.masked_density.density_map,
+                    self.distance_map.density_map,
+                    self.masked_density.apix,
+                    high_threshold_sigma=self.system.options.sf_sigma_thr,
+                    bg_threshold=bg_thr,
+                    beta=self.system.options.rw_beta,
+                    prob_threshold=self.system.options.rw_prob_threshold,
+                    mode=self.system.options.rw_mode,
+                )
+            elif getattr(self.system.options, "hysteresis_segment", False):
+                low_thr = self._hysteresis_low_threshold(self.masked_density.density_map)
+                ligand_dens, ligand_feat = extract_ligand_density_hysteresis(
+                    self.masked_density.density_map,
+                    self.distance_map.density_map,
+                    self.masked_density.apix,
+                    high_threshold_sigma=self.system.options.sf_sigma_thr,
+                    low_threshold=low_thr,
+                )
+            else:
+                ligand_dens, ligand_feat = extract_ligand_density(
+                    self.masked_density.density_map,
+                    self.distance_map.density_map,
+                    self.masked_density.apix,
+                    high_threshold_sigma=self.system.options.sf_sigma_thr,
+                    grad_threshold=self.system.options.grad_thr,
+                )
     
             for dens, feat in zip(ligand_dens, ligand_feat):
                 if feat["centroid"] < self.system.options.sf_centroid_thr:
@@ -570,6 +634,212 @@ class AlphaMask:
     
         return BindingSiteModel.from_dict(data), resampled_density
 
+    def _residues_within_dilation(self, blob_density_grid, blob_origin, blob_apix, dilation):
+        """
+        Return (residues_set, unique_atom_indices) for all heavy atoms whose nearest non-zero
+        blob voxel is within `dilation` Å. Mirrors site_from_densmap's kd-tree logic but lets
+        the caller pass the cropped blob density directly.
+        """
+        mask = blob_density_grid > 0.0
+        if not np.any(mask):
+            return set(), np.array([], dtype=int)
+        z_idx, y_idx, x_idx = np.where(mask)
+        ax, ay, az = blob_apix
+        ox, oy, oz = blob_origin[0], blob_origin[1], blob_origin[2]
+        map_points = np.column_stack([
+            ox + x_idx * ax,
+            oy + y_idx * ay,
+            oz + z_idx * az,
+        ])
+        tree = cKDTree(map_points)
+        atoms = [a for a in self.protein_openff_structure.atoms if a.element > 1]
+        positions = np.array([[a.xx, a.xy, a.xz] for a in atoms])
+        residue_ids = [a.residue for a in atoms]
+        dists, _ = tree.query(positions, k=1)
+        binding_residues = {rid for rid, d in zip(residue_ids, dists) if d <= dilation}
+        unique_atom_indices = [
+            a.idx for a in self.protein_openff_structure.atoms
+            if a.element > 1 and a.residue in binding_residues
+        ]
+        return binding_residues, np.array(unique_atom_indices)
+
+    def _make_alpha_feature_site(self, *, num, blob_mask_full, combined_map, apix, base_origin):
+        """
+        Build a BindingSiteModel for one alpha-shape feature `num`.
+
+        Returns (BindingSiteModel, blob_submap_emmap, feat_stats) or (None, None, None) if
+        the feature has no voxels.
+        """
+        if not np.any(blob_mask_full):
+            return None, None, None
+
+        site_radius = float(self.system.options.feature_site_radius)
+        residue_dilation = float(self.system.options.feature_residue_dilation)
+
+        # Pad in voxels (use max axis spacing so the padding ring is at least site_radius Å)
+        pad_vox = int(np.ceil(site_radius / float(np.max(apix))))
+
+        blob_density_full = combined_map * blob_mask_full
+        bbox = extract_min_bounding_box(blob_density_full, thr=0.0, pad=pad_vox)
+        if bbox is None:
+            return None, None, None
+        sub_density, (z0, y0, x0), (z1, y1, x1) = bbox
+        sub_mask = blob_mask_full[z0:z1+1, y0:y1+1, x0:x1+1]
+
+        new_origin = base_origin + np.array(
+            [x0 * apix[0], y0 * apix[1], z0 * apix[2]], dtype=float
+        )
+
+        # Score-side: blob-masked cryo-EM submap. Voxels outside the blob are zero.
+        blob_submap_emmap = EMMap(new_origin, apix, sub_density, self.masked_density.resolution)
+        sub_centroid = blob_submap_emmap.center_of_mass()
+
+        # Search-side: ACO translation points are valid inside the blob AND in a small skin
+        # of `--feature-aco-dilation` Å around it. The blob boundary from connected-component
+        # labelling is segmentation-noisy, and the ACO is helped by a little room past the
+        # labelled edge. Protein clashes are still handled by the score's vdW/clash terms,
+        # and the score-side blob-masked density stays un-dilated (so the scorer cannot fit
+        # to off-blob density). Encoded as a constant inside the dilated mask, 0 outside.
+        # Also keep a true inside-blob EDT (in Å) as a diagnostic.
+        blob_edt_ang = (distance_transform_edt(sub_mask, sampling=apix)).astype(np.float32)
+        aco_dilation = float(self.system.options.feature_aco_dilation)
+        if aco_dilation > 0.0:
+            ext_edt_ang = distance_transform_edt(~sub_mask, sampling=apix)
+            aco_valid = sub_mask | (ext_edt_ang <= aco_dilation)
+        else:
+            aco_valid = sub_mask
+        site_distance_grid = np.where(aco_valid, np.float32(10.0), np.float32(0.0))
+
+        # Lining residues: dilated distance from the blob.
+        residues, unique_atom_indices = self._residues_within_dilation(
+            sub_density, new_origin, apix, residue_dilation
+        )
+
+        # Inspection outputs alongside the lining PDB so the user can see exactly what
+        # docking will receive for this site.
+        pdb_path = os.path.join(self.output, f"site_{num}_lining.pdb")
+        rdkit_lining_mol = write_residues_to_pdb(
+            residues, self.protein_openff_structure.positions, pdb_path
+        )
+
+        EMMap(new_origin, apix, sub_density.astype(np.float32),
+              self.masked_density.resolution).write_mrc(
+            os.path.join(self.output, f"site_{num}_density.mrc")
+        )
+        EMMap(new_origin, apix, blob_edt_ang,
+              self.masked_density.resolution).write_mrc(
+            os.path.join(self.output, f"site_{num}_blob_edt.mrc")
+        )
+        EMMap(new_origin, apix, site_distance_grid,
+              self.masked_density.resolution).write_mrc(
+            os.path.join(self.output, f"site_{num}_aco_mask.mrc")
+        )
+
+        # Geometry / bounds
+        nz, ny, nx = sub_density.shape
+        bbox_size_xyz = np.array([nx * apix[0], ny * apix[1], nz * apix[2]], dtype=float)
+        min_coords = new_origin
+        max_coords = new_origin + bbox_size_xyz
+
+        feat = self._compute_feature_stats(num=num, densmap=blob_density_full, apix=apix)
+        feat["feature_id"] = num
+
+        data = {
+            "residues": residues,
+            "lining_residues": residues,
+            "tetrahedrals": [],
+            "unique_atom_indices": unique_atom_indices,
+            "binding_site_centroid": sub_centroid,
+            "min_coords": min_coords,
+            "max_coords": max_coords,
+            "bounding_box_size": bbox_size_xyz,
+            "site_centers": [],
+            "site_radii": [],
+            "volume": float(np.sum(sub_mask) * float(np.prod(apix))),
+            "distance_map": site_distance_grid,
+            "densmap": sub_density.astype(np.float32),
+            "origin": tuple(new_origin),
+            "box_size": (nz, ny, nx),
+            "apix": tuple(apix),
+            "key": int(num),
+            "rdkit_mol": None,
+            "rdkit_lining_mol": rdkit_lining_mol,
+            "opening_points": [],
+            "candidate_opening_points": [],
+            "solvent_open_map": np.zeros(sub_density.shape, dtype=np.float32),
+            "is_alpha_feature_site": True,
+        }
+        return BindingSiteModel.from_dict(data), blob_submap_emmap, feat
+
+    def _alpha_feature_sites_mode(self):
+        """
+        Replace the BindingSite-protocol output entirely. Each labelled alpha-shape feature
+        becomes its own binding site, with the per-site density submap masked to the blob and
+        a fresh EDT of the blob driving the ACO translation-point mask.
+        """
+        apix = np.array(self.masked_density.apix, dtype=float)
+        base_origin = np.array(self.masked_density.origin, dtype=float)
+
+        combined_map = self._build_combined_map()
+        features = self._label_features(combined_map)
+
+        centroids: dict[str, list[float]] = {}
+        new_binding_sites: dict[int, BindingSiteModel] = {}
+        new_system_maps: dict[int, list[tuple]] = {}
+
+        # Wipe pre-existing sites — alpha-feature mode replaces them.
+        self.system.binding_sites = {}
+        self.system.binding_site_maps = {}
+
+        sites_summary: dict[str, dict] = {}
+
+        for num in np.unique(features)[1:]:
+            blob_mask_full = (features == num)
+            bsm, blob_submap_emmap, feat = self._make_alpha_feature_site(
+                num=int(num),
+                blob_mask_full=blob_mask_full,
+                combined_map=combined_map,
+                apix=apix,
+                base_origin=base_origin,
+            )
+            if bsm is None:
+                continue
+
+            centroids[f"feature_{int(num)}_bbox.mrc"] = list(bsm.binding_site_centroid)
+            new_binding_sites[int(num)] = bsm
+            new_system_maps[int(num)] = [(blob_submap_emmap, feat)]
+
+            sites_summary[str(int(num))] = {
+                "key": int(num),
+                "centroid": [float(x) for x in bsm.binding_site_centroid],
+                "min_coords": [float(x) for x in bsm.min_coords],
+                "max_coords": [float(x) for x in bsm.max_coords],
+                "bounding_box_size": [float(x) for x in bsm.bounding_box_size],
+                "box_size_zyx": list(bsm.box_size) if bsm.box_size is not None else None,
+                "volume_A3": float(bsm.volume),
+                "n_lining_residues": len(bsm.residues),
+                "lining_residue_ids": sorted(
+                    [str(getattr(r, "id", r)) for r in bsm.residues]
+                ),
+                "feature_stats": {k: (float(v) if hasattr(v, "__float__") else v)
+                                  for k, v in (feat or {}).items()},
+                "feature_site_radius_used": float(self.system.options.feature_site_radius),
+                "feature_residue_dilation_used": float(self.system.options.feature_residue_dilation),
+                "feature_aco_dilation_used": float(self.system.options.feature_aco_dilation),
+            }
+
+        # Write combined-map + centroids exactly like get_features does.
+        copy_map = self.masked_density.copy()
+        copy_map.density_map = combined_map
+        copy_map.write_mrc(os.path.join(self.output, "combined_map.mrc"))
+        with open(os.path.join(self.output, "centroids.json"), "w") as f:
+            json.dump(centroids, f, ensure_ascii=False, indent=2)
+        with open(os.path.join(self.output, "sites_summary.json"), "w") as f:
+            json.dump(sites_summary, f, ensure_ascii=False, indent=2, default=str)
+
+        self.system.binding_sites = new_binding_sites
+        self.system.binding_site_maps = new_system_maps
+
     def _write_feature_outputs(self, *, combined_map, centroids, system_sites, new_binding_sites):
         copy_map = self.masked_density.copy()
         copy_map.density_map = combined_map
@@ -677,7 +947,13 @@ class AlphaMask:
     
         # Options / mode
         mode = "significant_features" if self.system.options.segment_binding_sites else (
-            "otsu_segment" if self.system.options.otsu_segment else "sigma+grad_segment"
+            "otsu_segment" if self.system.options.otsu_segment else (
+                "random_walker_segment" if getattr(self.system.options, "random_walker_segment", False)
+                else (
+                    "hysteresis_segment" if getattr(self.system.options, "hysteresis_segment", False)
+                    else "sigma+grad_segment"
+                )
+            )
         )
         log(f"Segmentation mode: {mode}")
         log(f"SES mask: {bool(self.system.options.ses_mask)}")
@@ -787,15 +1063,22 @@ class AlphaMask:
         print('get_mask', rt)
         
         
-        if self.system.options.segment_binding_sites:
+        if self.system.options.alpha_feature_sites:
+            self.system.log('-- Using alpha-feature-sites mode (BindingSite-protocol sites discarded)')
+            t1 = time.perf_counter()
+            self._alpha_feature_sites_mode()
+            t2 = time.perf_counter()
+            print('alpha_feature_sites', t2 - t1)
+
+        elif self.system.options.segment_binding_sites:
             self.system.log('-- Using Significant Feature Extraction')
             self.significant_features()
-            
+
         else:
             if self.system.options.force_new_site:
                 self.system.binding_sites = {}
             t1 = time.perf_counter()
-            self.get_features() 
+            self.get_features()
             t2 = time.perf_counter()
             rt = t2 - t1
             print('get_feat', rt)

@@ -52,6 +52,7 @@ patiance
  
 
 """
+from contextlib import contextmanager
 from dataclasses import dataclass
 import os
 
@@ -67,6 +68,8 @@ from .optimisers import (
     fit_in_map,
     FitInMapConfig,
     FitInMapResult,
+    combine_clash_results,
+    ligand_self_clash,
     protein_ligand_clash,
 )
 from .scorers import get_scorer, ScoreResult
@@ -353,13 +356,71 @@ class RefineLigand:
 
 
 
-class SmartRefine2:
-    def __init__(self, system): 
+_TAIL_AWARE_BUNDLE = {
+    # option_name -> tail_aware_value
+    # When --sr2-tail-aware is passed, the bundle sets each option to its
+    # tail_aware_value ONLY IF the user did not pass that option explicitly.
+    # The corresponding argparse defaults are `argparse.SUPPRESS`, so a
+    # missing user value leaves the attribute absent from `options` and we
+    # detect that via `hasattr`. An explicit `--sr2-foo 0` from the user
+    # sets `options.sr2_foo = 0` and `hasattr(options, "sr2_foo")` is True,
+    # so the user's 0 wins over the bundle default even when 0 happens to
+    # match the argparse default.
+    #
+    # NOT in the bundle (intentional):
+    # - metropolis_temp: stochastic exploration made trajectories
+    #   seed-dependent (round 5 finding).
+    # - coarse_keep_fraction and angular_diversity_sectors: resolved per
+    #   ligand in SmartRefine2._adaptive_branch_config (round 10) based on
+    #   the longest semantic-walk depth -- looser settings on long-tail
+    #   ligands, tight defaults on compact ones.
+    # Users who want them as static values can pass the individual
+    # --sr2-branch-* flags explicitly.
+    "sr2_branch_downstream_lookahead_weight": 0.0,
+    "sr2_branch_max_keep_per_step":           8,
+    "sr2_kick_tries":                         3,
+    "sr2_patience":                           6,
+    "sr2_root_tabu_size":                     4,
+    # Composite clash/raw trade-off picker + accepter. Without this the
+    # lexicographic (clash_count, -raw_score) picker sacrifices large raw
+    # improvements to save a single clash, which manifests as wrong-rotamer
+    # final poses on compact ligands.
+    "sr2_clash_tradeoff_lambda":              0.05,
+}
 
-        self.system = system 
+
+def _apply_tail_aware_bundle(options):
+    """Mutate ``options`` in place to apply the tail-aware bundle defaults
+    when ``--sr2-tail-aware`` was passed. Only fills in each field if the
+    user did NOT pass it explicitly (detected via ``hasattr`` thanks to
+    argparse SUPPRESS on the bundle flags)."""
+    if options is None:
+        return
+    if not bool(getattr(options, "sr2_tail_aware", False)):
+        return
+    applied = []
+    for name, tail_value in _TAIL_AWARE_BUNDLE.items():
+        if not hasattr(options, name):
+            setattr(options, name, tail_value)
+            applied.append(f"{name}={tail_value!r}")
+    if applied:
+        print(
+            "[smart_refine_2] --sr2-tail-aware bundle applied: "
+            + ", ".join(applied)
+            + ", selection=greedy"
+        )
+
+
+class SmartRefine2:
+    def __init__(self, system):
+
+        self.system = system
         self.ligands = []
         self.scorer = "qscore"
         options = getattr(system, "options", None)
+        # Apply --sr2-tail-aware overrides before reading any of the
+        # bundled options so the cascaded reads below see the new defaults.
+        _apply_tail_aware_bundle(options)
         self.optimisation_score = getattr(
             options,
             "sr2_optimisation_score",
@@ -382,6 +443,12 @@ class SmartRefine2:
             max_steps=int(getattr(options, "sr2_fit_in_map_max_steps", 64) or 64),
             early_stop_tol=getattr(options, "sr2_fit_in_map_early_stop_tol", None),
         )
+        # Opt-in tuning: all defaults below reproduce previous behaviour.
+        coarse_keep_fraction = getattr(options, "sr2_branch_coarse_keep_fraction", None)
+        angular_diversity = getattr(options, "sr2_branch_angular_diversity_sectors", None)
+        downstream_lookahead = getattr(options, "sr2_branch_downstream_lookahead_weight", None)
+        metropolis_temp = getattr(options, "sr2_branch_metropolis_temp", None)
+        metropolis_decay = getattr(options, "sr2_branch_metropolis_decay", None)
         self.branch_config = BranchWalkConfig(
             coarse_step_deg=float(
                 getattr(options, "sr2_branch_coarse_step_deg", 15.0) or 15.0
@@ -389,8 +456,64 @@ class SmartRefine2:
             max_keep_per_step=int(
                 getattr(options, "sr2_branch_max_keep_per_step", 3) or 3
             ),
+            coarse_keep_fraction=(
+                float(coarse_keep_fraction) if coarse_keep_fraction is not None else 0.20
+            ),
+            angular_diversity_sectors=(
+                int(angular_diversity) if angular_diversity is not None else 0
+            ),
+            downstream_lookahead_weight=(
+                float(downstream_lookahead) if downstream_lookahead is not None else 0.0
+            ),
+            metropolis_temp=(
+                float(metropolis_temp) if metropolis_temp is not None else None
+            ),
+            metropolis_decay=(
+                float(metropolis_decay) if metropolis_decay is not None else 0.7
+            ),
+            clash_tradeoff_lambda=(
+                float(getattr(options, "sr2_branch_clash_tradeoff_lambda", None))
+                if getattr(options, "sr2_branch_clash_tradeoff_lambda", None) is not None
+                else None
+            ),
         )
-        self.patience = 3
+        outer_lambda = getattr(options, "sr2_clash_tradeoff_lambda", None)
+        self.clash_tradeoff_lambda = (
+            float(outer_lambda) if outer_lambda is not None else None
+        )
+        self.kick_config = KickConfig(
+            tries=int(getattr(options, "sr2_kick_tries", 0) or 0),
+            qscore_threshold=float(
+                getattr(options, "sr2_kick_qscore_threshold", 0.5) or 0.5
+            ),
+            stagnation_tol=float(
+                getattr(options, "sr2_kick_stagnation_tol", 1e-3) or 1e-3
+            ),
+            jitter_deg=float(
+                getattr(options, "sr2_kick_jitter_deg", 30.0) or 30.0
+            ),
+            seed=getattr(options, "sr2_kick_seed", None),
+        )
+        self.patience = int(getattr(options, "sr2_patience", 3) or 3)
+        self.root_tabu_size = int(getattr(options, "sr2_root_tabu_size", 1) or 1)
+        # selection mode for branch-candidate picking. "branches" picks the
+        # best of the re-fit branches only; "greedy" includes the current
+        # pose in the pool so a worse-than-base set of branches cannot force
+        # a regression. Tail-aware ligands depend on never regressing during
+        # a stochastic walk, so the bundle switches the default to greedy.
+        if bool(getattr(options, "sr2_tail_aware", False)):
+            self.selection = "greedy"
+        else:
+            self.selection = "branches"
+        # Round-5 polish placement: opt-in only. The on-stall polish needs
+        # --sr2-polish-on-stall; the post-loop final polish needs
+        # --sr2-final-minimise. Either can be globally killed by
+        # --sr2-no-polish. See plan history for the round-3/4 experiments
+        # that motivated demoting polish back to opt-in.
+        no_polish = bool(getattr(options, "sr2_no_polish", False))
+        self.polish_on_stall_enabled = (
+            bool(getattr(options, "sr2_polish_on_stall", False)) and not no_polish
+        )
         
     def get_protein_complex(self):
         ligand_residue_names = _ligand_residue_names(getattr(self.system, "ligand", []))
@@ -422,6 +545,8 @@ class SmartRefine2:
 
     def _final_minimise_enabled(self):
         options = getattr(self.system, "options", None)
+        if bool(getattr(options, "sr2_no_polish", False)):
+            return False
         return bool(getattr(options, "sr2_final_minimise", False))
 
     def _refresh_refine_ligand_contexts(self):
@@ -433,90 +558,111 @@ class SmartRefine2:
     def _final_map_minimise_ligand(self, refine_ligand, result):
         if not self._final_minimise_enabled():
             return refine_ligand, result
+        return local_refine_polish_ligand(
+            refine_ligand,
+            result,
+            system=self.system,
+            protein_index_refresh_cb=self._refresh_protein_context,
+            options=getattr(self.system, "options", None),
+            context_label="final polish",
+        )
 
-        density_map = getattr(self.system, "density_map", None)
-        options = getattr(self.system, "options", None)
-        if bool(getattr(options, "no_map", False)) or density_map is None:
-            print("[smart_refine_2] final minimisation skipped: no density map available")
-            return refine_ligand, result
+    def _refresh_protein_context(self):
+        self.get_protein_complex()
+        self._refresh_refine_ligand_contexts()
 
-        try:
-            deps = _final_minimisation_dependencies()
-            (
-                setup_cls,
-                minimiser_cls,
-                make_submap,
-                copy_global_positions,
-                copy_ligand_positions,
-                residue_positions,
-                residue_subset,
-            ) = deps
+    def _build_polish_cb(self):
+        if not self.polish_on_stall_enabled:
+            return None
 
-            ligand = _sync_ligand_object_from_refine_ligand(refine_ligand)
-            protein_structure = self.system.protein.complex_structure
-            ligand_points = residue_positions(ligand.complex_structure.residues[0])
-            local_structure = residue_subset(
-                ligand_points,
-                protein_structure,
-                distance_cutoff=float(getattr(options, "local_radius", 12.0)),
-            )
-            local_map = make_submap(local_structure, density_map)
-
-            env = setup_cls(
-                protein_structure=local_structure,
-                ligand_structure=[ligand],
-                density_map=local_map,
-                platform_name=getattr(self.system, "platform", "CPU"),
-                protein_restraint="protein",
-                pin_k=5000.0,
-                localise=False,
-                global_k=150.0,
-                pin_specs=getattr(options, "pin_specs", []),
-                distance_specs=getattr(options, "distance_specs", []),
-                resource_owner=self.system,
-            )
-            final_energy = minimiser_cls(env).run(
-                do_biased_md=getattr(options, "do_biased_md", False),
-                md_ps=5.0,
-                max_iters=200,
-            )
-            if final_energy is None:
-                print(
-                    "[smart_refine_2] final minimisation skipped: minimiser returned no energy"
-                )
-                return refine_ligand, result
-
-            copy_global_positions(
-                full_structure=protein_structure,
-                local_structure=env.complex_structure,
-            )
-            copy_ligand_positions(
-                local_structure=env.complex_structure,
-                ligand_objects=[ligand],
+        def _polish(rl, result):
+            return local_refine_polish_ligand(
+                rl,
+                result,
+                system=self.system,
+                protein_index_refresh_cb=self._refresh_protein_context,
+                options=getattr(self.system, "options", None),
+                context_label="stall polish",
             )
 
-            self.get_protein_complex()
-            self._refresh_refine_ligand_contexts()
-            _refresh_refine_ligand_from_ligand_object(
-                refine_ligand,
-                protein_index=self._protein_index,
-                result=result,
-                final_energy=final_energy,
-            )
-            print(
-                "[smart_refine_2] final minimisation finished "
-                f"E={float(final_energy):.2f} kcal/mol"
-            )
-        except Exception as exc:
-            print(
-                "[smart_refine_2] final minimisation failed; "
-                f"keeping pre-minimised pose: {exc}"
-            )
-        return refine_ligand, result
+        return _polish
 
     def get_output(self):
         self.output = os.path.join(self.system.output, 'smart_refine')
         os.makedirs(self.output, exist_ok=True)
+
+    def _adaptive_branch_config(self, refine_ligand):
+        """Return a possibly-modified copy of ``self.branch_config`` for this
+        ligand. When the ligand's longest directional walk exceeds
+        ``--sr2-tail-aware-rotor-threshold`` (default 12) dihedrals, bump
+        ``coarse_keep_fraction`` to 0.40 and ``angular_diversity_sectors`` to
+        6 so the walker has the beam diversity needed to find deep low-clash
+        basins on long-tail ligands. Compact ligands stay with the tighter
+        defaults that work better for them. User-explicit
+        --sr2-branch-coarse-keep-fraction or
+        --sr2-branch-angular-diversity-sectors values win (detected via
+        ``hasattr`` on options).
+        """
+        import copy as _copy
+
+        bc = _copy.copy(self.branch_config)
+        options = getattr(self.system, "options", None)
+        if options is None:
+            return bc
+
+        rotor_tree = getattr(refine_ligand, "_rotor_tree", None)
+        mol = getattr(getattr(refine_ligand, "_ligand", None), "mol", None)
+        if not rotor_tree or mol is None:
+            return bc
+
+        threshold = int(
+            getattr(options, "sr2_tail_aware_rotor_threshold", 12) or 12
+        )
+
+        try:
+            root_idx = refine_ligand.get_best_block_by_qscore()
+            root_block_id = int(rotor_tree[root_idx].block_id)
+            target_ids = [
+                int(b.block_id) for b in rotor_tree
+                if int(b.block_id) != root_block_id
+            ]
+            walks = build_directional_torsion_walks(
+                mol,
+                rotor_tree,
+                root_block_id=root_block_id,
+                target_block_ids=target_ids,
+            )
+            max_depth = max((len(w.steps) for w in walks), default=0)
+        except Exception as exc:
+            print(
+                f"[smart_refine_2] adaptive branch_config: depth probe failed "
+                f"({exc}); using static config"
+            )
+            return bc
+
+        if max_depth <= threshold:
+            print(
+                f"[smart_refine_2] adaptive branch_config: max walk depth "
+                f"{max_depth} <= threshold {threshold} -> tight defaults "
+                f"(coarse_keep={bc.coarse_keep_fraction}, "
+                f"angular_diversity={bc.angular_diversity_sectors})"
+            )
+            return bc
+
+        applied = []
+        if not hasattr(options, "sr2_branch_coarse_keep_fraction"):
+            bc.coarse_keep_fraction = 0.40
+            applied.append("coarse_keep_fraction=0.40")
+        if not hasattr(options, "sr2_branch_angular_diversity_sectors"):
+            bc.angular_diversity_sectors = 6
+            applied.append("angular_diversity_sectors=6")
+
+        suffix = ", ".join(applied) if applied else "no override (user-explicit)"
+        print(
+            f"[smart_refine_2] adaptive branch_config: max walk depth "
+            f"{max_depth} > threshold {threshold} -> {suffix}"
+        )
+        return bc
 
 
     def run(self):
@@ -527,6 +673,7 @@ class SmartRefine2:
         self.debug_sdf_paths = []
 
         for ligand_index, ligand in enumerate(list(self.ligands), start=1):
+            per_ligand_branch_config = self._adaptive_branch_config(ligand)
             ligand = refine_ligand(
                 ligand,
                 scorer=self.scorer,
@@ -536,8 +683,13 @@ class SmartRefine2:
                 acceptance_weights=self.acceptance_weights,
                 scorer_options=getattr(self.system, "options", None),
                 fit_config=self.fit_config,
-                branch_config=self.branch_config,
+                branch_config=per_ligand_branch_config,
+                kick_config=self.kick_config,
                 patience=self.patience,
+                root_tabu_size=self.root_tabu_size,
+                clash_tradeoff_lambda=self.clash_tradeoff_lambda,
+                polish_cb=self._build_polish_cb(),
+                selection=self.selection,
                 debug_dir=getattr(self.system, "output", None),
             )
             result = ligand._last_fit_in_map_result
@@ -639,6 +791,150 @@ def _final_minimisation_dependencies():
     )
 
 
+@contextmanager
+def _suppress_polish_atom_warnings():
+    """Filter ``Warning: Atom ('', '213', 'CX') in local structure not found
+    in full structure.`` lines emitted by ``copy_global_positions`` during
+    the polish step. The ligand atoms are absent from
+    ``system.protein.complex_structure`` (protein only), so every ligand
+    atom triggers the warning. The ligand is updated via
+    ``copy_ligand_positions`` separately; these warnings carry no
+    information and historically generated 80+ noise lines per polish.
+    """
+    import io
+    import sys as _sys
+
+    buf = io.StringIO()
+    orig_stdout = _sys.stdout
+    _sys.stdout = buf
+    try:
+        yield
+    finally:
+        _sys.stdout = orig_stdout
+        for line in buf.getvalue().splitlines():
+            if "in local structure not found in full structure" in line:
+                continue
+            if line.strip():
+                print(line)
+
+
+def local_refine_polish_ligand(
+    refine_ligand,
+    result,
+    *,
+    system,
+    protein_index_refresh_cb,
+    options=None,
+    context_label="polish",
+):
+    """Run an OpenMM local-refine polish on ``refine_ligand`` in place.
+
+    Mirrors the body of ``SmartRefine2._final_map_minimise_ligand`` (which is
+    itself the same code path as ``--refine --local-refine``): set up a
+    ChemEMSimulationSetup environment around the ligand + nearby residues,
+    minimise with the density bias, then copy positions back and refresh the
+    RefineLigand's caches. Returns ``(refine_ligand, result)``; if the polish
+    cannot run (no map, OpenMM unavailable, minimiser returned None) the
+    ligand and result are returned untouched.
+
+    Required arguments:
+      - ``system`` — the SmartRefine2 system (needs ``.protein.complex_structure``
+        and optionally ``.density_map``, ``.platform``).
+      - ``protein_index_refresh_cb`` — callable invoked after the polish to
+        rebuild the protein coordinate index and refresh any RefineLigand
+        contexts (the SmartRefine2 caller passes
+        ``lambda: (self.get_protein_complex(), self._refresh_refine_ligand_contexts())``).
+      - ``options`` — typically the argparse Namespace on the system; read for
+        ``no_map``, ``local_radius``, ``do_biased_md``, ``pin_specs``,
+        ``distance_specs``. Falls back to defaults when None.
+      - ``context_label`` — short string ("polish", "final polish",
+        "per-iter polish") used only in the log line.
+    """
+    density_map = getattr(system, "density_map", None)
+    if bool(getattr(options, "no_map", False)) or density_map is None:
+        print(f"[smart_refine_2] {context_label} skipped: no density map available")
+        return refine_ligand, result
+
+    try:
+        deps = _final_minimisation_dependencies()
+        (
+            setup_cls,
+            minimiser_cls,
+            make_submap,
+            copy_global_positions,
+            copy_ligand_positions,
+            residue_positions,
+            residue_subset,
+        ) = deps
+
+        ligand = _sync_ligand_object_from_refine_ligand(refine_ligand)
+        protein_structure = system.protein.complex_structure
+        ligand_points = residue_positions(ligand.complex_structure.residues[0])
+        local_structure = residue_subset(
+            ligand_points,
+            protein_structure,
+            distance_cutoff=float(getattr(options, "local_radius", 12.0)),
+        )
+        local_map = make_submap(local_structure, density_map)
+
+        env = setup_cls(
+            protein_structure=local_structure,
+            ligand_structure=[ligand],
+            density_map=local_map,
+            platform_name=getattr(system, "platform", "CPU"),
+            protein_restraint="protein",
+            pin_k=5000.0,
+            localise=False,
+            global_k=150.0,
+            pin_specs=getattr(options, "pin_specs", []),
+            distance_specs=getattr(options, "distance_specs", []),
+            resource_owner=system,
+        )
+        final_energy = minimiser_cls(env).run(
+            do_biased_md=getattr(options, "do_biased_md", False),
+            md_ps=5.0,
+            max_iters=200,
+        )
+        if final_energy is None:
+            print(
+                f"[smart_refine_2] {context_label} skipped: minimiser returned no energy"
+            )
+            return refine_ligand, result
+
+        with _suppress_polish_atom_warnings():
+            copy_global_positions(
+                full_structure=protein_structure,
+                local_structure=env.complex_structure,
+            )
+        copy_ligand_positions(
+            local_structure=env.complex_structure,
+            ligand_objects=[ligand],
+        )
+
+        if protein_index_refresh_cb is not None:
+            protein_index_refresh_cb()
+        protein_index = getattr(refine_ligand, "_protein_index", None)
+        _refresh_refine_ligand_from_ligand_object(
+            refine_ligand,
+            protein_index=protein_index,
+            result=result,
+            final_energy=final_energy,
+        )
+        initial_raw = float(getattr(result, "initial_raw_score", 0.0)) if result is not None else 0.0
+        best_raw = float(getattr(result, "best_raw_score", initial_raw)) if result is not None else initial_raw
+        print(
+            f"[smart_refine_2] {context_label} finished "
+            f"E={float(final_energy):.2f} kcal/mol "
+            f"raw {initial_raw:+.5f}->{best_raw:+.5f}"
+        )
+    except Exception as exc:
+        print(
+            f"[smart_refine_2] {context_label} failed; "
+            f"keeping pre-polish pose: {exc}"
+        )
+    return refine_ligand, result
+
+
 def _sync_ligand_object_from_refine_ligand(refine_ligand):
     working_ligand = getattr(refine_ligand, "_ligand", None)
     ligand_object = getattr(refine_ligand, "_ligand_object", working_ligand)
@@ -725,12 +1021,17 @@ def refine_ligand(
     scorer_options=None,
     fit_config=None,
     branch_config=None,
+    kick_config=None,
     min_score_improvement=0.0,
     max_clash_penalty_increase=1e-6,
     max_iters=25,
     patience=3,
+    root_tabu_size=1,
     selection="branches",
     debug_dir=None,
+    rng=None,
+    clash_tradeoff_lambda=None,
+    polish_cb=None,
 ):
     """SmartRefine2 single-ligand refinement loop.
 
@@ -744,8 +1045,15 @@ def refine_ligand(
     The block used as root in step 3 is excluded from being root in the next iteration.
 
     selection:
-        "greedy"   -- winner picked from {base, branches}; never regresses
-        "branches" -- winner picked from re-fit branches only
+        "greedy"   -- winner picked from {base, branches} with a raw-score
+                      floor: only candidates whose post-fit raw is >= the
+                      base's raw are eligible. The (clash_count, -raw) min
+                      then picks the lowest-clash improver. Guarantees the
+                      iteration cannot regress the raw score even when a
+                      branch has fewer clashes than the base.
+        "branches" -- winner picked from re-fit branches only (no floor);
+                      can regress to a worse raw if every branch is worse
+                      than the base.
     """
     if selection not in {"greedy", "branches"}:
         raise ValueError(f"selection must be 'greedy' or 'branches', got {selection!r}")
@@ -758,6 +1066,14 @@ def refine_ligand(
         scorer_options=scorer_options,
     )
 
+    from collections import deque
+    if rng is None:
+        kick_seed = getattr(kick_config, "seed", None) if kick_config else None
+        rng = np.random.default_rng(kick_seed) if kick_seed is not None else np.random.default_rng()
+    tabu_size = max(0, int(root_tabu_size))
+    recent_roots: deque[int] = deque(maxlen=tabu_size) if tabu_size > 0 else deque(maxlen=0)
+    block_qscore_history: deque[list[float]] = deque(maxlen=2)
+
     refine_ligand = _fit_and_accept(
         refine_ligand,
         optimisation_scorer,
@@ -765,7 +1081,14 @@ def refine_ligand(
         fit_config,
         min_score_improvement,
         max_clash_penalty_increase,
+        clash_tradeoff_lambda=clash_tradeoff_lambda,
     )
+    # Snapshot the initial block Qscores so the very first iteration's kick
+    # check has a valid "previous" reference.
+    initial_block_qscores = getattr(refine_ligand, "_block_qscores", None)
+    if initial_block_qscores is not None:
+        block_qscore_history.append([float(q) for q in initial_block_qscores])
+    refine_ligand._block_qscore_history = block_qscore_history
     patience_limit = _patience_limit(patience)
     best_raw_score_so_far = _result_best_raw(
         getattr(refine_ligand, "_last_fit_in_map_result", None)
@@ -788,6 +1111,11 @@ def refine_ligand(
         iter_dir = os.path.join(debug_dir, "iters")
         os.makedirs(iter_dir, exist_ok=True)
 
+    # Round-11 polish-on-stall guard: tracks whether we've attempted a polish
+    # since the last successful branch_walker iteration. Prevents back-to-back
+    # polish attempts when the polish itself doesn't unstick the walker.
+    polished_since_last_walker_success = False
+
     for iteration in range(max_iters):
         #refine_ligand = _fit_and_accept(refine_ligand, scorer, fit_config, min_score_improvement)
 
@@ -803,11 +1131,53 @@ def refine_ligand(
             refine_ligand,
             scorer=acceptance_scorer,
             config=branch_config,
+            iteration=iteration,
+            rng=rng,
         )
         refine_ligand._last_branch_walker_result = branch_results
         if not branch_results:
+            # Round-12: walker exhausting its targets is a stall. Polish
+            # always continues (no raw gate) because the walker may find
+            # new walks after per-atom Qscores recompute, even when mean
+            # raw is unchanged. The polished_since_last_walker_success
+            # guard prevents back-to-back polishes -- one polish per stall
+            # episode, then break if the next walker is still empty.
+            if (
+                polish_cb is not None
+                and not polished_since_last_walker_success
+            ):
+                last_result = getattr(refine_ligand, "_last_fit_in_map_result", None)
+                if last_result is not None:
+                    polished_rl, polished_result = polish_cb(refine_ligand, last_result)
+                    refine_ligand = polished_rl
+                    if polished_result is not None:
+                        refine_ligand._last_fit_in_map_result = polished_result
+                    refine_ligand._block_qscore_history = block_qscore_history
+                    polished_raw = (
+                        _result_best_raw(polished_result)
+                        if polished_result is not None else best_raw_score_so_far
+                    )
+                    if polished_raw > best_raw_score_so_far:
+                        best_raw_score_so_far = polished_raw
+                    polished_since_last_walker_success = True
+                    current_block_qscores = getattr(refine_ligand, "_block_qscores", None)
+                    if current_block_qscores is not None:
+                        block_qscore_history.append(
+                            [float(q) for q in current_block_qscores]
+                        )
+                    _set_refine_loop_diagnostics(
+                        refine_ligand,
+                        iterations_completed,
+                        no_improve_iters,
+                        "max_iters",
+                    )
+                    continue
             stop_reason = "no_branch_results"
             break
+
+        # Walker succeeded -- reset the polish-on-stall guard so a future
+        # walker-empty exit can attempt a polish again.
+        polished_since_last_walker_success = False
 
         refine_ligand = _refit_branch_candidates(
             refine_ligand,
@@ -818,6 +1188,7 @@ def refine_ligand(
             min_score_improvement,
             selection,
             max_clash_penalty_increase,
+            clash_tradeoff_lambda=clash_tradeoff_lambda,
         )
         iterations_completed = iteration + 1
 
@@ -833,9 +1204,22 @@ def refine_ligand(
         if patience_limit is not None and no_improve_iters >= patience_limit:
             stop_reason = "patience"
 
-        # Rolling exclusion of size 1: the block we just walked away from
-        # cannot be picked as root next iteration; it'll get walked then.
-        refine_ligand._excluded_root_blocks = {root_block_id}
+        # Rolling root tabu: keep the last N roots in a deque so the loop has
+        # to visit other blocks as root before reusing one. tabu_size == 1
+        # reproduces the previous size-1 exclusion.
+        if tabu_size > 0:
+            recent_roots.append(int(root_block_id))
+            refine_ligand._excluded_root_blocks = set(recent_roots)
+        else:
+            refine_ligand._excluded_root_blocks = set()
+
+        # Snapshot per-block Qscores so the kick eligibility check at the
+        # next stall has up-to-date "current" and "previous" values.
+        current_block_qscores = getattr(refine_ligand, "_block_qscores", None)
+        if current_block_qscores is not None:
+            block_qscore_history.append([float(q) for q in current_block_qscores])
+        refine_ligand._block_qscore_history = block_qscore_history
+
         _set_refine_loop_diagnostics(
             refine_ligand,
             iterations_completed,
@@ -856,6 +1240,78 @@ def refine_ligand(
         #add per iteration debugger here
         #_debug_write_iteration_ligand(refine_ligand, iter_dir, iteration=iteration)
         if stop_reason == "patience":
+            # First recovery move: OpenMM local-refine polish (deterministic,
+            # cheap). Per the round-4 redesign, polish only runs here — NOT
+            # after every iteration — to avoid the polish vs. Qscore tug-of-war
+            # observed in round 3. If polish unblocks the search the loop
+            # continues; otherwise we fall through to the stochastic kick.
+            if polish_cb is not None:
+                last_result = getattr(refine_ligand, "_last_fit_in_map_result", None)
+                if last_result is not None:
+                    polished_rl, polished_result = polish_cb(refine_ligand, last_result)
+                    polished_raw = _result_best_raw(polished_result) if polished_result is not None else float("-inf")
+                    if polished_raw > best_raw_score_so_far + float(min_score_improvement):
+                        refine_ligand = polished_rl
+                        if polished_result is not None:
+                            refine_ligand._last_fit_in_map_result = polished_result
+                        refine_ligand._block_qscore_history = block_qscore_history
+                        best_raw_score_so_far = polished_raw
+                        no_improve_iters = 0
+                        stop_reason = "max_iters"
+                        # Round-11: mark polish-attempted so the next walker
+                        # iteration, if it returns empty, won't fire another
+                        # polish immediately. Resets when the walker succeeds.
+                        polished_since_last_walker_success = True
+                        current_block_qscores = getattr(refine_ligand, "_block_qscores", None)
+                        if current_block_qscores is not None:
+                            block_qscore_history.append(
+                                [float(q) for q in current_block_qscores]
+                            )
+                        _set_refine_loop_diagnostics(
+                            refine_ligand,
+                            iterations_completed,
+                            no_improve_iters,
+                            stop_reason,
+                        )
+                        continue
+
+            kicked_rl = refine_ligand
+            kick_improved = False
+            if kick_config is not None and int(getattr(kick_config, "tries", 0)) > 0:
+                kicked_rl, kick_improved = _score_driven_kick_round(
+                    refine_ligand,
+                    optimisation_scorer,
+                    acceptance_scorer,
+                    fit_config,
+                    branch_config,
+                    kick_config,
+                    min_score_improvement,
+                    max_clash_penalty_increase,
+                    selection,
+                    rng,
+                    clash_tradeoff_lambda=clash_tradeoff_lambda,
+                )
+            if kick_improved:
+                refine_ligand = kicked_rl
+                refine_ligand._block_qscore_history = block_qscore_history
+                latest_raw_score = _result_best_raw(
+                    getattr(refine_ligand, "_last_fit_in_map_result", None)
+                )
+                best_raw_score_so_far = max(best_raw_score_so_far, latest_raw_score)
+                no_improve_iters = 0
+                stop_reason = "max_iters"
+                current_block_qscores = getattr(refine_ligand, "_block_qscores", None)
+                if current_block_qscores is not None:
+                    block_qscore_history.append(
+                        [float(q) for q in current_block_qscores]
+                    )
+                _set_refine_loop_diagnostics(
+                    refine_ligand,
+                    iterations_completed,
+                    no_improve_iters,
+                    stop_reason,
+                )
+                continue
             print(
                 "[smart_refine_2] early stopping: "
                 f"patience={patience_limit} no_improve_iters={no_improve_iters}"
@@ -869,6 +1325,177 @@ def refine_ligand(
         stop_reason,
     )
     return refine_ligand
+
+
+@dataclass
+class KickConfig:
+    """Opt-in score-driven basin-hopping after the patience break.
+
+    The kick perturbs torsions on the walks from the current root to each
+    block that is *both* poorly-fit (Qscore below ``qscore_threshold``) *and*
+    stagnating (Qscore improvement since last iteration <= ``stagnation_tol``).
+    All other torsions are left alone — well-fit regions are not disturbed.
+    With tries == 0 the kick is a no-op and the loop breaks on patience as
+    before."""
+
+    tries: int = 0
+    qscore_threshold: float = 0.5
+    stagnation_tol: float = 1e-3
+    jitter_deg: float = 30.0
+    seed: int | None = None
+
+
+def _kick_eligible_block_ids(refine_ligand, kick_config):
+    """Return the list of block IDs that pass both the poor-fit and the
+    stagnation criteria. Empty list => no kick this round."""
+    block_qscores = getattr(refine_ligand, "_block_qscores", None)
+    if block_qscores is None or not len(block_qscores):
+        return []
+    history = list(getattr(refine_ligand, "_block_qscore_history", []) or [])
+    prev = history[-1] if history else None
+    rotor_tree = getattr(refine_ligand, "_rotor_tree", None) or ()
+    qscore_threshold = float(kick_config.qscore_threshold)
+    stagnation_tol = float(kick_config.stagnation_tol)
+    eligible = []
+    for idx, q_now in enumerate(block_qscores):
+        if idx >= len(rotor_tree):
+            continue
+        q_now = float(q_now)
+        if q_now >= qscore_threshold:
+            continue
+        if prev is not None and idx < len(prev):
+            q_prev = float(prev[idx])
+            delta = q_now - q_prev
+            if delta > stagnation_tol:
+                # The block is poor but still improving — leave it to the
+                # normal walker.
+                continue
+        eligible.append(int(rotor_tree[idx].block_id))
+    return eligible
+
+
+def _score_driven_kick_round(
+    refine_ligand,
+    optimisation_scorer,
+    acceptance_scorer,
+    fit_config,
+    branch_config,
+    kick_config,
+    min_score_improvement,
+    max_clash_penalty_increase,
+    selection,
+    rng,
+    clash_tradeoff_lambda=None,
+):
+    """Score-driven basin-hopping kick. Returns (refine_ligand, improved_bool).
+
+    Jitter is applied only to torsions on walks from the current root to
+    each kick-eligible block. Well-fit regions are not touched. We then
+    re-run ``fit_in_map`` to relax the kicked geometry and keep the best of
+    {pre-kick, all kick attempts}.
+    """
+    from rdkit.Chem import rdMolTransforms
+
+    tries = int(kick_config.tries)
+    if tries <= 0:
+        return refine_ligand, False
+    rotor_tree = getattr(refine_ligand, "_rotor_tree", None)
+    if not rotor_tree:
+        return refine_ligand, False
+    eligible_block_ids = _kick_eligible_block_ids(refine_ligand, kick_config)
+    if not eligible_block_ids:
+        return refine_ligand, False
+
+    current_root_idx = refine_ligand.get_best_block_by_qscore()
+    current_root_block_id = int(rotor_tree[current_root_idx].block_id)
+
+    walks = build_directional_torsion_walks(
+        refine_ligand._ligand.mol,
+        rotor_tree,
+        root_block_id=current_root_block_id,
+        target_block_ids=eligible_block_ids,
+    )
+    if not walks:
+        return refine_ligand, False
+
+    # Collect the unique set of (i, j, k, l) dihedrals to jitter — across all
+    # eligible walks. A single dihedral may appear in multiple walks; we only
+    # jitter it once per attempt.
+    jitter_dihedrals = []
+    seen_axes = set()
+    for walk in walks:
+        for step in walk.steps:
+            axis = tuple(int(x) for x in step.torsion.axis)
+            if axis in seen_axes:
+                continue
+            seen_axes.add(axis)
+            jitter_dihedrals.append(tuple(int(x) for x in step.dihedral))
+
+    if not jitter_dihedrals:
+        return refine_ligand, False
+
+    baseline_score = _result_best_raw(
+        getattr(refine_ligand, "_last_fit_in_map_result", None)
+    )
+    print(
+        f"[smart_refine_2] score-driven kick: tries={tries} "
+        f"eligible_blocks={eligible_block_ids} jitter={kick_config.jitter_deg:.1f}deg "
+        f"jitter_dihedrals={len(jitter_dihedrals)} baseline_raw={baseline_score:+.5f}"
+    )
+
+    best_rl = refine_ligand
+    best_score = baseline_score
+    improved = False
+
+    for attempt in range(tries):
+        clone = _clone_refine_ligand(refine_ligand)
+        mol = clone._ligand.mol
+        conf = mol.GetConformer(0)
+        for dihedral in jitter_dihedrals:
+            try:
+                current_angle = float(rdMolTransforms.GetDihedralDeg(conf, *dihedral))
+            except Exception:
+                continue
+            delta = float(rng.uniform(-kick_config.jitter_deg, kick_config.jitter_deg))
+            rdMolTransforms.SetDihedralDeg(conf, *dihedral, current_angle + delta)
+        # Write the perturbed coords back to the heavy-atom array.
+        for row, mol_idx in enumerate(clone._atom_indices.tolist()):
+            p = conf.GetAtomPosition(int(mol_idx))
+            clone._atom_positions[row, 0] = float(p.x)
+            clone._atom_positions[row, 1] = float(p.y)
+            clone._atom_positions[row, 2] = float(p.z)
+        if hasattr(clone, "update_atom_qscores"):
+            clone.update_atom_qscores()
+
+        # Relax with fit_in_map; the existing _fit_and_accept handles the
+        # rescore-for-acceptance + accepter logic.
+        clone = _fit_and_accept(
+            clone,
+            optimisation_scorer,
+            acceptance_scorer,
+            fit_config,
+            min_score_improvement,
+            max_clash_penalty_increase,
+            clash_tradeoff_lambda=clash_tradeoff_lambda,
+        )
+        attempt_score = _result_best_raw(
+            getattr(clone, "_last_fit_in_map_result", None)
+        )
+        print(
+            f"[smart_refine_2] kick attempt {attempt + 1}/{tries} raw={attempt_score:+.5f}"
+        )
+        if attempt_score > best_score + float(min_score_improvement):
+            best_score = attempt_score
+            best_rl = clone
+            improved = True
+
+    if improved:
+        print(
+            f"[smart_refine_2] kick improved raw {baseline_score:+.5f} -> {best_score:+.5f}"
+        )
+    else:
+        print("[smart_refine_2] kick did not improve; retaining pre-kick ligand")
+    return best_rl, improved
 
 
 def _patience_limit(patience):
@@ -946,6 +1573,7 @@ def _fit_and_accept(
     config,
     min_score_improvement,
     max_clash_penalty_increase=1e-6,
+    clash_tradeoff_lambda=None,
 ):
     result = fit_in_map(rl, scorer=optimisation_scorer, config=config)
     _rescore_fit_result_for_acceptance(
@@ -962,6 +1590,7 @@ def _fit_and_accept(
         result,
         min_score_improvement=min_score_improvement,
         max_clash_penalty_increase=max_clash_penalty_increase,
+        clash_tradeoff_lambda=clash_tradeoff_lambda,
     )
 
 
@@ -974,6 +1603,7 @@ def _refit_branch_candidates(
     min_score_improvement,
     selection,
     max_clash_penalty_increase=1e-6,
+    clash_tradeoff_lambda=None,
 ):
     """Run fit_in_map on a clone of base_rl for each branch_walker pose; pick the winner."""
     if not branch_results:
@@ -998,13 +1628,27 @@ def _refit_branch_candidates(
             fit_result,
             min_score_improvement=min_score_improvement,
             max_clash_penalty_increase=max_clash_penalty_increase,
+            clash_tradeoff_lambda=clash_tradeoff_lambda,
         )
         candidates.append((clone, clone._last_fit_in_map_result))
 
+    raw_floor = None
     if selection == "greedy":
         candidates.append((base_rl, base_rl._last_fit_in_map_result))
+        base_result = base_rl._last_fit_in_map_result
+        if base_result is not None:
+            try:
+                raw_floor = float(base_result.best_raw_score)
+                if not np.isfinite(raw_floor):
+                    raw_floor = None
+            except Exception:
+                raw_floor = None
 
-    return _pick_best_ligand(candidates)
+    return _pick_best_ligand(
+        candidates,
+        clash_tradeoff_lambda=clash_tradeoff_lambda,
+        raw_floor=raw_floor,
+    )
 
 
 def _score_as_result(scorer, refine_ligand, coords_A):
@@ -1098,9 +1742,38 @@ def _rescore_fit_result_for_acceptance(
     return result
 
 
-def _pick_best_ligand(candidates):
+def _pick_best_ligand(candidates, clash_tradeoff_lambda=None, raw_floor=None):
+    if clash_tradeoff_lambda is not None:
+        lam = float(clash_tradeoff_lambda)
+        winner, _ = max(
+            candidates,
+            key=lambda pair: (
+                float(pair[1].best_raw_score) - lam * float(pair[1].best_clash_penalty)
+            ),
+        )
+        return winner
+
+    pool = candidates
+    if raw_floor is not None:
+        # Under selection="greedy" we promised "never regresses". Filter out
+        # candidates whose post-fit raw is below the base's raw so the
+        # lexicographic (clash_count, -raw_score) picker can't sacrifice raw
+        # to save a clash. The base itself trivially satisfies raw >= raw_floor,
+        # so the pool is always non-empty under greedy.
+        improvers = [
+            c for c in candidates
+            if float(c[1].best_raw_score) >= float(raw_floor)
+        ]
+        if improvers:
+            pool = improvers
+        print(
+            "[smart_refine_2] picker(greedy) "
+            f"raw_floor={float(raw_floor):+.5f} "
+            f"N_total={len(candidates)} N_improvers={len(pool) if improvers else 0}"
+        )
+
     winner, _ = min(
-        candidates,
+        pool,
         key=lambda pair: (
             int(pair[1].best_clash_count),
             -float(pair[1].best_raw_score),
@@ -1179,8 +1852,30 @@ class BranchWalkConfig:
     clash_cutoff_A: float = 5.0
     max_vdw_overlap_A: float = 0.3
     max_hbond_overlap_A: float = 0.8
+    ligand_clash_topological_exclusion_bonds: int = 3
     similar_score_tol: float = 1e-3
     sigma_ref: float = 0.6
+    # opt-in tuning: 0.0 = current behaviour (frontier-only scoring).
+    # Positive values add a per-candidate term equal to alpha * mean(Qscore of
+    # moved-but-not-frontier atoms) so that early-walk decisions are biased
+    # toward dihedrals that swing the downstream chain toward density.
+    downstream_lookahead_weight: float = 0.0
+    # opt-in beam-diversity: when > 0, _select_beam buckets candidates into
+    # N angular sectors (by the *last* dihedral) and keeps at least one
+    # survivor per non-empty sector before filling remaining slots by score.
+    angular_diversity_sectors: int = 0
+    # opt-in Metropolis acceptance during beam selection. None = strict greedy
+    # (current behaviour). A positive temperature lets _select_beam swap in
+    # worse candidates with prob exp(-(best - cand) / T_iter), where
+    # T_iter = metropolis_temp * metropolis_decay ** outer_iteration.
+    metropolis_temp: float | None = None
+    metropolis_decay: float = 0.7
+    # opt-in composite ranking inside the branch walker. None = current
+    # behaviour (rank by frontier_score, tie-break by clash_count then
+    # penalty). A positive value uses (frontier_score - lambda * clash_penalty)
+    # as the ranking and threshold key so candidates with slightly lower Qscore
+    # but much lower clash penalty are kept in the beam.
+    clash_tradeoff_lambda: float | None = None
 
 
 @dataclass
@@ -1192,16 +1887,22 @@ class _BranchCandidate:
     clash_penalty: float
 
 
-def branch_walker(refine_ligand, scorer=None, config=None):
+def branch_walker(refine_ligand, scorer=None, config=None, iteration=0, rng=None):
     """Walk torsions outward from the best block; return one FitInMapResult per surviving beam candidate.
 
     The walker keeps up to ``config.max_keep_per_step`` candidates per torsion step,
     scoring frontier atoms via Qscore against the local protein context with a
     relaxed VDW allowance. Returned results follow the FitInMapResult contract so
     the existing accepter/apply_refinement helpers work unchanged.
+
+    ``iteration`` is the outer-loop iteration index (used only for the optional
+    Metropolis temperature schedule). ``rng`` lets callers pass a seeded
+    generator so benchmarks reproduce; if None a fresh one is created.
     """
     config = config or BranchWalkConfig()
     scorer = get_scorer(scorer)
+    if rng is None:
+        rng = np.random.default_rng()
 
     walks = (
         refine_ligand.get_directional_torsion_walks()
@@ -1228,7 +1929,8 @@ def branch_walker(refine_ligand, scorer=None, config=None):
     try:
         for walk in walks:
             survivors, n_evals = _walk_beam_search(
-                refine_ligand, walk, base_coords, config, progress=progress
+                refine_ligand, walk, base_coords, config,
+                progress=progress, iteration=iteration, rng=rng,
             )
             total_evals += n_evals
             for cand in survivors:
@@ -1260,7 +1962,7 @@ def branch_walker(refine_ligand, scorer=None, config=None):
     return results
 
 
-def _walk_beam_search(refine_ligand, walk, base_coords, config, progress=None):
+def _walk_beam_search(refine_ligand, walk, base_coords, config, progress=None, iteration=0, rng=None):
     initial = _BranchCandidate(
         coords_A=base_coords.copy(),
         dihedrals_deg=(),
@@ -1272,19 +1974,38 @@ def _walk_beam_search(refine_ligand, walk, base_coords, config, progress=None):
     total_evals = 0
 
     for step in walk.steps:
-        frontier_rows = _heavy_rows(refine_ligand, step.frontier_atom_indices)
+        frontier_rows, frontier_mol_ids = _heavy_rows_and_mol_ids(
+            refine_ligand,
+            step.frontier_atom_indices,
+        )
         moved_rows, moved_mol_ids = _moved_heavy_rows(refine_ligand, step.moved_atom_indices)
+        fixed_mol_ids = _fixed_ligand_atom_indices(
+            refine_ligand,
+            step.moved_atom_indices,
+        )
         if frontier_rows.size == 0 or moved_rows.size == 0:
             if progress is not None:
                 progress.update(1)
             continue
         frontier_elements = np.asarray(refine_ligand._atom_elements, dtype=object)[frontier_rows]
+        # Atoms moved by this dihedral but not locked in here — they will be
+        # repositioned by subsequent dihedrals further out on the walk. Their
+        # current Qscore is used as a soft downstream look-ahead when
+        # config.downstream_lookahead_weight > 0.
+        frontier_row_set = set(int(r) for r in frontier_rows.tolist())
+        downstream_rows = np.asarray(
+            [int(r) for r in moved_rows.tolist() if int(r) not in frontier_row_set],
+            dtype=int,
+        )
 
         next_cands = []
         for parent in beam:
             kept, n = _evaluate_step_for_parent(
                 refine_ligand, step, parent,
-                moved_rows, moved_mol_ids, frontier_rows, frontier_elements,
+                moved_rows, moved_mol_ids,
+                frontier_rows, frontier_mol_ids, frontier_elements,
+                downstream_rows,
+                fixed_mol_ids,
                 config,
             )
             total_evals += n
@@ -1301,7 +2022,7 @@ def _walk_beam_search(refine_ligand, walk, base_coords, config, progress=None):
 
         if not next_cands:
             break
-        beam = _select_beam(next_cands, config)
+        beam = _select_beam(next_cands, config, iteration=iteration, rng=rng)
 
     if beam and beam[0].dihedrals_deg == ():
         return [], total_evals
@@ -1310,7 +2031,10 @@ def _walk_beam_search(refine_ligand, walk, base_coords, config, progress=None):
 
 def _evaluate_step_for_parent(
     refine_ligand, step, parent,
-    moved_rows, moved_mol_ids, frontier_rows, frontier_elements,
+    moved_rows, moved_mol_ids,
+    frontier_rows, frontier_mol_ids, frontier_elements,
+    downstream_rows,
+    fixed_mol_ids,
     config,
 ):
     from rdkit.Chem import rdMolTransforms
@@ -1327,7 +2051,9 @@ def _evaluate_step_for_parent(
         rdMolTransforms.SetDihedralDeg(conf, *dihedral, new_angle)
         cand = _candidate_from_conformer(
             refine_ligand, conf, parent, moved_rows, moved_mol_ids,
-            frontier_rows, frontier_elements, new_angle, config,
+            frontier_rows, frontier_mol_ids, frontier_elements,
+            downstream_rows,
+            fixed_mol_ids, new_angle, config,
         )
         coarse_cands.append(cand)
         n_evals += 1
@@ -1350,19 +2076,23 @@ def _evaluate_step_for_parent(
             local_cands.append(
                 _candidate_from_conformer(
                     refine_ligand, conf, parent, moved_rows, moved_mol_ids,
-                    frontier_rows, frontier_elements, new_angle, config,
+                    frontier_rows, frontier_mol_ids, frontier_elements,
+                    downstream_rows,
+                    fixed_mol_ids, new_angle, config,
                 )
             )
             n_evals += 1
-        refined.append(_best_candidate(local_cands))
+        refined.append(_best_candidate(local_cands, config))
 
     return refined, n_evals
 
 
 def _candidate_from_conformer(
     refine_ligand, conf, parent,
-    moved_rows, moved_mol_ids, frontier_rows, frontier_elements,
-    angle_deg, config,
+    moved_rows, moved_mol_ids,
+    frontier_rows, frontier_mol_ids, frontier_elements,
+    downstream_rows,
+    fixed_mol_ids, angle_deg, config,
 ):
     coords = parent.coords_A.copy()
     for row, mol_idx in zip(moved_rows.tolist(), moved_mol_ids.tolist()):
@@ -1373,7 +2103,13 @@ def _candidate_from_conformer(
 
     frontier_coords = coords[frontier_rows]
     frontier_score = _frontier_qscore(refine_ligand, coords, frontier_rows, config)
-    clash = protein_ligand_clash(
+    lookahead_weight = float(getattr(config, "downstream_lookahead_weight", 0.0) or 0.0)
+    if lookahead_weight != 0.0 and downstream_rows.size > 0:
+        downstream_score = _frontier_qscore(
+            refine_ligand, coords, downstream_rows, config
+        )
+        frontier_score = float(frontier_score) + lookahead_weight * float(downstream_score)
+    protein_clash = protein_ligand_clash(
         frontier_coords,
         frontier_elements,
         refine_ligand.local_coords_A,
@@ -1382,6 +2118,21 @@ def _candidate_from_conformer(
         max_vdw_overlap_A=config.max_vdw_overlap_A,
         max_hbond_overlap_A=config.max_hbond_overlap_A,
     )
+    self_clash = ligand_self_clash(
+        coords,
+        refine_ligand._atom_elements,
+        getattr(getattr(refine_ligand, "_ligand", None), "mol", None),
+        ligand_atom_indices=getattr(refine_ligand, "_atom_indices", None),
+        query_atom_indices=frontier_mol_ids,
+        reference_atom_indices=fixed_mol_ids,
+        cutoff_A=config.clash_cutoff_A,
+        max_vdw_overlap_A=config.max_vdw_overlap_A,
+        max_hbond_overlap_A=config.max_hbond_overlap_A,
+        topological_exclusion_bonds=int(
+            getattr(config, "ligand_clash_topological_exclusion_bonds", 3)
+        ),
+    )
+    clash = combine_clash_results(protein_clash, self_clash)
     return _BranchCandidate(
         coords_A=coords,
         dihedrals_deg=parent.dihedrals_deg + (float(angle_deg),),
@@ -1391,54 +2142,168 @@ def _candidate_from_conformer(
     )
 
 
+def _walker_composite(cand, config):
+    """Return the candidate's ranking key for the branch walker.
+
+    Without a configured lambda this is the existing frontier-only score; with
+    lambda > 0 it folds a penalty term in so candidates with slightly lower
+    Qscore but much lower clash penalty stay in the beam.
+    """
+    lam = getattr(config, "clash_tradeoff_lambda", None)
+    if lam is None:
+        return float(cand.frontier_score)
+    return float(cand.frontier_score) - float(lam) * float(cand.clash_penalty)
+
+
 def _filter_coarse(cands, config):
     if not cands:
         return []
-    best_score = max(c.frontier_score for c in cands)
+    lam = getattr(config, "clash_tradeoff_lambda", None)
+    scored = [(_walker_composite(c, config), c) for c in cands]
+    best_score = max(s for s, _ in scored)
     threshold = best_score - config.coarse_keep_fraction * abs(best_score)
     best_clash_count = min(c.clash_count for c in cands)
     nonzero_penalties = [c.clash_penalty for c in cands if c.clash_count > 0]
     best_clash_penalty = min(nonzero_penalties) if nonzero_penalties else 0.0
 
-    kept = [
-        c for c in cands
-        if c.frontier_score >= threshold
-        and c.clash_count <= best_clash_count + 1
-        and (best_clash_penalty == 0.0 or c.clash_penalty <= 2.0 * best_clash_penalty)
-    ]
+    if lam is None:
+        kept = [
+            c for s, c in scored
+            if s >= threshold
+            and c.clash_count <= best_clash_count + 1
+            and (best_clash_penalty == 0.0 or c.clash_penalty <= 2.0 * best_clash_penalty)
+        ]
+    else:
+        # Under composite ranking the score itself already penalises clashes,
+        # so the count and penalty side-conditions are slacker: keep anything
+        # whose composite is within the threshold band.
+        kept = [c for s, c in scored if s >= threshold]
     if kept:
         return kept
-    # Fallback: keep the single lowest-clash candidate so the walk has something to propagate.
-    return [min(cands, key=lambda c: (c.clash_count, c.clash_penalty, -c.frontier_score))]
+    # Fallback: keep the single best composite/lowest-clash candidate so the
+    # walk has something to propagate.
+    if lam is None:
+        return [min(cands, key=lambda c: (c.clash_count, c.clash_penalty, -c.frontier_score))]
+    return [max(scored, key=lambda sc: sc[0])[1]]
 
 
-def _select_beam(cands, config):
+def _select_beam(cands, config, iteration=0, rng=None):
     if not cands:
         return []
+    lam = getattr(config, "clash_tradeoff_lambda", None)
+    # Dedup by rounded dihedral chain so different angles in the same bucket
+    # don't all survive. Sort key uses the composite when lambda is set so the
+    # beam's ranking agrees with the outer accepter's.
+    if lam is None:
+        sort_key = lambda c: (c.clash_count, -c.frontier_score, c.clash_penalty)
+    else:
+        sort_key = lambda c: (-_walker_composite(c, config), c.clash_count, c.clash_penalty)
     seen = set()
     deduped = []
-    for c in sorted(cands, key=lambda c: (c.clash_count, -c.frontier_score, c.clash_penalty)):
+    for c in sorted(cands, key=sort_key):
         key = tuple(round(float(a), 0) for a in c.dihedrals_deg)
         if key in seen:
             continue
         seen.add(key)
         deduped.append(c)
-        if len(deduped) >= config.max_keep_per_step:
-            break
+
+    beam_size = int(config.max_keep_per_step)
+    if not deduped:
+        return []
+
+    sectors = int(getattr(config, "angular_diversity_sectors", 0) or 0)
+    if sectors > 0:
+        deduped = _apply_angular_diversity(deduped, beam_size, sectors)
+    else:
+        deduped = deduped[:beam_size]
+
+    temp = getattr(config, "metropolis_temp", None)
+    if temp is not None and float(temp) > 0.0 and len(cands) > len(deduped):
+        decay = float(getattr(config, "metropolis_decay", 0.7) or 0.7)
+        t_iter = float(temp) * (decay ** max(0, int(iteration)))
+        if t_iter > 0.0:
+            deduped = _metropolis_admit(
+                deduped, cands, beam_size, t_iter, rng=rng,
+            )
     return deduped
 
 
-def _best_candidate(cands):
-    return min(cands, key=lambda c: (c.clash_count, -c.frontier_score, c.clash_penalty))
+def _apply_angular_diversity(sorted_cands, beam_size, sectors):
+    """Keep at least one survivor per occupied angular sector, then fill the
+    remaining beam slots by score order. ``sorted_cands`` is already sorted
+    best-first."""
+    bucket_width = 360.0 / max(1, int(sectors))
+    selected = []
+    seen_buckets = set()
+    leftover = []
+    for cand in sorted_cands:
+        if not cand.dihedrals_deg:
+            leftover.append(cand)
+            continue
+        last_angle = float(cand.dihedrals_deg[-1])
+        bucket = int(((last_angle + 180.0) % 360.0) // bucket_width)
+        if bucket not in seen_buckets and len(selected) < beam_size:
+            seen_buckets.add(bucket)
+            selected.append(cand)
+        else:
+            leftover.append(cand)
+    if len(selected) < beam_size:
+        for cand in leftover:
+            if len(selected) >= beam_size:
+                break
+            selected.append(cand)
+    return selected
+
+
+def _metropolis_admit(deterministic_beam, all_cands, beam_size, temperature, rng=None):
+    """Optionally swap the weakest seats in the beam for worse candidates
+    drawn via Metropolis acceptance, so the search can cross a barrier."""
+    if rng is None:
+        rng = np.random.default_rng()
+    in_beam_ids = {id(c) for c in deterministic_beam}
+    outsiders = [c for c in all_cands if id(c) not in in_beam_ids]
+    if not outsiders:
+        return deterministic_beam
+    rng_obj = rng
+    beam = list(deterministic_beam)
+    best_score = max(c.frontier_score for c in beam)
+    # Worst-first so we try to displace the weakest seat.
+    weakest_first = sorted(
+        range(len(beam)),
+        key=lambda i: (beam[i].clash_count, -beam[i].frontier_score, beam[i].clash_penalty),
+        reverse=True,
+    )
+    for slot in weakest_first:
+        seat = beam[slot]
+        # Random worse candidate.
+        idx = int(rng_obj.integers(0, len(outsiders)))
+        challenger = outsiders[idx]
+        if challenger.clash_count > seat.clash_count:
+            continue
+        delta = float(best_score) - float(challenger.frontier_score)
+        if delta <= 0.0:
+            # Challenger is actually better or equal — admit unconditionally.
+            beam[slot] = challenger
+        else:
+            prob = float(np.exp(-delta / float(temperature)))
+            if rng_obj.random() < prob:
+                beam[slot] = challenger
+    return beam
+
+
+def _best_candidate(cands, config=None):
+    lam = getattr(config, "clash_tradeoff_lambda", None) if config is not None else None
+    if lam is None:
+        return min(cands, key=lambda c: (c.clash_count, -c.frontier_score, c.clash_penalty))
+    return max(cands, key=lambda c: _walker_composite(c, config))
 
 
 def _heavy_rows(refine_ligand, mol_indices):
-    row_by_mol = refine_ligand._atom_row_by_mol_index
-    rows = [int(row_by_mol[int(m)]) for m in mol_indices if int(m) in row_by_mol]
-    return np.asarray(rows, dtype=int)
+    rows, _mol_ids = _heavy_rows_and_mol_ids(refine_ligand, mol_indices)
+    return rows
 
 
-def _moved_heavy_rows(refine_ligand, mol_indices):
+def _heavy_rows_and_mol_ids(refine_ligand, mol_indices):
     row_by_mol = refine_ligand._atom_row_by_mol_index
     rows, mol_ids = [], []
     for m in mol_indices:
@@ -1447,6 +2312,22 @@ def _moved_heavy_rows(refine_ligand, mol_indices):
             rows.append(int(row_by_mol[mi]))
             mol_ids.append(mi)
     return np.asarray(rows, dtype=int), np.asarray(mol_ids, dtype=int)
+
+
+def _moved_heavy_rows(refine_ligand, mol_indices):
+    return _heavy_rows_and_mol_ids(refine_ligand, mol_indices)
+
+
+def _fixed_ligand_atom_indices(refine_ligand, moved_atom_indices):
+    moved = {int(atom_idx) for atom_idx in moved_atom_indices}
+    atom_indices = np.asarray(
+        getattr(refine_ligand, "_atom_indices", np.zeros(0, dtype=int)),
+        dtype=int,
+    ).reshape(-1)
+    return np.asarray(
+        [int(atom_idx) for atom_idx in atom_indices if int(atom_idx) not in moved],
+        dtype=int,
+    )
 
 
 def _clone_with_coords(refine_ligand, heavy_coords_A):
@@ -1505,7 +2386,7 @@ def _full_ligand_evaluation(refine_ligand, scorer, coords_A, config):
         if isinstance(score_out, ScoreResult)
         else ScoreResult(value=float(score_out), terms={})
     )
-    clash = protein_ligand_clash(
+    protein_clash = protein_ligand_clash(
         coords_A,
         refine_ligand._atom_elements,
         refine_ligand.local_coords_A,
@@ -1514,6 +2395,19 @@ def _full_ligand_evaluation(refine_ligand, scorer, coords_A, config):
         max_vdw_overlap_A=config.max_vdw_overlap_A,
         max_hbond_overlap_A=config.max_hbond_overlap_A,
     )
+    self_clash = ligand_self_clash(
+        coords_A,
+        refine_ligand._atom_elements,
+        getattr(getattr(refine_ligand, "_ligand", None), "mol", None),
+        ligand_atom_indices=getattr(refine_ligand, "_atom_indices", None),
+        cutoff_A=config.clash_cutoff_A,
+        max_vdw_overlap_A=config.max_vdw_overlap_A,
+        max_hbond_overlap_A=config.max_hbond_overlap_A,
+        topological_exclusion_bonds=int(
+            getattr(config, "ligand_clash_topological_exclusion_bonds", 3)
+        ),
+    )
+    clash = combine_clash_results(protein_clash, self_clash)
     return score_result, clash
 
 
@@ -1564,13 +2458,32 @@ def _build_walker_result(
     )
 
 
+def _refinement_composite_delta(result, clash_tradeoff_lambda):
+    """Return delta of (raw_score - lambda * clash_penalty) for a FitInMapResult."""
+    lam = float(clash_tradeoff_lambda)
+    delta_raw = float(result.best_raw_score) - float(result.initial_raw_score)
+    delta_penalty = float(result.best_clash_penalty) - float(result.initial_clash_penalty)
+    return delta_raw - lam * delta_penalty
+
+
 def should_accept_refinement(
     result,
     min_score_improvement=0.0,
     max_clash_penalty_increase=1e-6,
+    clash_tradeoff_lambda=None,
 ):
     if not np.isfinite(float(result.best_raw_score)):
         return False
+
+    if clash_tradeoff_lambda is not None and float(clash_tradeoff_lambda) >= 0.0:
+        # Composite gate: accept iff (raw - lambda * clash_penalty) strictly
+        # improves. The two independent ratchets (raw monotonicity + penalty
+        # ratchet) are replaced by a single trade-off, so a small raw
+        # regression is OK if the clash penalty drops enough, and a small
+        # penalty increase is OK if the raw improves enough.
+        delta_composite = _refinement_composite_delta(result, clash_tradeoff_lambda)
+        return delta_composite > float(min_score_improvement)
+
     if float(result.best_raw_score) <= (
         float(result.initial_raw_score) + float(min_score_improvement)
     ):
@@ -1616,17 +2529,24 @@ def accepter(
     result,
     min_score_improvement=0.0,
     max_clash_penalty_increase=1e-6,
+    clash_tradeoff_lambda=None,
 ):
+    composite_suffix = ""
+    if clash_tradeoff_lambda is not None and float(clash_tradeoff_lambda) >= 0.0:
+        delta_comp = _refinement_composite_delta(result, clash_tradeoff_lambda)
+        composite_suffix = f" delta_composite={delta_comp:+.5f} lambda={float(clash_tradeoff_lambda):.4f}"
     if not should_accept_refinement(
         result,
         min_score_improvement=min_score_improvement,
         max_clash_penalty_increase=max_clash_penalty_increase,
+        clash_tradeoff_lambda=clash_tradeoff_lambda,
     ):
         print(
             "[smart_refine_2] rejected fit-in-map "
             f"delta_raw={result.delta_raw_score:+.5f} "
             f"clashes {result.initial_clash_count}->{result.best_clash_count} "
             f"clash_penalty {result.initial_clash_penalty:.5f}->{result.best_clash_penalty:.5f}"
+            f"{composite_suffix}"
         )
         return refine_ligand
 
@@ -1635,6 +2555,7 @@ def accepter(
         f"delta_raw={result.delta_raw_score:+.5f} "
         f"clashes {result.initial_clash_count}->{result.best_clash_count} "
         f"clash_penalty {result.initial_clash_penalty:.5f}->{result.best_clash_penalty:.5f}"
+        f"{composite_suffix}"
     )
     return apply_refinement(refine_ligand, result)
 
