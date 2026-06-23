@@ -1,0 +1,53 @@
+# Conda env spec used INSIDE the Apptainer image (see container/chemem.def).
+#
+# It combines the *build* toolchain (to compile the pybind11/C++ extensions:
+# docking, grid_maps, ligand_fitting) and the full *runtime* dependency set, so
+# a single `micromamba create` produces an env that can both build and run
+# ChemEM2.
+#
+# conda-forge ONLY -- the `defaults` channel is intentionally dropped to avoid
+# the Anaconda Terms-of-Service prompt and keep the build non-interactive.
+# CPU-only: conda resolves the default (non-CUDA) openmm build. If a CUDA build
+# is ever pulled in, pin `- openmm=*=*cpu*`.
+name: chemem
+channels:
+  - conda-forge
+dependencies:
+  # --- build toolchain (compiles the C++/pybind11 extensions) ---
+  - python=3.11.11
+  - pip
+  - cxx-compiler        # gcc/g++ + OpenMP (libgomp) on linux-64
+  - cmake
+  - ninja
+  - scikit-build-core
+  - pybind11>=2.10.0
+  - eigen
+  - rdkit-dev=2024.03.3
+  - boost-cpp
+  - setuptools<81
+  # --- runtime dependencies ---
+  - numpy=1.26.4
+  - scipy
+  - openmm
+  - rdkit=2024.03.3
+  - dimorphite-dl>=2.0.1
+  - spyrmsd>=0.8.0
+  - ambertools=23.6
+  - openff-toolkit=0.16.0
+  - openff-toolkit-base=0.16.0
+  - openff-amber-ff-ports=0.0.4
+  - openff-forcefields=2024.09.0
+  - openff-interchange=0.3.29
+  - openff-interchange-base=0.3.29
+  - openff-models=0.1.2
+  - openff-units=0.2.2
+  - openff-utilities=0.1.12
+  - pdbfixer>=1.11
+  - mrcfile>=1.5.0
+  - scikit-image
+  - kneed
+  - mdtraj
+  - networkx
+  - tqdm
+  - scikit-learn
+  - grand

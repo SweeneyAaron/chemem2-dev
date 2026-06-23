@@ -63,6 +63,9 @@ from .smart_utils import (
     build_semantic_anchor_blocks,
     print_semantic_blocks,
     draw_semantic_blocks_grid,
+    aliphatic_ring_systems,
+    generate_ring_conformers,
+    extract_exo_torsions,
 )
 from .optimisers import (
     fit_in_map,
@@ -83,6 +86,29 @@ update_global_positions = None
 update_ligand_positions = None
 get_residue_positions = None
 get_residue_subset_from_points = None
+
+
+@dataclass
+class DriftGuardConfig:
+    """Opt-in guards that keep SmartRefine2 anchored to the starting pose.
+
+    ``centroid_trust`` down-weights candidates whose ligand centroid moves more
+    than ``centroid_radius_A`` from the start (flat-bottom, ``centroid_k`` raw-
+    score units per Angstrom beyond). ``envelope_gate`` rejects candidates whose
+    fraction of atoms in above-threshold density drops more than
+    ``envelope_slack`` below the starting coverage. Both default off, so the
+    guard helpers are pure no-ops unless explicitly enabled.
+    """
+    centroid_trust: bool = False
+    centroid_radius_A: float = 2.0
+    centroid_k: float = 0.05
+    envelope_gate: bool = False
+    envelope_threshold_sigma: float = 1.0
+    envelope_slack: float = 0.1
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.centroid_trust or self.envelope_gate)
 
 
 @dataclass
@@ -228,6 +254,10 @@ class RefineLigand:
         map_reference=None,
         cutoff_A=9.0,
         qscore_candidate_dirs=128,
+        freeze_block_qscore=0.0,
+        exo_torsions_enabled=True,
+        exo_step_deg=20.0,
+        exo_min_downstream=3,
     ):
         self._ligand = ligand
         self._ligand_object = ligand
@@ -241,6 +271,16 @@ class RefineLigand:
         self._protein_index = protein_index
         self.cutoff_A = float(cutoff_A)
         self._qscore_candidate_dirs = int(qscore_candidate_dirs)
+        # Blocks whose mean per-atom Qscore is >= this threshold are treated as
+        # already well-fit and frozen out of the torsion search (never become a
+        # walk target), so the search only moves poorly-fit atoms. 0 disables.
+        self._freeze_block_qscore = float(freeze_block_qscore)
+        # Exocyclic ring-branch torsions: seeded as the first step of the branch
+        # walk so the beam search explores (ring-bond swing -> downstream torsions)
+        # jointly. _exo_step_deg sets the swing's coarse angular step.
+        self._exo_torsions_enabled = bool(exo_torsions_enabled)
+        self._exo_step_deg = float(exo_step_deg)
+        self._exo_min_downstream = int(exo_min_downstream)
         self._excluded_root_blocks = set()
         #init
         self._init_atoms()
@@ -281,6 +321,13 @@ class RefineLigand:
     
     def _init_torsion_trees(self):
         self._rotor_tree = build_semantic_anchor_blocks(self._ligand.mol)
+        # Exocyclic ring-branch torsions: the extra DOFs that let a substituent
+        # attached to a ring (e.g. a phosphate tail off a ribose) swing about a
+        # ring bond. Computed once; the exo walker reads it via getattr so older
+        # RefineLigand instances degrade to a no-op.
+        self._exo_torsions = extract_exo_torsions(
+            self._ligand.mol, min_downstream=getattr(self, "_exo_min_downstream", 3)
+        )
         #debug
         #print_semantic_blocks(self._ligand.mol, self._rotor_tree)
         #draw_semantic_blocks_grid(self._ligand.mol, self._rotor_tree, filename=f"/Users/aaron.sweeney/Documents/chemem2_build/ChemEM2_feb26/chemem2-dev/ligand_semantic_blocks.png", mols_per_row=2)
@@ -309,20 +356,32 @@ class RefineLigand:
     def get_blocks_to_update(self):
         best_idx = self.get_best_block_by_qscore()
         best_q = float(self._block_qscores[best_idx])
+        # Freeze blocks that are already well-fit (>= threshold): they stay part
+        # of the rigid frame and are never torsion-searched, so the walker only
+        # perturbs the poorly-fit regions (e.g. an ambiguous phosphate tail).
+        freeze = float(getattr(self, "_freeze_block_qscore", 0.0) or 0.0)
         return [
             rot
             for num, rot in enumerate(self._rotor_tree)
-            if num != best_idx and float(self._block_qscores[num]) < best_q
+            if num != best_idx
+            and float(self._block_qscores[num]) < best_q
+            and (freeze <= 0.0 or float(self._block_qscores[num]) < freeze)
         ]
 
     def get_directional_torsion_walks(self):
         best_idx = self.get_best_block_by_qscore()
         blocks_to_update = self.get_blocks_to_update()
+        exo = (
+            getattr(self, "_exo_torsions", None)
+            if getattr(self, "_exo_torsions_enabled", False)
+            else None
+        )
         return build_directional_torsion_walks(
             self._ligand.mol,
             self._rotor_tree,
             root_block_id=best_idx,
             target_block_ids=[block.block_id for block in blocks_to_update],
+            exo_torsions=exo,
         )
 
     def qscore_context_coords_A(self, ligand_coords_A=None):
@@ -411,6 +470,38 @@ def _apply_tail_aware_bundle(options):
         )
 
 
+_ROBUST_BUNDLE = {
+    # --sr2-robust canonical "robust pipeline" profile. Applied unconditionally
+    # (robust means robust), so it overrides individual guard flags. Most values
+    # already match the post-benchmark defaults; the distinct effect is enabling
+    # pre-minimisation. Keep in sync with the argparse defaults in protocol_spec.
+    "sr2_pre_minimise":          True,
+    "sr2_selection":             "greedy",
+    "sr2_centroid_trust":        True,
+    "sr2_centroid_trust_radius": 5.0,
+    "sr2_centroid_trust_k":      0.4,
+    "sr2_envelope_gate":         True,
+    "sr2_envelope_slack":        0.15,
+    "sr2_freeze_block_qscore":   0.7,
+    "sr2_exo_torsions":          True,
+}
+
+
+def _apply_robust_bundle(options):
+    """Mutate ``options`` in place to apply the --sr2-robust profile. Unlike the
+    tail-aware bundle this overrides explicit per-field flags, because robust is
+    an all-or-nothing 'safe pipeline' switch."""
+    if options is None:
+        return
+    if not bool(getattr(options, "sr2_robust", False)):
+        return
+    applied = []
+    for name, value in _ROBUST_BUNDLE.items():
+        setattr(options, name, value)
+        applied.append(f"{name}={value!r}")
+    print("[smart_refine_2] --sr2-robust bundle applied: " + ", ".join(applied))
+
+
 class SmartRefine2:
     def __init__(self, system):
 
@@ -418,8 +509,9 @@ class SmartRefine2:
         self.ligands = []
         self.scorer = "qscore"
         options = getattr(system, "options", None)
-        # Apply --sr2-tail-aware overrides before reading any of the
-        # bundled options so the cascaded reads below see the new defaults.
+        # Apply --sr2-robust then --sr2-tail-aware overrides before reading any
+        # of the bundled options so the cascaded reads below see the new values.
+        _apply_robust_bundle(options)
         _apply_tail_aware_bundle(options)
         self.optimisation_score = getattr(
             options,
@@ -436,6 +528,11 @@ class SmartRefine2:
         self.qscore_candidate_dirs = int(
             getattr(options, "sr2_qscore_candidate_dirs", 128) or 128
         )
+        # Freeze well-fit blocks (mean Qscore >= threshold) out of the torsion
+        # search. 0 disables. Default 0.7. Explicit 0 from the user must win, so
+        # don't use `or` (it would treat 0 as missing).
+        _freeze = getattr(options, "sr2_freeze_block_qscore", 0.7)
+        self.freeze_block_qscore = float(_freeze) if _freeze is not None else 0.7
         self.fit_config = FitInMapConfig(
             clash_mode="soft",  # "off", "soft", or "hard"
             debug=False,
@@ -499,12 +596,15 @@ class SmartRefine2:
         # selection mode for branch-candidate picking. "branches" picks the
         # best of the re-fit branches only; "greedy" includes the current
         # pose in the pool so a worse-than-base set of branches cannot force
-        # a regression. Tail-aware ligands depend on never regressing during
-        # a stochastic walk, so the bundle switches the default to greedy.
-        if bool(getattr(options, "sr2_tail_aware", False)):
-            self.selection = "greedy"
+        # a per-iteration regression. Greedy is now the DEFAULT (benchmark
+        # showed "branches" regressions outweigh its exploration benefit at
+        # the <=2A metric); it pairs with the end-of-loop no-regression gate.
+        # Opt back into the old behaviour with --sr2-selection branches.
+        selection_opt = getattr(options, "sr2_selection", None)
+        if selection_opt in {"greedy", "branches"}:
+            self.selection = selection_opt
         else:
-            self.selection = "branches"
+            self.selection = "greedy"
         # Round-5 polish placement: opt-in only. The on-stall polish needs
         # --sr2-polish-on-stall; the post-loop final polish needs
         # --sr2-final-minimise. Either can be globally killed by
@@ -514,7 +614,52 @@ class SmartRefine2:
         self.polish_on_stall_enabled = (
             bool(getattr(options, "sr2_polish_on_stall", False)) and not no_polish
         )
-        
+        # Opt-in pre-minimisation: run one OpenMM local-refine minimisation on
+        # each ligand before the search loop (see run()). Default OFF.
+        self.pre_minimise_enabled = bool(
+            getattr(options, "sr2_pre_minimise", False)
+        )
+        # OpenMM polish strategy: "standard" (single minimisation) or "fragment"
+        # (iterative fragment-pinned minimiser). Opt-in via --sr2-minimiser.
+        self.sr2_minimiser = str(getattr(options, "sr2_minimiser", "standard") or "standard")
+        self.fragmin_block_tol = float(
+            getattr(options, "sr2_fragmin_block_tol", 0.1) or 0.1
+        )
+        self.fragmin_max_iters = int(
+            getattr(options, "sr2_fragmin_max_iters", 4) or 4
+        )
+        # Aliphatic-ring conformer sampling. Default ON, but only ever fires for
+        # ligands that actually have a poorly-fit aliphatic ring system.
+        self.ring_flex_enabled = bool(getattr(options, "sr2_ring_flex", True))
+        self.ring_flex_confs = int(getattr(options, "sr2_ring_flex_confs", 8) or 8)
+        self.exo_torsions_enabled = bool(getattr(options, "sr2_exo_torsions", True))
+        self.exo_step_deg = float(getattr(options, "sr2_exo_step_deg", 20.0) or 20.0)
+        self.exo_min_downstream = int(
+            getattr(options, "sr2_exo_min_downstream", 3) or 3
+        )
+        self.ring_flex_rmsd = float(
+            getattr(options, "sr2_ring_flex_rmsd", 0.3) or 0.3
+        )
+        # Anti-drift guards (centroid trust + density-envelope gate), anchored
+        # to the starting pose. Default ON (tight radius / strong k) to stop the
+        # torsion search drifting into neighbouring density on flexible ligands.
+        # The getattr fallbacks mirror the argparse defaults so options built
+        # without these attrs (e.g. the orchestrator) get the same behaviour.
+        self.drift_guard = DriftGuardConfig(
+            centroid_trust=bool(getattr(options, "sr2_centroid_trust", True)),
+            centroid_radius_A=float(
+                getattr(options, "sr2_centroid_trust_radius", 5.0) or 5.0
+            ),
+            centroid_k=float(getattr(options, "sr2_centroid_trust_k", 0.4) or 0.4),
+            envelope_gate=bool(getattr(options, "sr2_envelope_gate", True)),
+            envelope_threshold_sigma=float(
+                getattr(options, "sr2_envelope_threshold_sigma", 1.0) or 1.0
+            ),
+            envelope_slack=float(
+                getattr(options, "sr2_envelope_slack", 0.15) or 0.15
+            ),
+        )
+
     def get_protein_complex(self):
         ligand_residue_names = _ligand_residue_names(getattr(self.system, "ligand", []))
         self._protein_atoms = [
@@ -540,6 +685,10 @@ class SmartRefine2:
                     self._protein_index,
                     self.system.density_map,
                     qscore_candidate_dirs=self.qscore_candidate_dirs,
+                    freeze_block_qscore=self.freeze_block_qscore,
+                    exo_torsions_enabled=self.exo_torsions_enabled,
+                    exo_step_deg=self.exo_step_deg,
+                    exo_min_downstream=self.exo_min_downstream,
                 )
             )
 
@@ -555,17 +704,92 @@ class SmartRefine2:
                 ligand._protein_index = self._protein_index
                 ligand._init_local_protein(self._protein_index)
 
-    def _final_map_minimise_ligand(self, refine_ligand, result):
-        if not self._final_minimise_enabled():
-            return refine_ligand, result
-        return local_refine_polish_ligand(
-            refine_ligand,
-            result,
+    def _acceptance_scorer(self):
+        """The same acceptance scorer the refine loop uses, for gating polishes."""
+        _, acceptance = _resolve_refine_scorers(
+            self.scorer,
+            optimisation_scorer=self.optimisation_score,
+            optimisation_weights=self.optimisation_weights,
+            acceptance_scorer=self.acceptance_score,
+            acceptance_weights=self.acceptance_weights,
+            scorer_options=getattr(self.system, "options", None),
+        )
+        return acceptance
+
+    def _pose_objective(self, refine_ligand, scorer, coords):
+        """Acceptance objective of a pose: raw score, or -inf if it clashes.
+        Matches the convention local_refine_polish_ligand re-scores with, so
+        before/after polish comparisons are apples-to-apples. Returns None when
+        the pose cannot be scored (no usable map / scorer error) so the caller
+        skips gating rather than crashing or reverting on a meaningless score."""
+        try:
+            score_result, clash = _full_ligand_evaluation(
+                refine_ligand, scorer, np.asarray(coords, dtype=np.float64), self.fit_config
+            )
+            value = float(score_result.value)
+        except Exception:
+            return None
+        if not np.isfinite(value):
+            return None
+        return value if clash.count == 0 else float("-inf")
+
+    def _polish(self, refine_ligand, result, *, context_label):
+        """Dispatch to the configured OpenMM polish (standard or fragment-pinned).
+        Both share the same (refine_ligand, result) contract and re-score result."""
+        scorer = self._acceptance_scorer()
+        common = dict(
             system=self.system,
             protein_index_refresh_cb=self._refresh_protein_context,
             options=getattr(self.system, "options", None),
-            context_label="final polish",
+            context_label=context_label,
+            acceptance_scorer=scorer,
+            eval_config=self.fit_config,
         )
+        if self.sr2_minimiser == "fragment":
+            return fragment_pinned_polish_ligand(
+                refine_ligand, result,
+                pose_objective_fn=self._pose_objective,
+                block_tol=self.fragmin_block_tol,
+                max_iters=self.fragmin_max_iters,
+                **common,
+            )
+        return local_refine_polish_ligand(refine_ligand, result, **common)
+
+    def _final_map_minimise_ligand(self, refine_ligand, result):
+        if not self._final_minimise_enabled():
+            return refine_ligand, result
+        # The polish mutates refine_ligand AND result in place, so snapshot the
+        # pre-polish pose/objective before the call to support a revert. An
+        # unconstrained OpenMM minimisation can walk the pose off the density
+        # basin; gate it on the acceptance objective so a worsening polish is
+        # discarded. (The fragment minimiser also self-reverts; the gate is then
+        # a harmless no-op.)
+        scorer = self._acceptance_scorer()
+        pre_objective = self._pose_objective(
+            refine_ligand, scorer, refine_ligand._atom_positions
+        )
+        pre_result = _snapshot_fit_result(result)
+        polished_rl, polished_result = self._polish(
+            refine_ligand, result, context_label="final polish"
+        )
+        post_objective = self._pose_objective(
+            polished_rl, scorer, polished_rl._atom_positions
+        )
+        # Skip gating when either pose couldn't be scored (no map / scorer error).
+        gate_ok = (
+            pre_result is not None
+            and pre_objective is not None
+            and post_objective is not None
+        )
+        if gate_ok and post_objective < pre_objective - _NO_REGRESSION_EPS:
+            apply_refinement(polished_rl, pre_result)
+            polished_rl._last_fit_in_map_result = pre_result
+            print(
+                "[smart_refine_2] final polish reverted: objective "
+                f"{post_objective:.5f} < pre-polish {pre_objective:.5f}"
+            )
+            return polished_rl, pre_result
+        return polished_rl, polished_result
 
     def _refresh_protein_context(self):
         self.get_protein_complex()
@@ -576,14 +800,7 @@ class SmartRefine2:
             return None
 
         def _polish(rl, result):
-            return local_refine_polish_ligand(
-                rl,
-                result,
-                system=self.system,
-                protein_index_refresh_cb=self._refresh_protein_context,
-                options=getattr(self.system, "options", None),
-                context_label="stall polish",
-            )
+            return self._polish(rl, result, context_label="stall polish")
 
         return _polish
 
@@ -673,6 +890,36 @@ class SmartRefine2:
         self.debug_sdf_paths = []
 
         for ligand_index, ligand in enumerate(list(self.ligands), start=1):
+            if self.pre_minimise_enabled:
+                # Gate the pre-minimisation too: it sets the no-regression anchor,
+                # so a polish that drags the pose off-density must not silently
+                # become the baseline. Snapshot the docked-input pose/objective,
+                # run the (re-scoring) polish, and revert if it made things worse.
+                scorer = self._acceptance_scorer()
+                pre_coords = np.asarray(
+                    ligand._atom_positions, dtype=np.float64
+                ).copy()
+                pre_objective = self._pose_objective(ligand, scorer, pre_coords)
+                ligand, _ = self._polish(
+                    ligand, None, context_label="pre-search minimisation"
+                )
+                post_objective = self._pose_objective(
+                    ligand, scorer, ligand._atom_positions
+                )
+                if (
+                    pre_objective is not None
+                    and post_objective is not None
+                    and post_objective < pre_objective - _NO_REGRESSION_EPS
+                ):
+                    ligand._atom_positions = pre_coords
+                    if getattr(ligand, "_protein_index", None) is not None:
+                        ligand._init_local_protein(ligand._protein_index)
+                    ligand.update_atom_qscores()
+                    ligand.get_best_block_by_qscore()
+                    print(
+                        "[smart_refine_2] pre-search minimisation reverted: "
+                        f"objective {post_objective:.5f} < input {pre_objective:.5f}"
+                    )
             per_ligand_branch_config = self._adaptive_branch_config(ligand)
             ligand = refine_ligand(
                 ligand,
@@ -691,6 +938,10 @@ class SmartRefine2:
                 polish_cb=self._build_polish_cb(),
                 selection=self.selection,
                 debug_dir=getattr(self.system, "output", None),
+                ring_flex_enabled=self.ring_flex_enabled,
+                ring_flex_confs=self.ring_flex_confs,
+                ring_flex_rmsd=self.ring_flex_rmsd,
+                drift_guard=self.drift_guard,
             )
             result = ligand._last_fit_in_map_result
             ligand, result = self._final_map_minimise_ligand(ligand, result)
@@ -818,6 +1069,131 @@ def _suppress_polish_atom_warnings():
                 print(line)
 
 
+def _fragment_min_decision(
+    block_before, block_after, overall_before, overall_after,
+    block_tol=0.1, overall_tol=0.0,
+):
+    """Decide whether a fragment-pinned minimisation step is acceptable.
+
+    ``block_before``/``block_after`` are per-block mean Q-scores aligned to the
+    rotor-tree order (i.e. ``refine_ligand._block_qscores``). Returns
+    ``("accept", [])`` when the overall objective held (improved or within
+    ``overall_tol``) AND no block dropped by more than ``block_tol``; otherwise
+    ``("pin", [block_row, ...])`` listing the rotor-tree rows to pin and re-run.
+    If the overall regressed but every block is within ``block_tol`` (no single
+    culprit), pin the single most-dropped block so the loop still makes progress.
+    """
+    n = min(len(block_before), len(block_after))
+    deltas = [float(block_after[i]) - float(block_before[i]) for i in range(n)]
+    overall_ok = float(overall_after) >= float(overall_before) - float(overall_tol)
+    dropped = [i for i, d in enumerate(deltas) if d < -float(block_tol)]
+
+    if overall_ok and not dropped:
+        return "accept", []
+    if dropped:
+        return "pin", dropped
+    # Overall regressed but no block beyond tol: pin the worst-dropping block.
+    if deltas:
+        return "pin", [int(min(range(n), key=lambda i: deltas[i]))]
+    return "accept", []
+
+
+def _build_local_refine_env(refine_ligand, *, system, options, context_label="polish"):
+    """Build the OpenMM local-refine environment (ligand + nearby residues +
+    density submap) used by the polish minimisers. Returns
+    ``(env, ligand, protein_structure, deps)`` or ``None`` when no density map is
+    available. Shared by the standard polish and the fragment-pinned minimiser so
+    both use byte-identical settings (pin_k=5000, global_k=150, localise=False)."""
+    density_map = getattr(system, "density_map", None)
+    if bool(getattr(options, "no_map", False)) or density_map is None:
+        print(f"[smart_refine_2] {context_label} skipped: no density map available")
+        return None
+
+    deps = _final_minimisation_dependencies()
+    (
+        setup_cls,
+        minimiser_cls,
+        make_submap,
+        copy_global_positions,
+        copy_ligand_positions,
+        residue_positions,
+        residue_subset,
+    ) = deps
+
+    ligand = _sync_ligand_object_from_refine_ligand(refine_ligand)
+    protein_structure = system.protein.complex_structure
+    ligand_points = residue_positions(ligand.complex_structure.residues[0])
+    local_structure = residue_subset(
+        ligand_points,
+        protein_structure,
+        distance_cutoff=float(getattr(options, "local_radius", 12.0)),
+    )
+    local_map = make_submap(local_structure, density_map)
+
+    env = setup_cls(
+        protein_structure=local_structure,
+        ligand_structure=[ligand],
+        density_map=local_map,
+        platform_name=getattr(system, "platform", "CPU"),
+        protein_restraint="protein",
+        pin_k=5000.0,
+        localise=False,
+        global_k=150.0,
+        pin_specs=getattr(options, "pin_specs", []),
+        distance_specs=getattr(options, "distance_specs", []),
+        resource_owner=system,
+    )
+    return env, ligand, protein_structure, deps
+
+
+def _apply_polished_env_to_ligand(
+    refine_ligand, result, *, env, ligand, protein_structure, deps, final_energy,
+    protein_index_refresh_cb, acceptance_scorer, eval_config, context_label,
+):
+    """Copy minimised positions back onto the RefineLigand, refresh its caches
+    (per-atom + per-block Q-scores), and re-score ``result`` so the before/after
+    acceptance gates compare REAL post-minimisation scores."""
+    copy_global_positions = deps[3]
+    copy_ligand_positions = deps[4]
+    with _suppress_polish_atom_warnings():
+        copy_global_positions(
+            full_structure=protein_structure,
+            local_structure=env.complex_structure,
+        )
+    copy_ligand_positions(
+        local_structure=env.complex_structure,
+        ligand_objects=[ligand],
+    )
+    if protein_index_refresh_cb is not None:
+        protein_index_refresh_cb()
+    protein_index = getattr(refine_ligand, "_protein_index", None)
+    _refresh_refine_ligand_from_ligand_object(
+        refine_ligand,
+        protein_index=protein_index,
+        result=result,
+        final_energy=final_energy,
+    )
+    # _refresh_refine_ligand_from_ligand_object only updates best_coords_A; without
+    # this the result's best_raw_score/best_objective stay at their pre-min values
+    # and every before/after gate is a no-op.
+    if result is not None and acceptance_scorer is not None and eval_config is not None:
+        try:
+            scorer = get_scorer(acceptance_scorer)
+            score_result, clash = _full_ligand_evaluation(
+                refine_ligand, scorer,
+                np.asarray(refine_ligand._atom_positions, dtype=np.float64),
+                eval_config,
+            )
+            result.best_raw_score = float(score_result.value)
+            result.best_objective = (
+                float(score_result.value) if clash.count == 0 else float("-inf")
+            )
+            result.best_clash_penalty = float(clash.penalty)
+            result.best_clash_count = int(clash.count)
+        except Exception as exc:
+            print(f"[smart_refine_2] {context_label} re-score skipped: {exc}")
+
+
 def local_refine_polish_ligand(
     refine_ligand,
     result,
@@ -826,6 +1202,8 @@ def local_refine_polish_ligand(
     protein_index_refresh_cb,
     options=None,
     context_label="polish",
+    acceptance_scorer=None,
+    eval_config=None,
 ):
     """Run an OpenMM local-refine polish on ``refine_ligand`` in place.
 
@@ -850,46 +1228,15 @@ def local_refine_polish_ligand(
       - ``context_label`` — short string ("polish", "final polish",
         "per-iter polish") used only in the log line.
     """
-    density_map = getattr(system, "density_map", None)
-    if bool(getattr(options, "no_map", False)) or density_map is None:
-        print(f"[smart_refine_2] {context_label} skipped: no density map available")
-        return refine_ligand, result
-
     try:
-        deps = _final_minimisation_dependencies()
-        (
-            setup_cls,
-            minimiser_cls,
-            make_submap,
-            copy_global_positions,
-            copy_ligand_positions,
-            residue_positions,
-            residue_subset,
-        ) = deps
-
-        ligand = _sync_ligand_object_from_refine_ligand(refine_ligand)
-        protein_structure = system.protein.complex_structure
-        ligand_points = residue_positions(ligand.complex_structure.residues[0])
-        local_structure = residue_subset(
-            ligand_points,
-            protein_structure,
-            distance_cutoff=float(getattr(options, "local_radius", 12.0)),
+        built = _build_local_refine_env(
+            refine_ligand, system=system, options=options, context_label=context_label
         )
-        local_map = make_submap(local_structure, density_map)
+        if built is None:
+            return refine_ligand, result
+        env, ligand, protein_structure, deps = built
+        minimiser_cls = deps[1]
 
-        env = setup_cls(
-            protein_structure=local_structure,
-            ligand_structure=[ligand],
-            density_map=local_map,
-            platform_name=getattr(system, "platform", "CPU"),
-            protein_restraint="protein",
-            pin_k=5000.0,
-            localise=False,
-            global_k=150.0,
-            pin_specs=getattr(options, "pin_specs", []),
-            distance_specs=getattr(options, "distance_specs", []),
-            resource_owner=system,
-        )
         final_energy = minimiser_cls(env).run(
             do_biased_md=getattr(options, "do_biased_md", False),
             md_ps=5.0,
@@ -901,24 +1248,13 @@ def local_refine_polish_ligand(
             )
             return refine_ligand, result
 
-        with _suppress_polish_atom_warnings():
-            copy_global_positions(
-                full_structure=protein_structure,
-                local_structure=env.complex_structure,
-            )
-        copy_ligand_positions(
-            local_structure=env.complex_structure,
-            ligand_objects=[ligand],
-        )
-
-        if protein_index_refresh_cb is not None:
-            protein_index_refresh_cb()
-        protein_index = getattr(refine_ligand, "_protein_index", None)
-        _refresh_refine_ligand_from_ligand_object(
-            refine_ligand,
-            protein_index=protein_index,
-            result=result,
+        _apply_polished_env_to_ligand(
+            refine_ligand, result,
+            env=env, ligand=ligand, protein_structure=protein_structure, deps=deps,
             final_energy=final_energy,
+            protein_index_refresh_cb=protein_index_refresh_cb,
+            acceptance_scorer=acceptance_scorer, eval_config=eval_config,
+            context_label=context_label,
         )
         initial_raw = float(getattr(result, "initial_raw_score", 0.0)) if result is not None else 0.0
         best_raw = float(getattr(result, "best_raw_score", initial_raw)) if result is not None else initial_raw
@@ -931,6 +1267,176 @@ def local_refine_polish_ligand(
         print(
             f"[smart_refine_2] {context_label} failed; "
             f"keeping pre-polish pose: {exc}"
+        )
+    return refine_ligand, result
+
+
+def fragment_pinned_polish_ligand(
+    refine_ligand,
+    result,
+    *,
+    system,
+    protein_index_refresh_cb,
+    options=None,
+    context_label="fragment polish",
+    acceptance_scorer=None,
+    eval_config=None,
+    pose_objective_fn=None,
+    block_tol=0.1,
+    max_iters=4,
+):
+    """Iterative fragment-pinned OpenMM minimiser (opt-in alternative to the
+    standard polish).
+
+    Minimise, score each semantic block's Q vs the INPUT pose, and accept when the
+    overall objective held (improved or within tolerance) AND no block dropped by
+    more than ``block_tol``. Otherwise pin the dropped blocks at their input
+    positions, restart from the input pose, and re-minimise — the pinned set grows
+    monotonically. After ``max_iters`` with no acceptance, revert to the input
+    pose. Same ``(refine_ligand, result)`` contract as ``local_refine_polish_ligand``.
+    """
+    if pose_objective_fn is None:
+        # Without an overall objective we can't gate per-fragment; fall back.
+        return local_refine_polish_ligand(
+            refine_ligand, result, system=system,
+            protein_index_refresh_cb=protein_index_refresh_cb, options=options,
+            context_label=context_label, acceptance_scorer=acceptance_scorer,
+            eval_config=eval_config,
+        )
+
+    scorer = get_scorer(acceptance_scorer) if acceptance_scorer is not None else None
+    input_coords = np.asarray(refine_ligand._atom_positions, dtype=np.float64).copy()
+    overall_input = pose_objective_fn(refine_ligand, scorer, input_coords)
+    block_input = list(getattr(refine_ligand, "_block_qscores", []) or [])
+
+    accepted = False
+    try:
+        from openmm import unit
+        from ChemEM.protocols.core.forces import ForceBuilder
+
+        built = _build_local_refine_env(
+            refine_ligand, system=system, options=options, context_label=context_label
+        )
+        if built is None:
+            return refine_ligand, result
+        env, ligand, protein_structure, deps = built
+        minimiser_cls = deps[1]
+
+        heavy = list(getattr(env, "ligand_heavy_indices", []) or [])
+        n_heavy = int(refine_ligand._atom_positions.shape[0])
+        if len(heavy) != n_heavy:
+            print(
+                f"[smart_refine_2] {context_label}: ligand heavy-atom count mismatch "
+                f"(env {len(heavy)} vs refine {n_heavy}); using standard polish"
+            )
+            return local_refine_polish_ligand(
+                refine_ligand, result, system=system,
+                protein_index_refresh_cb=protein_index_refresh_cb, options=options,
+                context_label=context_label, acceptance_scorer=acceptance_scorer,
+                eval_config=eval_config,
+            )
+
+        ctx = env.simulation.context
+        input_full_nm = np.asarray(
+            ctx.getState(getPositions=True).getPositions(asNumpy=True).value_in_unit(unit.nanometer),
+            dtype=np.float64,
+        )
+
+        # One weighted pin force over all ligand heavy atoms, toggled per iteration.
+        pin_force, slot_by_atom = ForceBuilder.create_weighted_positional_pin(
+            heavy, input_full_nm, k_name="k_frag_pin"
+        )
+        env.complex_system.addForce(pin_force)
+        ctx.reinitialize(preserveState=True)
+
+        pinned_openmm = set()
+        for it in range(int(max_iters)):
+            ctx.setPositions(input_full_nm * unit.nanometer)  # restart from input
+            for atom_idx, slot in slot_by_atom.items():
+                w = 1.0 if atom_idx in pinned_openmm else 0.0
+                x0, y0, z0 = (float(v) for v in input_full_nm[atom_idx])
+                pin_force.setParticleParameters(slot, atom_idx, [x0, y0, z0, w])
+            pin_force.updateParametersInContext(ctx)
+            ctx.setParameter("k_frag_pin", 5000.0 if pinned_openmm else 0.0)
+
+            final_energy = minimiser_cls(env).run(
+                do_biased_md=getattr(options, "do_biased_md", False),
+                md_ps=5.0, max_iters=200,
+            )
+            if final_energy is None:
+                print(f"[smart_refine_2] {context_label} skipped: minimiser returned no energy")
+                break
+
+            _apply_polished_env_to_ligand(
+                refine_ligand, result, env=env, ligand=ligand,
+                protein_structure=protein_structure, deps=deps, final_energy=final_energy,
+                protein_index_refresh_cb=protein_index_refresh_cb,
+                acceptance_scorer=acceptance_scorer, eval_config=eval_config,
+                context_label=context_label,
+            )
+
+            overall_after = pose_objective_fn(refine_ligand, scorer, refine_ligand._atom_positions)
+            block_after = list(getattr(refine_ligand, "_block_qscores", []) or [])
+            if overall_after is None or overall_input is None:
+                break
+
+            decision, dropped_rows = _fragment_min_decision(
+                block_input, block_after, overall_input, overall_after, block_tol=block_tol
+            )
+            if decision == "accept":
+                print(
+                    f"[smart_refine_2] {context_label} accepted at iter {it + 1} "
+                    f"(overall {overall_input:+.5f}->{overall_after:+.5f})"
+                )
+                accepted = True
+                break
+
+            newly = set()
+            for block_row in dropped_rows:
+                if block_row >= len(refine_ligand._rotor_tree):
+                    continue
+                for mol_idx in refine_ligand._rotor_tree[block_row].atom_indices:
+                    row = refine_ligand._atom_row_by_mol_index.get(int(mol_idx))
+                    if row is not None:
+                        newly.add(int(heavy[int(row)]))
+            if newly <= pinned_openmm:
+                break  # no new atoms to pin -> no further progress
+            pinned_openmm |= newly
+            print(
+                f"[smart_refine_2] {context_label} iter {it + 1}: pinning "
+                f"{len(dropped_rows)} block(s) ({len(pinned_openmm)} atoms), re-running"
+            )
+
+        if not accepted:
+            # Revert to the input pose (restore coords + caches + result).
+            refine_ligand._atom_positions = input_coords
+            if getattr(refine_ligand, "_protein_index", None) is not None:
+                refine_ligand._init_local_protein(refine_ligand._protein_index)
+            if hasattr(refine_ligand, "update_atom_qscores"):
+                refine_ligand.update_atom_qscores()
+            if hasattr(refine_ligand, "get_best_block_by_qscore"):
+                refine_ligand.get_best_block_by_qscore()
+            if result is not None and scorer is not None and eval_config is not None:
+                try:
+                    sr_res, clash = _full_ligand_evaluation(
+                        refine_ligand, scorer, input_coords, eval_config
+                    )
+                    result.best_coords_A = input_coords.copy()
+                    result.best_raw_score = float(sr_res.value)
+                    result.best_objective = (
+                        float(sr_res.value) if clash.count == 0 else float("-inf")
+                    )
+                    result.best_clash_penalty = float(clash.penalty)
+                    result.best_clash_count = int(clash.count)
+                except Exception:
+                    pass
+            print(
+                f"[smart_refine_2] {context_label} reverted to input after "
+                f"{int(max_iters)} iteration(s)"
+            )
+    except Exception as exc:
+        print(
+            f"[smart_refine_2] {context_label} failed; keeping pre-polish pose: {exc}"
         )
     return refine_ligand, result
 
@@ -1032,6 +1538,10 @@ def refine_ligand(
     rng=None,
     clash_tradeoff_lambda=None,
     polish_cb=None,
+    ring_flex_enabled=False,
+    ring_flex_confs=8,
+    ring_flex_rmsd=0.3,
+    drift_guard=None,
 ):
     """SmartRefine2 single-ligand refinement loop.
 
@@ -1066,6 +1576,11 @@ def refine_ligand(
         scorer_options=scorer_options,
     )
 
+    # Anchor the anti-drift guards to the STARTING pose (before any fit). The
+    # snapshot lives on the refine_ligand object so it rides shallow-copy clones
+    # made by _clone_refine_ligand, and is read at every accept/select call.
+    _install_drift_anchor(refine_ligand, drift_guard)
+
     from collections import deque
     if rng is None:
         kick_seed = getattr(kick_config, "seed", None) if kick_config else None
@@ -1083,6 +1598,17 @@ def refine_ligand(
         max_clash_penalty_increase,
         clash_tradeoff_lambda=clash_tradeoff_lambda,
     )
+    # No-regression anchor: snapshot the post-initial-fit pose (the fair
+    # baseline — it already reflects any --sr2-pre-minimise). If the whole
+    # search/polish run ends up worse than this by SR2's own acceptance
+    # objective, the end-of-loop gate below reverts to it. This is what keeps
+    # the aggressive torsion search from ever returning a pose worse than the
+    # input, the catastrophic-regression failure mode on flexible ligands.
+    anchor_result = _snapshot_fit_result(
+        getattr(refine_ligand, "_last_fit_in_map_result", None)
+    )
+    anchor_objective = _result_best_objective(anchor_result)
+
     # Snapshot the initial block Qscores so the very first iteration's kick
     # check has a valid "previous" reference.
     initial_block_qscores = getattr(refine_ligand, "_block_qscores", None)
@@ -1135,6 +1661,23 @@ def refine_ligand(
             rng=rng,
         )
         refine_ligand._last_branch_walker_result = branch_results
+        if ring_flex_enabled:
+            # Aliphatic ring systems are rigid "core" blocks in the torsion
+            # walker, so a wrong ring pucker can never be corrected by it.
+            # Inject alternative ring puckers as extra candidates; they ride
+            # the same refit/selection path as torsion candidates below.
+            ring_results = ring_conformer_walker(
+                refine_ligand,
+                scorer=acceptance_scorer,
+                config=branch_config,
+                n_confs=ring_flex_confs,
+                min_ring_rmsd=ring_flex_rmsd,
+            )
+            if ring_results:
+                branch_results = list(branch_results) + list(ring_results)
+        # Exocyclic ring-branch torsions are now seeded as the first step of the
+        # relevant branch walk inside branch_walker (get_directional_torsion_walks),
+        # so they ride the normal beam search above — no separate walker here.
         if not branch_results:
             # Round-12: walker exhausting its targets is a stall. Polish
             # always continues (no raw gate) because the walker may find
@@ -1324,6 +1867,14 @@ def refine_ligand(
         no_improve_iters,
         stop_reason,
     )
+
+    # No-regression gate: if the final pose is worse than the anchor by SR2's
+    # own acceptance objective, revert to the anchor. Guarantees SR2 never
+    # returns a pose worse than its (optionally pre-minimised) input.
+    refine_ligand = _apply_no_regression_gate(
+        refine_ligand, anchor_result, anchor_objective
+    )
+
     return refine_ligand
 
 
@@ -1513,6 +2064,67 @@ def _result_best_raw(result, default=float("-inf")):
     except Exception:
         return float(default)
     return raw if np.isfinite(raw) else float(default)
+
+
+# Tolerance below which a pose is treated as "not worse" by the no-regression
+# gate. Pure numerical jitter (re-scoring the same coords) must not trip it.
+_NO_REGRESSION_EPS = 1e-9
+
+
+def _result_best_objective(result, default=float("-inf")):
+    """Acceptance objective of a fit result (raw score minus clash penalty).
+
+    This is the quantity SR2 actually optimises (see
+    ``_objective_from_raw_and_clash`` and ``_rescore_fit_result_for_acceptance``),
+    so the no-regression gate compares poses on it. Falls back to the raw score
+    when ``best_objective`` is absent/non-finite (e.g. a hard-clash ``-inf``)."""
+    if result is None:
+        return float(default)
+    try:
+        obj = float(result.best_objective)
+    except Exception:
+        return _result_best_raw(result, default)
+    if np.isfinite(obj):
+        return obj
+    return float(obj)
+
+
+def _apply_no_regression_gate(refine_ligand, anchor_result, anchor_objective):
+    """Revert ``refine_ligand`` to the anchor pose when its final acceptance
+    objective has regressed below the anchor's, and record the decision on
+    ``._sr2_reverted_to_anchor``. This is the global guarantee that SR2 never
+    returns a pose worse (by its own objective) than its (optionally
+    pre-minimised) input — the catastrophic-regression failure mode."""
+    final_objective = _result_best_objective(
+        getattr(refine_ligand, "_last_fit_in_map_result", None)
+    )
+    if anchor_result is not None and final_objective < anchor_objective - _NO_REGRESSION_EPS:
+        apply_refinement(refine_ligand, anchor_result)
+        refine_ligand._last_fit_in_map_result = anchor_result
+        refine_ligand._sr2_reverted_to_anchor = True
+        print(
+            "[smart_refine_2] no-regression gate: reverted to anchor "
+            f"(final_objective={final_objective:.5f} < "
+            f"anchor_objective={anchor_objective:.5f})"
+        )
+    else:
+        refine_ligand._sr2_reverted_to_anchor = False
+    return refine_ligand
+
+
+def _snapshot_fit_result(result):
+    """Return an aliasing-free shallow copy of a fit result with its coordinate
+    array copied, safe to stash as a revert anchor while the loop keeps
+    mutating the live result objects."""
+    if result is None:
+        return None
+    import copy
+    snapshot = copy.copy(result)
+    try:
+        snapshot.best_coords_A = np.asarray(result.best_coords_A, dtype=np.float64).copy()
+    except Exception:
+        pass
+    return snapshot
 
 
 def _set_refine_loop_diagnostics(refine_ligand, iterations_completed, no_improve_iters, stop_reason):
@@ -1743,17 +2355,35 @@ def _rescore_fit_result_for_acceptance(
 
 
 def _pick_best_ligand(candidates, clash_tradeoff_lambda=None, raw_floor=None):
+    # Anti-drift guard, read off each candidate clone (no-op -> (0.0, True), so
+    # the ranking below is bit-for-bit unchanged when no guard is active). The
+    # envelope gate drops candidates that leave the starting blob; the centroid
+    # penalty down-ranks far-moving candidates within the surviving pool.
+    penalty_by_id = {}
+    passing = []
+    for pair in candidates:
+        pen, ok = _drift_assess(pair[0], pair[1].best_coords_A)
+        penalty_by_id[id(pair)] = pen
+        if ok:
+            passing.append(pair)
+    gated = passing if passing else candidates
+
+    def _pen(pair):
+        return penalty_by_id.get(id(pair), 0.0)
+
     if clash_tradeoff_lambda is not None:
         lam = float(clash_tradeoff_lambda)
         winner, _ = max(
-            candidates,
+            gated,
             key=lambda pair: (
-                float(pair[1].best_raw_score) - lam * float(pair[1].best_clash_penalty)
+                float(pair[1].best_raw_score)
+                - lam * float(pair[1].best_clash_penalty)
+                - _pen(pair)
             ),
         )
         return winner
 
-    pool = candidates
+    pool = gated
     if raw_floor is not None:
         # Under selection="greedy" we promised "never regresses". Filter out
         # candidates whose post-fit raw is below the base's raw so the
@@ -1761,7 +2391,7 @@ def _pick_best_ligand(candidates, clash_tradeoff_lambda=None, raw_floor=None):
         # to save a clash. The base itself trivially satisfies raw >= raw_floor,
         # so the pool is always non-empty under greedy.
         improvers = [
-            c for c in candidates
+            c for c in gated
             if float(c[1].best_raw_score) >= float(raw_floor)
         ]
         if improvers:
@@ -1776,7 +2406,7 @@ def _pick_best_ligand(candidates, clash_tradeoff_lambda=None, raw_floor=None):
         pool,
         key=lambda pair: (
             int(pair[1].best_clash_count),
-            -float(pair[1].best_raw_score),
+            -(float(pair[1].best_raw_score) - _pen(pair)),
         ),
     )
     return winner
@@ -2029,6 +2659,85 @@ def _walk_beam_search(refine_ligand, walk, base_coords, config, progress=None, i
     return beam, total_evals
 
 
+def _evaluate_exo_step_for_parent(
+    refine_ligand, step, parent,
+    moved_rows, moved_mol_ids,
+    frontier_rows, frontier_mol_ids, frontier_elements,
+    downstream_rows, fixed_mol_ids, config,
+):
+    """Apply an exocyclic ring-branch swing: rotate the moved atoms about the
+    ring-bond axis (j,k) over a coarse+local angle sweep, scoring each pose like
+    a normal walk step. Mirrors _evaluate_step_for_parent's structure but uses an
+    explicit rotation (the math from the standalone exo walker) instead of
+    rdMolTransforms.SetDihedralDeg, which cannot rotate a ring bond."""
+    from rdkit.Geometry import Point3D
+    from .optimisers import _rotation_matrix
+
+    row_by_mol = refine_ligand._atom_row_by_mol_index
+    j, k = int(step.axis[0]), int(step.axis[1])
+    if j not in row_by_mol or k not in row_by_mol:
+        return [], 0
+
+    base_coords = parent.coords_A
+    pJ = base_coords[int(row_by_mol[j])]
+    pK = base_coords[int(row_by_mol[k])]
+    axis = pK - pJ
+    norm = float(np.linalg.norm(axis))
+    if norm < 1e-12:
+        return [], 0
+    axis = axis / norm
+
+    step_deg = float(getattr(refine_ligand, "_exo_step_deg", 0.0) or config.coarse_step_deg)
+    mol = _clone_with_coords(refine_ligand, base_coords)
+    conf = mol.GetConformer(0)
+    moved = list(zip(moved_rows.tolist(), moved_mol_ids.tolist()))
+
+    def _apply(angle_deg):
+        R = _rotation_matrix(axis * np.deg2rad(float(angle_deg)))
+        for row, mol_idx in moved:
+            v = base_coords[int(row)]
+            vr = (v - pJ) @ R.T + pJ
+            conf.SetAtomPosition(int(mol_idx), Point3D(float(vr[0]), float(vr[1]), float(vr[2])))
+
+    n_evals = 0
+    coarse_cands = []
+    for angle in np.arange(-180.0, 180.0, step_deg):
+        _apply(angle)
+        coarse_cands.append(
+            _candidate_from_conformer(
+                refine_ligand, conf, parent, moved_rows, moved_mol_ids,
+                frontier_rows, frontier_mol_ids, frontier_elements,
+                downstream_rows, fixed_mol_ids, float(angle), config,
+            )
+        )
+        n_evals += 1
+
+    kept_coarse = _filter_coarse(coarse_cands, config)
+    if not kept_coarse:
+        return [], n_evals
+
+    refined = []
+    for coarse in kept_coarse:
+        coarse_angle = float(coarse.dihedrals_deg[-1])
+        local_cands = []
+        for delta in np.arange(
+            -config.local_window_deg, config.local_window_deg + 1e-9, config.local_step_deg
+        ):
+            angle = coarse_angle + float(delta)
+            _apply(angle)
+            local_cands.append(
+                _candidate_from_conformer(
+                    refine_ligand, conf, parent, moved_rows, moved_mol_ids,
+                    frontier_rows, frontier_mol_ids, frontier_elements,
+                    downstream_rows, fixed_mol_ids, float(angle), config,
+                )
+            )
+            n_evals += 1
+        refined.append(_best_candidate(local_cands, config))
+
+    return refined, n_evals
+
+
 def _evaluate_step_for_parent(
     refine_ligand, step, parent,
     moved_rows, moved_mol_ids,
@@ -2037,6 +2746,16 @@ def _evaluate_step_for_parent(
     fixed_mol_ids,
     config,
 ):
+    if getattr(step, "is_exo", False):
+        # Ring-bond axis: SetDihedralDeg is undefined, so rotate the moved atoms
+        # directly about the j-k axis (the exo-swing degree of freedom).
+        return _evaluate_exo_step_for_parent(
+            refine_ligand, step, parent,
+            moved_rows, moved_mol_ids,
+            frontier_rows, frontier_mol_ids, frontier_elements,
+            downstream_rows, fixed_mol_ids, config,
+        )
+
     from rdkit.Chem import rdMolTransforms
 
     mol = _clone_with_coords(refine_ligand, parent.coords_A)
@@ -2458,6 +3177,362 @@ def _build_walker_result(
     )
 
 
+def _ring_block_index(rotor_tree, ring_atom_indices):
+    """Return the rotor-tree block index whose atoms overlap ``ring_atom_indices``
+    most, or None if nothing overlaps."""
+    ring_set = set(int(i) for i in ring_atom_indices)
+    best_idx, best_overlap = None, 0
+    for idx, block in enumerate(rotor_tree):
+        overlap = len(ring_set & set(int(a) for a in block.atom_indices))
+        if overlap > best_overlap:
+            best_idx, best_overlap = idx, overlap
+    return best_idx
+
+
+def _ring_clash(refine_ligand, coords, config):
+    """Full protein+self clash for a grafted ring pose (mirrors
+    ``_full_ligand_evaluation`` clash handling without rescoring the whole
+    ligand)."""
+    mol = getattr(getattr(refine_ligand, "_ligand", None), "mol", None)
+    protein_clash = protein_ligand_clash(
+        coords,
+        refine_ligand._atom_elements,
+        refine_ligand.local_coords_A,
+        refine_ligand.local_elements,
+        cutoff_A=config.clash_cutoff_A,
+        max_vdw_overlap_A=config.max_vdw_overlap_A,
+        max_hbond_overlap_A=config.max_hbond_overlap_A,
+    )
+    self_clash = ligand_self_clash(
+        coords,
+        refine_ligand._atom_elements,
+        mol,
+        ligand_atom_indices=getattr(refine_ligand, "_atom_indices", None),
+        cutoff_A=config.clash_cutoff_A,
+        max_vdw_overlap_A=config.max_vdw_overlap_A,
+        max_hbond_overlap_A=config.max_hbond_overlap_A,
+        topological_exclusion_bonds=int(
+            getattr(config, "ligand_clash_topological_exclusion_bonds", 3)
+        ),
+    )
+    return combine_clash_results(protein_clash, self_clash)
+
+
+def ring_conformer_walker(
+    refine_ligand, scorer=None, config=None, n_confs=8, min_ring_rmsd=0.3
+):
+    """Emit FitInMapResult candidates that re-pucker poorly-fit aliphatic rings.
+
+    For each flexible aliphatic ring system whose owning rotor-tree block fits
+    the density worse than the best block, generate a small library of
+    alternative ring puckers (scaffold/linker geometry preserved), graft each
+    onto the current pose, score the ring atoms by Q-score, and keep the top
+    ``config.max_keep_per_step`` per ring. Returns the same FitInMapResult type
+    as ``branch_walker`` so the existing refit/selection path consumes them
+    unchanged. Returns ``[]`` when there is no flexible/poor ring (the common
+    case), so it is a cheap no-op for rigid or aromatic-only ligands.
+    """
+    config = config or BranchWalkConfig()
+    scorer = get_scorer(scorer)
+    mol = getattr(getattr(refine_ligand, "_ligand", None), "mol", None)
+    rotor_tree = getattr(refine_ligand, "_rotor_tree", None)
+    row_by_mol = getattr(refine_ligand, "_atom_row_by_mol_index", None)
+    if mol is None or rotor_tree is None or row_by_mol is None:
+        return []
+
+    ring_systems = aliphatic_ring_systems(mol)
+    if not ring_systems:
+        return []
+
+    # Per-block Q-scores + best block (gate: only sample rings with room to gain).
+    try:
+        best_idx = refine_ligand.get_best_block_by_qscore()
+    except Exception:
+        best_idx = None
+    block_q = getattr(refine_ligand, "_block_qscores", None)
+    best_q = (
+        float(block_q[best_idx])
+        if (block_q is not None and best_idx is not None)
+        else 1.0
+    )
+
+    base_coords = np.asarray(refine_ligand._atom_positions, dtype=np.float64).copy()
+    base_score_result, base_clash = _full_ligand_evaluation(
+        refine_ligand, scorer, base_coords, config
+    )
+    initial_raw = float(base_score_result.value)
+    initial_objective = initial_raw if base_clash.count == 0 else float("-inf")
+
+    results = []
+    n_evals = 0
+    for ring_ids in ring_systems:
+        block_idx = _ring_block_index(rotor_tree, ring_ids)
+        block_id = int(rotor_tree[block_idx].block_id) if block_idx is not None else -1
+        # Skip rings that already fit at least as well as the best block, UNLESS
+        # an exocyclic branch hanging off the ring is itself poorly fit — in that
+        # case a re-pucker may swing the branch toward its density even though the
+        # ring scores fine (e.g. a ribose whose phosphate tail is the problem).
+        if (
+            block_q is not None
+            and block_idx is not None
+            and float(block_q[block_idx]) >= best_q
+            and not _ring_has_poor_branch(refine_ligand, ring_ids)
+        ):
+            continue
+
+        ring_rows = np.asarray(
+            [int(row_by_mol[int(i)]) for i in ring_ids if int(i) in row_by_mol],
+            dtype=int,
+        )
+        if ring_rows.size < 4:
+            continue
+
+        cur_mol = _clone_with_coords(refine_ligand, base_coords)
+        confs = generate_ring_conformers(
+            cur_mol, ring_ids, n_confs=int(n_confs), min_ring_rmsd=float(min_ring_rmsd)
+        )
+        cands = []
+        for conf in confs:
+            coords = base_coords.copy()
+            for mol_idx, xyz in conf.items():
+                mi = int(mol_idx)
+                if mi in row_by_mol:
+                    coords[int(row_by_mol[mi])] = xyz
+            frontier = _frontier_qscore(refine_ligand, coords, ring_rows, config)
+            clash = _ring_clash(refine_ligand, coords, config)
+            cands.append(
+                _BranchCandidate(
+                    coords_A=coords,
+                    dihedrals_deg=(),
+                    frontier_score=float(frontier),
+                    clash_count=int(clash.count),
+                    clash_penalty=float(clash.penalty),
+                )
+            )
+            n_evals += 1
+
+        if not cands:
+            continue
+        cands.sort(
+            key=lambda c: (c.clash_count, -c.frontier_score, c.clash_penalty)
+        )
+        for cand in cands[: int(config.max_keep_per_step)]:
+            results.append(
+                _build_ring_result(
+                    refine_ligand,
+                    scorer,
+                    cand,
+                    base_score_result,
+                    base_clash,
+                    initial_raw,
+                    initial_objective,
+                    n_evals,
+                    config,
+                    block_id,
+                )
+            )
+
+    if results:
+        print(
+            "[smart_refine_2] ring-flex produced "
+            f"{len(results)} candidate result(s) from {len(ring_systems)} "
+            f"aliphatic ring system(s) ({n_evals} evaluations)"
+        )
+    return results
+
+
+def _build_ring_result(
+    refine_ligand, scorer, candidate,
+    base_score_result, base_clash,
+    initial_raw, initial_objective, n_evals, config, ring_block_id,
+):
+    score_result, clash = _full_ligand_evaluation(
+        refine_ligand, scorer, candidate.coords_A, config
+    )
+    best_raw = float(score_result.value)
+    best_objective = best_raw if clash.count == 0 else float("-inf")
+    score_terms = {
+        "ring_move": True,
+        "ring_block_id": int(ring_block_id),
+        "frontier_score": float(candidate.frontier_score),
+        **dict(score_result.terms),
+    }
+    clash_terms = {
+        "penalty": float(clash.penalty),
+        "count": int(clash.count),
+        "max_overlap_A": float(clash.max_overlap_A),
+        "max_allowed_overlap_A": float(clash.max_allowed_overlap_A),
+        "max_excess_overlap_A": float(clash.max_excess_overlap_A),
+        "pairs_checked": int(clash.pairs_checked),
+    }
+    return FitInMapResult(
+        best_coords_A=candidate.coords_A.copy(),
+        initial_raw_score=float(initial_raw),
+        best_raw_score=best_raw,
+        initial_objective=float(initial_objective),
+        best_objective=best_objective,
+        initial_clash_penalty=float(base_clash.penalty),
+        best_clash_penalty=float(clash.penalty),
+        initial_clash_count=int(base_clash.count),
+        best_clash_count=int(clash.count),
+        best_max_overlap_A=float(clash.max_overlap_A),
+        steps=1,
+        evaluations=int(n_evals),
+        converged=True,
+        final_step_size_A=0.0,
+        score_terms=score_terms,
+        clash_terms=clash_terms,
+        best_rotation_matrix=None,
+        best_translation_A=None,
+    )
+
+
+def _downstream_poorly_fit(refine_ligand, down_rows):
+    """True when the mean per-atom Q-score over ``down_rows`` is below the best
+    block's Q-score — i.e. this branch fits the density worse than the best-fit
+    region and is worth moving. Used to gate the exo walker (per torsion) and
+    ring-flex (per attached branch)."""
+    q = getattr(refine_ligand, "_per_atom_qscores", None)
+    down_rows = np.asarray(down_rows, dtype=int)
+    if q is None or down_rows.size == 0:
+        return False
+    q = np.asarray(q, dtype=np.float64)
+    try:
+        best_idx = refine_ligand.get_best_block_by_qscore()
+        best_q = float(refine_ligand._block_qscores[best_idx])
+    except Exception:
+        best_q = 1.0
+    return float(np.mean(q[down_rows])) < best_q
+
+
+def _ring_has_poor_branch(refine_ligand, ring_ids):
+    """True when any exocyclic substituent attached to this ring (via a cached
+    exo torsion whose ``k`` ring atom is in ``ring_ids``) is poorly fit. Lets
+    ring-flex fire when the ring scores fine but an attached branch does not."""
+    exo = getattr(refine_ligand, "_exo_torsions", None)
+    row_by_mol = getattr(refine_ligand, "_atom_row_by_mol_index", None)
+    if not exo or row_by_mol is None:
+        return False
+    ring_set = set(int(a) for a in ring_ids)
+    for t in exo:
+        if int(t.torsion[2]) not in ring_set:  # torsion[2] == k, the ring atom
+            continue
+        rows = np.asarray(
+            [int(row_by_mol[int(a)]) for a in t.downstream_atoms if int(a) in row_by_mol],
+            dtype=int,
+        )
+        if _downstream_poorly_fit(refine_ligand, rows):
+            return True
+    return False
+
+
+def _install_drift_anchor(rl, drift_guard):
+    """Snapshot the starting-pose anchor for the anti-drift guards onto ``rl``.
+
+    Stores ``_drift_guard`` (or None when disabled) plus the centroid, a cached
+    MapGrid, the density threshold and the starting coverage. A no-op (clears the
+    guard) when ``drift_guard`` is None/disabled, so every downstream call site
+    short-circuits cleanly.
+    """
+    if drift_guard is None or not getattr(drift_guard, "enabled", False):
+        rl._drift_guard = None
+        return
+
+    coords = np.asarray(rl._atom_positions, dtype=np.float64)
+    rl._drift_guard = drift_guard
+    rl._drift_anchor_centroid = coords.mean(axis=0)
+    rl._drift_mapgrid = None
+    rl._drift_threshold = None
+    rl._drift_anchor_coverage = None
+
+    if drift_guard.envelope_gate:
+        map_ref = getattr(rl, "_map_reference", None) or getattr(
+            rl, "_map_referece", None
+        )
+        if map_ref is not None:
+            try:
+                try:
+                    from ChemEM.protocols.mapQ_score.mapq_utils import MapGrid
+                except ImportError:
+                    from protocols.mapQ_score.mapq_utils import MapGrid
+                mapgrid = MapGrid.from_emmap(map_ref)
+                mean, std = mapgrid.stats()
+                threshold = float(mean) + float(
+                    drift_guard.envelope_threshold_sigma
+                ) * float(std)
+                rl._drift_mapgrid = mapgrid
+                rl._drift_threshold = threshold
+                rl._drift_anchor_coverage = _density_coverage(
+                    coords, mapgrid, threshold
+                )
+            except Exception as exc:
+                print(
+                    "[smart_refine_2] drift-guard envelope gate disabled "
+                    f"(could not build map grid): {exc}"
+                )
+                rl._drift_mapgrid = None
+
+
+def _density_coverage(coords_A, mapgrid, threshold):
+    """Fraction of heavy atoms sitting in above-``threshold`` density."""
+    vals = np.asarray(
+        mapgrid.sample_trilinear(np.asarray(coords_A, dtype=np.float64)),
+        dtype=np.float64,
+    )
+    finite = vals[np.isfinite(vals)]
+    if finite.size == 0:
+        return 0.0
+    return float(np.mean(finite >= float(threshold)))
+
+
+def _centroid_penalty(coords_A, anchor_centroid, cfg):
+    """Flat-bottom penalty (raw-score units) on centroid displacement."""
+    if not getattr(cfg, "centroid_trust", False) or anchor_centroid is None:
+        return 0.0
+    centroid = np.asarray(coords_A, dtype=np.float64).mean(axis=0)
+    d = float(np.linalg.norm(centroid - np.asarray(anchor_centroid, dtype=np.float64)))
+    r0 = float(cfg.centroid_radius_A)
+    if d <= r0:
+        return 0.0
+    return float(cfg.centroid_k) * (d - r0)
+
+
+def _drift_guard_of(rl):
+    """Return the active DriftGuardConfig snapshotted on ``rl``, or None."""
+    cfg = getattr(rl, "_drift_guard", None)
+    if cfg is None or not getattr(cfg, "enabled", False):
+        return None
+    return cfg
+
+
+def _drift_assess(rl, coords_A):
+    """Return ``(centroid_penalty, passes_envelope)`` for a candidate pose.
+
+    ``(0.0, True)`` when no guard is active, so callers can always apply the
+    result unconditionally.
+    """
+    cfg = _drift_guard_of(rl)
+    if cfg is None:
+        return 0.0, True
+
+    penalty = 0.0
+    if cfg.centroid_trust:
+        penalty = _centroid_penalty(
+            coords_A, getattr(rl, "_drift_anchor_centroid", None), cfg
+        )
+
+    passes = True
+    if cfg.envelope_gate:
+        mapgrid = getattr(rl, "_drift_mapgrid", None)
+        threshold = getattr(rl, "_drift_threshold", None)
+        anchor_cov = getattr(rl, "_drift_anchor_coverage", None)
+        if mapgrid is not None and threshold is not None and anchor_cov is not None:
+            cov = _density_coverage(coords_A, mapgrid, threshold)
+            passes = bool(cov >= float(anchor_cov) - float(cfg.envelope_slack))
+
+    return float(penalty), bool(passes)
+
+
 def _refinement_composite_delta(result, clash_tradeoff_lambda):
     """Return delta of (raw_score - lambda * clash_penalty) for a FitInMapResult."""
     lam = float(clash_tradeoff_lambda)
@@ -2471,20 +3546,31 @@ def should_accept_refinement(
     min_score_improvement=0.0,
     max_clash_penalty_increase=1e-6,
     clash_tradeoff_lambda=None,
+    refine_ligand=None,
 ):
     if not np.isfinite(float(result.best_raw_score)):
         return False
+
+    # Anti-drift guards (no-op unless a guard is active on ``refine_ligand``).
+    drift_penalty = 0.0
+    if refine_ligand is not None:
+        drift_penalty, passes_envelope = _drift_assess(
+            refine_ligand, result.best_coords_A
+        )
+        if not passes_envelope:
+            return False
 
     if clash_tradeoff_lambda is not None and float(clash_tradeoff_lambda) >= 0.0:
         # Composite gate: accept iff (raw - lambda * clash_penalty) strictly
         # improves. The two independent ratchets (raw monotonicity + penalty
         # ratchet) are replaced by a single trade-off, so a small raw
         # regression is OK if the clash penalty drops enough, and a small
-        # penalty increase is OK if the raw improves enough.
+        # penalty increase is OK if the raw improves enough. The centroid
+        # penalty raises the bar a moving pose must clear.
         delta_composite = _refinement_composite_delta(result, clash_tradeoff_lambda)
-        return delta_composite > float(min_score_improvement)
+        return (delta_composite - drift_penalty) > float(min_score_improvement)
 
-    if float(result.best_raw_score) <= (
+    if (float(result.best_raw_score) - drift_penalty) <= (
         float(result.initial_raw_score) + float(min_score_improvement)
     ):
         return False
@@ -2540,6 +3626,7 @@ def accepter(
         min_score_improvement=min_score_improvement,
         max_clash_penalty_increase=max_clash_penalty_increase,
         clash_tradeoff_lambda=clash_tradeoff_lambda,
+        refine_ligand=refine_ligand,
     ):
         print(
             "[smart_refine_2] rejected fit-in-map "

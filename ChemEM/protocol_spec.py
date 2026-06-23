@@ -516,6 +516,68 @@ def add_smart_ligand_refine2_args(p):
         ),
     )
     g.add_argument(
+        "--sr2-minimiser",
+        choices=["standard", "fragment"],
+        default="standard",
+        help=(
+            "SmartRefine2 OpenMM polish strategy (applies to pre/stall/final "
+            "polish). 'standard' (default) = single density-biased local-refine "
+            "minimisation. 'fragment' = iterative fragment-pinned minimiser: "
+            "minimise, score per-semantic-block Q vs the input pose, accept if "
+            "overall Q holds and no block drops more than --sr2-fragmin-block-tol; "
+            "else pin the dropped blocks at their input positions, restart from "
+            "input and re-minimise; revert to input after --sr2-fragmin-max-iters."
+        ),
+    )
+    g.add_argument(
+        "--sr2-fragmin-block-tol",
+        type=float,
+        default=0.1,
+        help=(
+            "Per-block Q-score drop tolerance for --sr2-minimiser fragment: a "
+            "block dropping by up to this is acceptable if the overall Q holds. "
+            "Default 0.1."
+        ),
+    )
+    g.add_argument(
+        "--sr2-fragmin-max-iters",
+        type=int,
+        default=4,
+        help=(
+            "Maximum fragment-pin iterations for --sr2-minimiser fragment before "
+            "reverting to the input pose. Default 4."
+        ),
+    )
+    g.add_argument(
+        "--sr2-robust",
+        action="store_true",
+        default=False,
+        help=(
+            "Convenience bundle for the robust 'minimise then torsion-polish' "
+            "pipeline: enables --sr2-pre-minimise and asserts the robust "
+            "profile (selection=greedy, centroid-trust on r=5.0 k=0.4, "
+            "envelope-gate on slack=0.15, freeze-block-qscore=0.7). Note the "
+            "robust centroid radius (5.0) is looser than the standalone default "
+            "(1.0). --sr2-robust additionally turns pre-minimisation ON, and "
+            "overrides the individual guard flags."
+        ),
+    )
+    g.add_argument(
+        "--sr2-selection",
+        type=str,
+        choices=["greedy", "branches"],
+        default="greedy",
+        help=(
+            "SmartRefine2 branch-candidate selection. 'greedy' (default) "
+            "includes the current pose in the pool with a raw-score floor so "
+            "an iteration cannot regress; 'branches' picks the best re-fit "
+            "branch only and can regress. The end-of-loop no-regression gate "
+            "applies regardless. Default greedy."
+        ),
+    )
+
+
+    g.add_argument(
         "--sr2-tail-aware",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -535,7 +597,7 @@ def add_smart_ligand_refine2_args(p):
     g.add_argument(
         "--sr2-tail-aware-rotor-threshold",
         type=int,
-        default=12,
+        default=10,
         help=(
             "When --sr2-tail-aware is on, ligands whose longest semantic "
             "walk depth exceeds this many dihedrals receive a wider "
@@ -558,6 +620,18 @@ def add_smart_ligand_refine2_args(p):
             "Number of Fibonacci-sphere candidate directions used when sampling "
             "per-atom Q-scores during SmartRefine2. Lower = faster (~linear), "
             "higher = smoother estimate. Published Q-score uses 128."
+        ),
+    )
+    g.add_argument(
+        "--sr2-freeze-block-qscore",
+        type=float,
+        default=0.7,
+        help=(
+            "Freeze SmartRefine2 semantic blocks whose mean per-atom Qscore is "
+            ">= this threshold: they stay part of the rigid frame and are never "
+            "torsion-searched, so the walker only perturbs poorly-fit regions "
+            "(e.g. an ambiguous phosphate tail) and cannot disturb an "
+            "already-well-fit core. Set 0 to disable. Default 0.7."
         ),
     )
     g.add_argument(
@@ -761,6 +835,169 @@ def add_smart_ligand_refine2_args(p):
             "--sr2-clash-tradeoff-lambda because the walker uses Qscores "
             "(range 0-1) while the outer accepter uses raw_score with a "
             "potentially different scale. Suggested starting value ~0.1."
+        ),
+    )
+
+    # --- Optional pre-minimisation: run one OpenMM local-refine minimisation on
+    # --- each ligand BEFORE the search loop. Useful when the docked pose is
+    # --- rough and the search would otherwise drift into neighbouring density.
+    g.add_argument(
+        "--sr2-pre-minimise",
+        "--sr2-pre-minimize",
+        dest="sr2_pre_minimise",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Run one OpenMM local-refine minimisation on each ligand BEFORE "
+            "the SmartRefine2 search loop (same minimiser as "
+            "--refine --local-refine). Helps when the docked pose is rough so "
+            "the search starts from the correct density basin. Default OFF."
+        ),
+    )
+
+    # --- Aliphatic-ring conformer sampling. The branch walker treats ring
+    # --- systems as rigid 'core' blocks, so it cannot correct a wrong pucker on
+    # --- a saturated ring. When enabled, poorly-fit aliphatic ring blocks get a
+    # --- small library of alternative ring conformers injected as extra search
+    # --- candidates (scaffold held fixed), scored and refit like torsion moves.
+    g.add_argument(
+        "--sr2-ring-flex",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "(Default ON.) Sample alternative conformations of aliphatic "
+            "(saturated, non-aromatic) ligand rings during SmartRefine2. Only "
+            "fires when such a ring exists AND its block fits the density "
+            "poorly, so it is a no-op for rigid/aromatic-only ligands. Pass "
+            "--no-sr2-ring-flex to disable."
+        ),
+    )
+    g.add_argument(
+        "--sr2-ring-flex-confs",
+        type=int,
+        default=8,
+        help=(
+            "Number of alternative ring conformers generated per flexible "
+            "aliphatic ring system when --sr2-ring-flex is on. Higher = more "
+            "thorough but slower. Default 8."
+        ),
+    )
+    g.add_argument(
+        "--sr2-ring-flex-rmsd",
+        type=float,
+        default=0.3,
+        help=(
+            "Minimum ring-atom RMSD (Angstrom) between retained ring "
+            "conformers; smaller keeps more (more similar) conformers. "
+            "Default 0.3."
+        ),
+    )
+    g.add_argument(
+        "--sr2-exo-torsions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Exocyclic ring-branch torsions: swing a poorly-fit substituent "
+            "attached to a ring (e.g. a phosphate tail off a ribose) about a "
+            "ring bond. The normal torsion model cannot move the first branch "
+            "atom attached to a ring (it lies on its only rotation axis), so "
+            "without this the whole branch is stuck at a fixed attachment "
+            "direction. Gated to fire only on branches that fit the density "
+            "worse than the best block. Default ON; --no-sr2-exo-torsions to "
+            "disable."
+        ),
+    )
+    g.add_argument(
+        "--sr2-exo-step-deg",
+        type=float,
+        default=20.0,
+        help=(
+            "Coarse angular step (degrees) for the exo-torsion sweep. Smaller = "
+            "finer but ~linearly more Q-score evaluations. Default 20.0."
+        ),
+    )
+    g.add_argument(
+        "--sr2-exo-min-downstream",
+        type=int,
+        default=3,
+        help=(
+            "Minimum number of downstream heavy atoms an exocyclic substituent "
+            "must have for an exo torsion to be created (skips trivial 1-2 atom "
+            "caps). Default 3."
+        ),
+    )
+
+    # --- Anti-drift guards (opt-in). Anchored to the starting ligand pose, they
+    # --- stop the search gaining score by translating/flipping the ligand into a
+    # --- neighbouring density blob. Both default OFF: current behaviour unchanged.
+    g.add_argument(
+        "--sr2-centroid-trust",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Down-trust SmartRefine2 candidates that move the ligand centroid "
+            "far from the STARTING pose: a flat-bottom penalty (zero within "
+            "--sr2-centroid-trust-radius, then --sr2-centroid-trust-k per "
+            "Angstrom beyond) is folded into candidate selection and "
+            "acceptance. Resists drift into neighbouring density (the main "
+            "regression mode on flexible ligands). Default ON; pass "
+            "--no-sr2-centroid-trust to disable."
+        ),
+    )
+    g.add_argument(
+        "--sr2-centroid-trust-radius",
+        type=float,
+        default=5.0,
+        help=(
+            "Flat-bottom radius (Angstrom) for --sr2-centroid-trust: centroid "
+            "moves up to this distance from the start are unpenalised. Kept "
+            "well inside the 2A correctness band so a correct pose is never "
+            "penalised but drift toward the failure boundary is. Default 1.0."
+        ),
+    )
+    g.add_argument(
+        "--sr2-centroid-trust-k",
+        type=float,
+        default=0.4,
+        help=(
+            "Penalty (in raw QScore units) per Angstrom of ligand-centroid "
+            "displacement beyond --sr2-centroid-trust-radius. At 0.4 a 3A "
+            "drift costs ~0.8 QScore, larger than almost any achievable gain, "
+            "so drift must be strongly density-justified. Default 0.4."
+        ),
+    )
+    g.add_argument(
+        "--sr2-envelope-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Reject SmartRefine2 candidates that leave the starting density "
+            "blob: a pose whose fraction of ligand atoms sitting in "
+            "above-threshold density drops more than --sr2-envelope-slack "
+            "below the start is rejected at acceptance and dropped from "
+            "selection. Catastrophic-drift backstop; no-ops when no map is "
+            "present. Default ON; pass --no-sr2-envelope-gate to disable."
+        ),
+    )
+    g.add_argument(
+        "--sr2-envelope-threshold-sigma",
+        type=float,
+        default=1.0,
+        help=(
+            "Density threshold for the --sr2-envelope-gate coverage measure, "
+            "expressed in map standard deviations above the mean "
+            "(threshold = map_mean + sigma * map_std). Default 1.0."
+        ),
+    )
+    g.add_argument(
+        "--sr2-envelope-slack",
+        type=float,
+        default=0.15,
+        help=(
+            "Allowed drop in density-coverage fraction (vs the starting pose) "
+            "before --sr2-envelope-gate rejects a candidate. Slightly loose so "
+            "legitimate tail re-fitting into weak density is not over-rejected. "
+            "Default 0.15."
         ),
     )
 

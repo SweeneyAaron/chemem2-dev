@@ -1,0 +1,82 @@
+# Apptainer/Singularity definition for ChemEM2 (CPU-only).
+#
+# Build a single self-contained .sif: bootstrap a micromamba base, create one
+# conda-forge env carrying BOTH the C++ build toolchain and the full runtime
+# stack, compile the pybind11 extensions, install ChemEM, then strip caches.
+#
+# Build (run from the REPO ROOT, not from container/):
+#     apptainer build --fakeroot chemem.sif container/chemem.def
+#   (if --fakeroot is disabled on your cluster, use `apptainer build --remote`)
+#
+# Run:
+#     apptainer run --pwd "$PWD" chemem.sif <config> [flags]
+#     apptainer run chemem.sif --help
+#
+# See container/README.md for HPC / Slurm details.
+
+Bootstrap: docker
+From: mambaorg/micromamba:1.5.8
+
+# Source paths are relative to the build CWD (the repo root). Listing files
+# explicitly keeps .git/, build/ and conda-dist/ out of the image.
+%files
+    ChemEM                              /opt/chemem-src/ChemEM
+    CMakeLists.txt                      /opt/chemem-src/CMakeLists.txt
+    pyproject.toml                      /opt/chemem-src/pyproject.toml
+    meta.yaml                           /opt/chemem-src/meta.yaml
+    LICENSE.txt                         /opt/chemem-src/LICENSE.txt
+    README.md                           /opt/chemem-src/README.md
+    container/environment-container.yml /opt/chemem-src/environment-container.yml
+
+%post
+    set -eux
+    export MAMBA_ROOT_PREFIX=/opt/conda
+
+    # One env with build toolchain + runtime deps (conda-forge only).
+    micromamba create -y -f /opt/chemem-src/environment-container.yml
+
+    # Compile the C++/pybind11 extensions (docking, grid_maps, ligand_fitting)
+    # and install ChemEM into the env. Mirrors meta.yaml's build script:
+    #   --no-build-isolation -> build deps come from the env (scikit-build-core,
+    #     pybind11, cmake, ninja); --no-deps -> runtime deps are conda-provided.
+    # CMakeLists.txt finds RDKit/Eigen/Boost via $CONDA_PREFIX, which
+    # `micromamba run` sets for us.
+    micromamba run -n chemem python -m pip install /opt/chemem-src \
+        --no-build-isolation --no-deps -vv
+
+    # Strip package tarballs and indexes: the main image-size win.
+    micromamba clean -a -y
+
+%environment
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    # Put the env's bin on PATH so `chemem` / `python` work without activation.
+    export PATH=/opt/conda/envs/chemem/bin:$PATH
+    # The freshly compiled extension modules are not conda-relinked, so make the
+    # env's shared libs (RDKit, OpenMM, OpenMP, ...) discoverable at import time.
+    export LD_LIBRARY_PATH=/opt/conda/envs/chemem/lib:${LD_LIBRARY_PATH:-}
+
+%runscript
+    exec chemem "$@"
+
+%test
+    export PATH=/opt/conda/envs/chemem/bin:$PATH
+    export LD_LIBRARY_PATH=/opt/conda/envs/chemem/lib:${LD_LIBRARY_PATH:-}
+    chemem --help
+    python -c "import openmm; from ChemEM.config import Config; print('runtime imports ok')"
+
+%labels
+    Author  Aaron Sweeney <ucbtasw@ucl.ac.uk>
+    Name    ChemEM2
+    Version 2.0.0
+
+%help
+    ChemEM2 in an Apptainer container (CPU-only).
+
+    Run a job (bind your data dir via --pwd so relative config paths resolve):
+        apptainer run --pwd "$PWD" chemem.sif 7jjo_conf.txt --dock
+
+    Show the CLI:
+        apptainer run chemem.sif --help
+
+    Set CPU budget explicitly under Slurm:
+        apptainer run --pwd "$PWD" chemem.sif conf.txt --refine --ncpu "$SLURM_CPUS_PER_TASK"

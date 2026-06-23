@@ -349,11 +349,44 @@ class EMMap:
     # ----------------------------
     @classmethod
     def from_mrc(cls, filename, resolution=0.0):
-        with mrcfile.open(filename, mode="r") as mrc:
-            data = np.array(mrc.data, copy=True)
-            origin = (float(mrc.header.origin.x), float(mrc.header.origin.y), float(mrc.header.origin.z))
-            apix = mrc.voxel_size
-            apix = (float(apix.x), float(apix.y), float(apix.z))
+        with mrcfile.open(filename, mode="r", permissive=True) as mrc:
+            data = np.asarray(mrc.data)
+
+            mapc = int(getattr(mrc.header, "mapc", 1) or 1)
+            mapr = int(getattr(mrc.header, "mapr", 2) or 2)
+            maps_ = int(getattr(mrc.header, "maps", 3) or 3)
+
+            # mrcfile returns data in file order (section, row, column) whose
+            # physical axes are (maps, mapr, mapc). Reorder to world order
+            # (z, y, x) = physical (3, 2, 1). ChimeraX does this permutation;
+            # mrcfile does not. Identity for the usual mapc/mapr/maps = 1/2/3.
+            phys_to_file = {maps_: 0, mapr: 1, mapc: 2}
+            if set(phys_to_file.keys()) == {1, 2, 3}:
+                order = (phys_to_file[3], phys_to_file[2], phys_to_file[1])
+                if order != (0, 1, 2):
+                    data = np.transpose(data, order)
+            data = np.ascontiguousarray(data)
+
+            # voxel_size is already physical (x, y, z)
+            vs = mrc.voxel_size
+            apix = (float(vs.x), float(vs.y), float(vs.z))
+
+            # Origin: prefer the MRC2000 origin record when non-zero, otherwise
+            # fall back to nstart*apix (matching ChimeraX). nxstart/nystart/nzstart
+            # are in file col/row/section order, so map each to its physical axis
+            # via mapc/mapr/maps.
+            ox, oy, oz = (float(mrc.header.origin.x),
+                          float(mrc.header.origin.y),
+                          float(mrc.header.origin.z))
+            if ox or oy or oz:
+                origin = (ox, oy, oz)
+            else:
+                start_by_phys = {mapc: int(mrc.header.nxstart),
+                                 mapr: int(mrc.header.nystart),
+                                 maps_: int(mrc.header.nzstart)}
+                origin = (start_by_phys.get(1, 0) * apix[0],
+                          start_by_phys.get(2, 0) * apix[1],
+                          start_by_phys.get(3, 0) * apix[2])
         return cls(origin, apix, data, resolution)
 
     @classmethod

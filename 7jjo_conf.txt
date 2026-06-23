@@ -8,5 +8,5 @@ ligand = /Users/aaron.sweeney/Documents/chemem2_build/ChemEM2_feb26/chemem2-dev/
 densmap = /Users/aaron.sweeney/Documents/ChemEM_benchmark/7jjo/7jjo.mrc
 resolution = 3.0  
 
-centroid = (134.087, 133.507, 174.180)output = ./test/test_outputsweeneya
+centroid = (134.087, 133.507, 174.180)output = ./test/test_output
 

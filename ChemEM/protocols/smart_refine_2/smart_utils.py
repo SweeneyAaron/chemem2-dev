@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 import heapq
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, Literal
 
+import numpy as np
 from rdkit import Chem
-from rdkit.Chem import Draw, rdDepictor, rdMolTransforms
+from rdkit.Chem import AllChem, Draw, rdDepictor, rdMolAlign, rdMolTransforms
+from rdkit.Geometry import Point3D
 
 
 BlockRole = Literal[
@@ -70,6 +72,10 @@ class SemanticTorsionStep:
     moved_atom_indices: tuple[int, ...]
     frontier_atom_indices: tuple[int, ...]
     moved_block_ids: tuple[int, ...] = ()
+    # When True the step's axis is a RING bond (exocyclic ring-branch torsion):
+    # it must be applied by rotating only moved_atom_indices about the axis (not
+    # via rdMolTransforms.SetDihedralDeg, which is undefined for a ring bond).
+    is_exo: bool = False
 
     @property
     def axis(self) -> tuple[int, int]:
@@ -310,11 +316,71 @@ def build_semantic_anchor_blocks(
     )
 
 
+def _make_exo_step(exo: "ExoTorsion", order: int = -1) -> SemanticTorsionStep:
+    """Build a walk step that swings an exocyclic substituent about its ring bond.
+    moved/frontier are the whole downstream branch (so the swing is scored on the
+    atoms it actually moves) and ``is_exo`` flags the ring-bond application path."""
+    downstream = tuple(int(a) for a in exo.downstream_atoms)
+    tor = BlockTorsion(
+        order=order,
+        dihedral=tuple(int(x) for x in exo.torsion),
+        axis=(int(exo.torsion[1]), int(exo.torsion[2])),  # ring bond j-k
+        bond_index=-1,
+        moved_atom_indices=downstream,
+        fixed_atom_indices=(),
+        moved_block_ids=(),
+    )
+    return SemanticTorsionStep(
+        order=order,
+        owner_block_id=-1,
+        torsion=tor,
+        moved_atom_indices=downstream,
+        frontier_atom_indices=downstream,
+        moved_block_ids=(),
+        is_exo=True,
+    )
+
+
+def _seed_exo_steps(
+    walks: list[SemanticTorsionWalk], exo_torsions: Iterable["ExoTorsion"]
+) -> list[SemanticTorsionWalk]:
+    """Prepend an exo step to the walk that already moves its branch, so the beam
+    search explores (ring-bond swing -> downstream torsions) jointly. One exo step
+    per walk (bounds Q-score cost); the swung branch is the walk whose steps move
+    the exo's first branch atom ``l``."""
+    walks = list(walks)
+    seeded: set[int] = set()
+    for exo in exo_torsions:
+        # Match the walk that rebuilds this branch. The normal torsions can't move
+        # the first branch atom l (it sits on the k-l axis), so l never appears in
+        # a walk's moved set; instead match the walk whose moved atoms fall ENTIRELY
+        # within this exo's downstream branch (i.e. it operates on l's substituent).
+        downstream = set(int(a) for a in exo.downstream_atoms)
+        for idx, w in enumerate(walks):
+            if idx in seeded:
+                continue
+            moved_union = {a for step in w.steps for a in step.moved_atom_indices}
+            if moved_union and moved_union <= downstream:
+                exo_step = _make_exo_step(exo)
+                new_frontier = tuple(
+                    sorted(set(w.frontier_atom_indices) | set(exo.downstream_atoms))
+                )
+                walks[idx] = replace(
+                    w,
+                    steps=(exo_step,) + w.steps,
+                    frontier_atom_indices=new_frontier,
+                )
+                seeded.add(idx)
+                break
+    return walks
+
+
 def build_directional_torsion_walks(
     mol: Chem.Mol,
     blocks: tuple[SemanticBlock, ...],
     root_block_id: int,
     target_block_ids: Iterable[int] | None = None,
+    exo_torsions: Iterable["ExoTorsion"] | None = None,
 ) -> tuple[SemanticTorsionWalk, ...]:
     """
     Build one-way torsion walks expanding out from a trusted semantic block.
@@ -480,6 +546,9 @@ def build_directional_torsion_walks(
             walk.target_block_ids,
         )
     )
+
+    if exo_torsions:
+        walks = _seed_exo_steps(walks, exo_torsions)
 
     return tuple(
         SemanticTorsionWalk(
@@ -1335,6 +1404,216 @@ def _heavy_adjacency(mol: Chem.Mol) -> tuple[set[int], dict[int, set[int]]]:
 def _ring_systems(mol: Chem.Mol) -> list[set[int]]:
     rings = [set(ring) for ring in mol.GetRingInfo().AtomRings()]
     return _merge_overlapping_sets(rings)
+
+
+def aliphatic_ring_systems(mol: Chem.Mol, min_ring_size: int = 4) -> list[tuple[int, ...]]:
+    """Return atom-index groups for conformationally flexible aliphatic rings.
+
+    A ring is eligible when it has at least ``min_ring_size`` atoms and contains
+    no aromatic bonds and no double bonds (i.e. it is a saturated ring that can
+    pucker: chair/boat/twist). Eligible fused rings are merged into ring systems.
+    Aromatic, conjugated, and tiny (3-membered) rings are excluded because they
+    are effectively rigid. Mirrors the ring filter used by
+    ``find_best_ring_bond_to_break`` in ``ChemEM/tools/ligand.py``.
+    """
+    ring_info = mol.GetRingInfo()
+    flexible: list[set[int]] = []
+    for ring_atoms, ring_bonds in zip(ring_info.AtomRings(), ring_info.BondRings()):
+        if len(ring_atoms) < int(min_ring_size):
+            continue
+        bonds = [mol.GetBondWithIdx(int(b)) for b in ring_bonds]
+        if any(bond.GetIsAromatic() for bond in bonds):
+            continue
+        if any(bond.GetBondType() == Chem.BondType.DOUBLE for bond in bonds):
+            continue
+        flexible.append(set(int(a) for a in ring_atoms))
+
+    return [tuple(sorted(system)) for system in _merge_overlapping_sets(flexible)]
+
+
+@dataclass(frozen=True)
+class ExoTorsion:
+    """An exocyclic ring-branch torsion.
+
+    The dihedral is (i, j, k, l) where the rotation axis is the RING bond j-k,
+    k is the ring atom carrying the exocyclic substituent, l is the first heavy
+    atom of that substituent, and i is a ring atom two positions away (giving a
+    well-defined dihedral reference). ``downstream_atoms`` are the heavy mol
+    indices on the l-side of the k-l bond (INCLUDING l, EXCLUDING the ring) —
+    these are the atoms that move when the substituent is swung about j-k.
+
+    Rotating about a ring bond cannot be done with ``rdMolTransforms.SetDihedralDeg``
+    (the moved set is ambiguous for a ring bond), so the walker rotates
+    ``downstream_atoms`` directly about the j-k axis. This is the degree of
+    freedom that lets the FIRST branch atom reach its density — the normal
+    ring->branch torsion uses the k-l bond as its axis, on which l sits and
+    therefore cannot move.
+    """
+
+    index: int
+    torsion: tuple[int, int, int, int]  # (i, j, k, l); axis = j-k (ring bond)
+    ring_atoms: tuple[int, ...]
+    downstream_atoms: tuple[int, ...]
+    ring_size: int
+
+    @property
+    def axis(self) -> tuple[int, int]:
+        return (self.torsion[1], self.torsion[2])
+
+
+def extract_exo_torsions(mol: Chem.Mol, min_downstream: int = 3) -> list[ExoTorsion]:
+    """Enumerate exocyclic ring-branch torsions for non-aromatic rings.
+
+    For each ring atom ``k`` bearing an exocyclic heavy neighbour ``l``, emit two
+    torsion quads — one using each adjacent ring bond as the rotation axis
+    (left: ``(ring[idx-2], ring[idx-1], k, l)``; right:
+    ``(ring[idx+2], ring[idx+1], k, l)``) — so the substituent can be swung from
+    either side of the ring. ``downstream_atoms`` (heavy, including ``l``,
+    excluding the ring) are computed with the heavy-only ``_component_after_cut``
+    so they match SmartRefine2's heavy-atom row space. Torsions with
+    ``<= min_downstream`` downstream heavy atoms are dropped (too small to matter).
+
+    Ported from ``extract_ring_branch_torsions`` in the ChemEM_2_branch docking
+    code, adapted to heavy-atom indices.
+    """
+    heavy_atoms, adj = _heavy_adjacency(mol)
+    torsions: list[ExoTorsion] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    index = 0
+
+    for ring in mol.GetRingInfo().AtomRings():
+        ring = list(ring)
+        n = len(ring)
+        if n < 3:
+            continue
+        if any(mol.GetAtomWithIdx(int(a)).GetIsAromatic() for a in ring):
+            continue
+        ring_set = set(int(a) for a in ring)
+
+        for idx, k in enumerate(ring):
+            k = int(k)
+            if k not in heavy_atoms:
+                continue
+            # Exocyclic heavy neighbours (adj is heavy-only by construction).
+            exo_neighbours = [nbr for nbr in adj[k] if nbr not in ring_set]
+            if not exo_neighbours:
+                continue
+
+            left_i = int(ring[(idx - 2) % n])
+            left_j = int(ring[(idx - 1) % n])
+            right_j = int(ring[(idx + 1) % n])
+            right_i = int(ring[(idx + 2) % n])
+
+            for l in exo_neighbours:
+                downstream = _component_after_cut(
+                    adj=adj, start=l, cut=(k, l), allowed=heavy_atoms
+                )
+                if len(downstream) <= int(min_downstream):
+                    continue
+                downstream_t = tuple(sorted(int(a) for a in downstream))
+                for tor in ((left_i, left_j, k, l), (right_i, right_j, k, l)):
+                    if tor in seen:
+                        continue
+                    seen.add(tor)
+                    torsions.append(
+                        ExoTorsion(
+                            index=index,
+                            torsion=tuple(int(x) for x in tor),
+                            ring_atoms=tuple(int(a) for a in ring),
+                            downstream_atoms=downstream_t,
+                            ring_size=n,
+                        )
+                    )
+                    index += 1
+
+    return torsions
+
+
+def generate_ring_conformers(
+    mol: Chem.Mol,
+    ring_atom_indices: Iterable[int],
+    *,
+    n_confs: int = 8,
+    min_ring_rmsd: float = 0.3,
+    conf_id: int = 0,
+) -> list[dict[int, tuple[float, float, float]]]:
+    """Generate alternative *puckers* of one aliphatic ring system.
+
+    A pool of unconstrained 3D conformers is embedded (ETKDGv3), and each is
+    superposed onto the input pose **by the ring atoms themselves**. Superposing
+    on the ring isolates the pucker change from rigid-body placement and from
+    flexible-linker rotation (both of which SmartRefine2 already handles via
+    fit_in_map and the torsion branch walker), so the returned ring sits at the
+    input ring's location/orientation but with a different pucker.
+
+    Returns a list of ``{ring_atom_idx: (x, y, z)}`` mappings (Angstrom), one per
+    distinct pucker, deduplicated by ring-atom RMSD and excluding puckers within
+    ``min_ring_rmsd`` of the input ring. Returns ``[]`` if the ring is too small
+    or embedding fails — callers treat that as "no ring move available".
+    """
+    ring_ids = sorted({int(i) for i in ring_atom_indices})
+    if len(ring_ids) < 4:
+        return []
+    try:
+        base_conf = mol.GetConformer(conf_id)
+    except Exception:
+        return []
+
+    base_ring = np.array(
+        [list(base_conf.GetAtomPosition(i)) for i in ring_ids], dtype=float
+    )
+    ring_map = [(i, i) for i in ring_ids]
+
+    work = Chem.Mol(mol)
+    try:
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 0xC0FFEE
+        params.pruneRmsThresh = 0.1
+        params.numThreads = 0
+        pool = max(int(n_confs) * 6, 24)
+        conf_ids = list(
+            AllChem.EmbedMultipleConfs(work, numConfs=pool, params=params)
+        )
+    except Exception:
+        return []
+
+    kept_coords: list[np.ndarray] = []
+    kept: list[dict[int, tuple[float, float, float]]] = []
+    for cid in conf_ids:
+        if len(kept) >= int(n_confs):
+            break
+        try:
+            rdMolAlign.AlignMol(
+                work, mol, prbCid=int(cid), refCid=int(conf_id), atomMap=ring_map
+            )
+        except Exception:
+            continue
+        work_conf = work.GetConformer(int(cid))
+        ring_coords = np.array(
+            [list(work_conf.GetAtomPosition(i)) for i in ring_ids], dtype=float
+        )
+        # Keep only genuinely different puckers, deduplicated against each other.
+        if _ring_rmsd(ring_coords, base_ring) < float(min_ring_rmsd):
+            continue
+        if any(
+            _ring_rmsd(ring_coords, prev) < float(min_ring_rmsd)
+            for prev in kept_coords
+        ):
+            continue
+        kept_coords.append(ring_coords)
+        kept.append(
+            {
+                idx: (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+                for idx, xyz in zip(ring_ids, ring_coords)
+            }
+        )
+
+    return kept
+
+
+def _ring_rmsd(a: np.ndarray, b: np.ndarray) -> float:
+    diff = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+    return float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
 
 
 def _merge_overlapping_sets(items: list[set[int]]) -> list[set[int]]:

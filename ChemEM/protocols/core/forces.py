@@ -194,8 +194,38 @@ class ForceBuilder:
         for i in atom_indices:
             x0, y0, z0 = map(float, ref_positions_nm[int(i)])
             f.addParticle(int(i), [x0 * unit.nanometer, y0 * unit.nanometer, z0 * unit.nanometer])
-        
+
         return f
+
+    @staticmethod
+    def create_weighted_positional_pin(atom_indices, ref_positions_nm, k_name="k_wpin"):
+        """Positional pin with a per-particle on/off weight ``w``.
+
+        Energy = k * w * ((x-x0)^2 + (y-y0)^2 + (z-z0)^2). All ``atom_indices`` are
+        added with ``w=0`` (inert); the caller toggles which atoms are pinned by
+        setting ``w=1`` (and refreshing ``x0,y0,z0``) via ``setParticleParameters``
+        + ``updateParametersInContext``, then raising the global ``k`` parameter.
+        This lets a single force pin an arbitrary, changing subset without
+        add/remove churn. Returns ``(force, {atom_index: particle_slot})`` so the
+        caller can address particles by atom index."""
+        expr = f"{k_name}*w*((x-x0)^2 + (y-y0)^2 + (z-z0)^2)"
+        f = CustomExternalForce(expr)
+        f.addGlobalParameter(k_name, 0.0 * unit.kilojoule_per_mole / unit.nanometer**2)
+        f.addPerParticleParameter("x0")
+        f.addPerParticleParameter("y0")
+        f.addPerParticleParameter("z0")
+        f.addPerParticleParameter("w")
+
+        slot_by_atom = {}
+        for i in atom_indices:
+            x0, y0, z0 = map(float, ref_positions_nm[int(i)])
+            slot = f.addParticle(
+                int(i),
+                [x0 * unit.nanometer, y0 * unit.nanometer, z0 * unit.nanometer, 0.0],
+            )
+            slot_by_atom[int(i)] = int(slot)
+
+        return f, slot_by_atom
 
     @staticmethod
     def create_distance_restraint(restraints, k_name="k_dist"):
