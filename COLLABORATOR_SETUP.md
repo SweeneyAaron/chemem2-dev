@@ -1,8 +1,8 @@
 # ChemEM-X collaborator setup (macOS Apple Silicon)
 
-This guide gets a collaborator from zero to a working **ChemEM-X ChimeraX
-plugin** on an Apple-Silicon Mac. It covers the backend, the plugin, and how the
-two connect.
+This guide gets you from zero to a working **ChemEM-X ChimeraX plugin** on an
+Apple-Silicon Mac. It covers the backend, the plugin, and how the two connect.
+No GitHub account or `git` is required — you download the code as ZIP files.
 
 ## How the pieces fit together
 
@@ -24,13 +24,29 @@ at it (usually automatic).
   ```
 - **ChimeraX ≥ 1.1** — https://www.cgl.ucsf.edu/chimerax/download.html
 
-## 1. Install the backend
+## 1. Download the code
 
-Clone the repo and run the installer from its root:
+You don't need a GitHub account — download each branch as a ZIP from the browser
+(both repos are public). Click each link, then unzip:
+
+- **Backend** (`chemem2-dev`, branch `feature/mapq_score`):
+  https://github.com/SweeneyAaron/chemem2-dev/archive/refs/heads/feature/mapq_score.zip
+- **Plugin** (`ChemEM-X`, branch `folder-branch`):
+  https://github.com/SweeneyAaron/ChemEM-X/archive/refs/heads/folder-branch.zip
+
+(Or, on each repo page: pick the branch in the dropdown, then **Code → Download
+ZIP**.) Unzipping gives two folders — the examples below assume they're in
+`~/Downloads`:
+
+- `chemem2-dev-feature-mapq_score/` — the backend
+- `ChemEM-X-folder-branch/` — the plugin (the bundle is inside `ChemEM-X_v2/`)
+
+## 2. Install the backend
+
+Open **Terminal**, go into the backend folder, and run the installer:
 
 ```bash
-git clone https://github.com/SweeneyAaron/chemem2-dev.git
-cd chemem2-dev
+cd ~/Downloads/chemem2-dev-feature-mapq_score
 ./install_macos_arm64.sh
 ```
 
@@ -59,20 +75,20 @@ Verify:
 mamba run -n chemem chemem --help
 ```
 
-## 2. Install the ChimeraX plugin
+## 3. Install the ChimeraX plugin
 
-Get the plugin source (the `ChemEM-X_v2` folder containing `bundle_info.xml`),
-then from **inside ChimeraX** run:
+The plugin is the `ChemEM-X_v2` folder inside the unzipped `ChemEM-X-folder-branch`
+folder (it contains `bundle_info.xml`). From **inside ChimeraX** run:
 
 ```
-devel install /full/path/to/ChemEM-X_v2
+devel install ~/Downloads/ChemEM-X-folder-branch/ChemEM-X_v2
 ```
 
-This builds and installs the bundle and pulls its dependency
-(`scikit-spatial==7.0`) into ChimeraX's Python. Restart ChimeraX, then open the
-tool from **Tools → Structure Prediction → ChemEM**.
+(Adjust the path to wherever you unzipped it.) This builds and installs the
+bundle and pulls its dependency (`scikit-spatial==7.0`) into ChimeraX's Python.
+Restart ChimeraX, then open the tool from **Tools → Structure Prediction → ChemEM**.
 
-## 3. Connect the plugin to the backend
+## 4. Connect the plugin to the backend
 
 The plugin auto-discovers the `chemem` env in most cases. To make it reliable
 regardless of where conda lives, **launch ChimeraX from the activated env**:
@@ -89,7 +105,7 @@ If the backend still isn't listed, select it manually in the plugin's backend
 selector: paste the executable path that the installer printed, e.g.
 `…/envs/chemem/bin/chemem`.
 
-## 4. Smoke test end-to-end
+## 5. Smoke test end-to-end
 
 In ChimeraX with the ChemEM tool open:
 1. Load a small protein and a ligand.
@@ -99,7 +115,7 @@ In ChimeraX with the ChemEM tool open:
 
 ## Troubleshooting
 
-**The plugin can't find the backend.** See step 3 — launch ChimeraX from the
+**The plugin can't find the backend.** See step 4 — launch ChimeraX from the
 activated env, or paste the `…/envs/chemem/bin/chemem` path into the backend
 selector. The plugin only auto-scans `CONDA_PREFIX`, conda/mamba on `PATH`, and a
 few default home-directory conda roots, so a Homebrew/`/opt`/custom install needs
