@@ -59,15 +59,23 @@ Auto-apply now requires:
   If set, `ion_template_search` will execute IonFixer in the same run when confidence gating passes.
 
 - `--its-confidence-thresh <float>`
-  Default: `0.65`
+  Default: `0.45`
   Minimum confidence required before auto-populating IonFixer options (`atom_specs`, and optionally `ion_type`/`coordination_geometry`).
 
 - `--its-max-entry-candidates <int>`
-  Default: `200`
+  Default: `1000`
   Maximum number of RCSB search hits retained before deeper evaluation.
 
+- `--its-homolog-identity-min <float>`
+  Default: `0.35`
+  Minimum sequence identity for a PDB chain to qualify as a homolog of the target.
+
+- `--its-max-homolog-entries <int>`
+  Default: `1000`
+  Maximum homolog polymer-entity hits retained when pre-filtering chemical-search candidates.
+
 - `--its-max-templates <int>`
-  Default: `25`
+  Default: `100`
   Maximum number of candidate templates evaluated in detail.
 
 - `--its-seq-identity-min <float>`
@@ -98,7 +106,8 @@ Auto-apply now requires:
 
 ## `ion_fixer` Flags (Relevant Handoff Target)
 
-- `--ion-type <str>`
+- `--ion-type <str>` (optional when `--ion-spec` is given — see below)
+- `--ion-spec <spec>`
 - `--coordination-geometry <str>` (default: `Octahedral`)
 - `--atom-spec <spec>` (repeatable)
 - `--exclude-spec <spec>` (repeatable)
@@ -108,6 +117,48 @@ Auto-apply now requires:
 - `--k_ang <float>`
 - `--distance_fraction <float>` (default: `0.9`)
 - `--n-cycles <int>` (default: `60`)
+
+## Refining an Ion Already in the Structure (`--ion-spec`)
+
+By default IonFixer *places* a new ion: it derives a position from the `--atom-spec`
+coordinating atoms, builds a parameterised ion residue in chain `Z`, and anneals the
+coordination geometry around it.
+
+`--ion-spec` switches to refining an ion that is **already present in the input structure** —
+a deposited metal, or one placed by an earlier run. No new ion is created; the supplied ion
+anchors the site and only the coordination distances and angles are refined.
+
+```bash
+chemem <config_file> --ion-fixer \
+  --ion-spec A:ZN:301:ZN \
+  --coordination-geometry Tetrahedral \
+  --atom-spec A:HIS:94:NE2 \
+  --atom-spec A:HIS:96:NE2 \
+  --atom-spec A:HIS:119:NE2
+```
+
+The spec uses the same 4-part protein form as `--atom-spec`
+(`<chain>:<resname>:<resnum>:<atomname>`), with the chain id and residue number as they appear
+in the input file. It must name a monatomic ion residue in the protein; ligand (`LIG:...`)
+specs are rejected.
+
+Behaviour in this mode:
+
+- **Ion type is inferred** from the named residue, so `--ion-type` is optional. If you pass it
+  anyway it must agree with the ion in the structure, otherwise the run aborts.
+- **The placement optimiser never runs.** The deposited coordinates are the starting point.
+- **The ion stays mobile** — it relaxes under the coordination distance/angle restraints and
+  the map term — but it is never teleported to a recomputed position between cycles, which is
+  what the placement path does during its distance-only stage.
+- **Coordinating atoms are still explicit.** Supply them with `--atom-spec` as usual; they are
+  not auto-detected from the ion's neighbourhood. Dummy waters still complete the shell up to
+  the coordination number, and are still restraint-only scaffolding that is never written out.
+- **Outputs are updated in place.** The refined ion keeps its original chain and residue
+  number in `refined_protein_with_ligands.pdb` / `refined_protein_no_ligands.pdb`; it is not
+  duplicated into chain `Z`.
+
+`--coordination-geometry` still applies and still defaults to `Octahedral` — it cannot be
+inferred from the ion alone, so set it explicitly for non-octahedral sites.
 
 ## Recommended Run Patterns
 

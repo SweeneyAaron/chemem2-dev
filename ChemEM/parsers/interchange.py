@@ -11,6 +11,7 @@ import parmed
 
 from openmm import app
 from ChemEM.messages import Messages
+from .remodel.topology_ops import _WATER
 
 
 
@@ -58,13 +59,27 @@ def modeller_to_parmed(modeller, forcefield):
         modeller.topology, system, xyz=modeller.positions
     )
 
-    n_missing = sum(b.type is None for b in receptor_structure.bonds)
-    
-    if n_missing:
+    # Water O-H bonds are legitimately untyped here and must NOT trip the guard.
+    # createSystem defaults to rigidWater=True, which replaces them with constraints rather
+    # than HarmonicBondForce terms, so ParmEd finds no type to attach. That is precisely what
+    # ensure_water_geometry_types() patches -- but it runs on the structure this function
+    # returns, so raising here made it unreachable for every input containing water, i.e. for
+    # exactly the inputs it exists to fix. The guard's real job is catching duplicate or
+    # mismatched bonds from a double createStandardBonds(), and it still does that for
+    # everything else.
+    untyped = [b for b in receptor_structure.bonds
+               if b.type is None
+               and not (b.atom1.residue.name.upper() in _WATER
+                        and b.atom2.residue.name.upper() in _WATER)]
+
+    if untyped:
+        offenders = sorted({f"{b.atom1.residue.name}{b.atom1.residue.number}"
+                            for b in untyped})
         raise RuntimeError(
-            f"ParmEd conversion left {n_missing} bonds untyped. "
+            f"ParmEd conversion left {len(untyped)} non-water bonds untyped "
+            f"(residues: {', '.join(offenders[:10])}). "
             "This usually indicates duplicate or mismatched bonds in the OpenMM topology."
         )
-         
-        
+
+
     return receptor_structure, system

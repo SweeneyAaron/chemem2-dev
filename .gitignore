@@ -31,3 +31,47 @@ cmake-build-*/
 test/
 7jjo_conf.txt
 Binding_site_prediction/
+
+# --- research / benchmark corpora ---------------------------------------
+# Large regenerable result trees. ChemEM/benchmark alone is 433 MB / ~16.7k JSON files.
+ChemEM/benchmark/
+geodock/
+ion_template_search/
+
+# --- separate sub-projects (own repos / not part of the ChemEM package) ---
+chemem-mcp/
+container/
+
+# --- conda build + local channel ----------------------------------------
+# conda-dist/osx-arm64/*.conda is a 47 MB built package; rebuildable from meta.yaml.
+conda-dist/
+.conda-bld/
+conda-bld/
+*.conda
+*.tar.bz2
+
+# --- coverage / test caches ----------------------------------------------
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# --- local scratch runs and outputs --------------------------------------
+run_fragment_dock.py
+run_near_threshold_reruns.py
+run_near_threshold_reruns.sh
+run_rna_slr
+*_conf.txt
+rmsds.csv
+**/rmsds.csv
+*.log
+*.sbatch
+runs/
+out_*/
+
+# --- editor / OS ---------------------------------------------------------
+*.swp
+*~

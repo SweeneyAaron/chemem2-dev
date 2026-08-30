@@ -384,12 +384,24 @@ def mmgbsa_single_frame(
     protein,
     pose_idx: int = 0,
     resource_owner=None,
+    minimise_ligand: bool = False,
+    minimise_iters: int = 300,
+    minimise_cutoff_A: float = 12.0,
+    reuse_cache: bool = False,
 ):
     """Single-frame MMGBSA on one pose. Returns PoseScore or None on failure.
 
     Wraps mmgbsa_score.score_single_pose(), which already builds a
     one-frame mdtraj trajectory and evaluates OpenMM Context energies
     without integrating — no MD sampling.
+
+    minimise_ligand (opt-in, default off; no change for existing callers): local
+    energy-minimise the ligand with the receptor frozen before the energy eval, so raw
+    docked poses give clean deltaG and refined/docked poses share the same footing.
+
+    reuse_cache (opt-in, default off): reuse per-case OpenMM systems + Contexts across
+    poses (keyed on ligand identity via resource_owner._mmgbsa_cache) instead of rebuilding
+    them every pose. Bit-identical energies; big speedup for batch scoring.
     """
     try:
         return score_single_pose(
@@ -398,6 +410,10 @@ def mmgbsa_single_frame(
             protein,
             pose_idx,
             resource_owner=resource_owner,
+            minimise_ligand=minimise_ligand,
+            minimise_iters=minimise_iters,
+            minimise_cutoff_A=minimise_cutoff_A,
+            reuse_cache=reuse_cache,
         )
     except Exception:
         return None

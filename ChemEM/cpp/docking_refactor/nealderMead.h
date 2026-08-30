@@ -13,6 +13,10 @@ public:
         double best_value;
         int    iterations;
         bool   converged;
+        // Objective evaluations consumed, including the dim+1 simplex initialisation.
+        // Mirrors LbfgsResult::nfev so the two minimisers can be compared directly
+        // under CHEMEM_DOCK_PROFILE=1. Counting only; no effect on the search.
+        int    nfev = 0;
     };
 
     NelderMeadOptimizer(size_t dimension,

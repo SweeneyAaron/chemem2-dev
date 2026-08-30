@@ -48,9 +48,23 @@ from ChemEM.tools.density import extract_subvolume_from_grid
 
 from ChemEM.protocols.core.forces import ForceBuilder
 from ChemEM.protocols.refine.pose_minimiser import ChemEMSimulationSetup
+from ChemEM.protocols.core.simulation import resolve_global_k, resolve_implicit_solvent
+from openmm import app
 
 
 _BACKBONE_NAMES = {"N", "CA", "C", "O", "OXT"}
+
+
+def _resolve_lr_global_k(opts):
+    """Map-restraint weight for lining refinement.
+
+    Precedence: the protocol-specific --lr-global-k, then the shared --global-k,
+    then 150.0. Both flags default to None so an unset pair keeps the historical value.
+    """
+    lr_value = getattr(opts, "lr_global_k", None)
+    if lr_value is not None:
+        return float(lr_value)
+    return resolve_global_k(opts, 150.0)
 
 
 def _atom_key(atom):
@@ -470,7 +484,8 @@ class LiningRefine:
             platform_name=platform_name,
             restrain_side_chains=False,
             protein_restraint="none",
-            global_k=float(opts.lr_global_k),
+            global_k=_resolve_lr_global_k(opts),
+            solvent=resolve_implicit_solvent(opts, app.GBn2),
             resource_owner=self.system,
         )
 
@@ -628,7 +643,7 @@ class LiningRefine:
             lines.append(f"  Flagged RMSD:         {stats['rmsd_A']:.3f} Å")
             lines.append(f"  Flagged max disp:     {stats['max_disp_A']:.3f} Å")
             lines.append(f"  Final energy:         {stats['final_energy_kcal_mol']:.2f} kcal/mol")
-            lines.append(f"  Global k (density):   {opts.lr_global_k}")
+            lines.append(f"  Global k (density):   {_resolve_lr_global_k(opts)}")
             lines.append(f"  Backbone pin k:       {opts.lr_backbone_k}")
             lines.append(f"  Pocket repulsion k:   {opts.lr_repel_k}")
 

@@ -101,142 +101,17 @@ def sse_groups_from_parmed(
 
 
 
-def write_residues_to_pdb(bounding_residues, positions, pdb_path=None, write=False):
-    
-   
-    selected_atoms = []
-    for res in bounding_residues:
-       for atom in res.atoms:  # iterate atoms in the ParmEd Residue
-           selected_atoms.append(atom)
-   
-    # Map ParmEd Atom objects to their index in the selected list (for RDKit indexing)
-    atom_index = {atom: idx for idx, atom in enumerate(selected_atoms)}
-    
-    coords = []
-    for atom in selected_atoms:
-        # positions may be an OpenMM Quantity (nm) or a plain numpy array (Angstrom).
-        # If it’s a Quantity, .x/.y/.z are in nanometers; scale by 10 to get Angstroms.
-        pos = positions[atom.idx]
-        coords.append((pos.x, pos.y, pos.z))
-    
-    
-    mol = Chem.RWMol()
-    for atom in selected_atoms:
-        atomic_num = atom.atomic_number if hasattr(atom, 'atomic_number') else Chem.GetPeriodicTable().GetAtomicNumber(atom.element_name)
-        rd_atom = Chem.Atom(atomic_num)
-        rd_atom.SetProp("atomName", atom.name)
-        rd_atom.SetProp("resName", atom.residue.name)
-        rd_atom.SetProp("resId", str(getattr(atom.residue, 'number', atom.residue.idx + 1 if hasattr(atom.residue, 'idx') else 0)))
-        mol_idx = mol.AddAtom(rd_atom)
-        
-    
-    for atom in selected_atoms:
-        for partner in atom.bond_partners: 
-            if partner in atom_index:
-                i = atom_index[atom]
-                j = atom_index[partner]
-                #so bonds are only written once
-                if i < j:
-                     # default bond 
-                    a_name, b_name = atom.name, partner.name
-                    a_resname, b_resname = atom.residue.name, partner.residue.name
-                    
-                    #intra residue bonds 
-                    if atom.residue is partner.residue:
-                        resname = a_resname 
-                        bond_type = INTRA_RESIDUE_BOND_DATA(a_name, b_name, resname)
-                    else:
-                        bond_type = INTER_RESIDUE_BOND_DATA(a_name, b_name)
-                    
-                    mol.AddBond(i, j, bond_type)
-                    
-                    if bond_type == Chem.BondType.AROMATIC:
-                        mol.GetAtomWithIdx(i).SetIsAromatic(True)
-                        mol.GetAtomWithIdx(j).SetIsAromatic(True)
-                        mol.GetBondBetweenAtoms(i, j).SetIsAromatic(True)
-                
-    
-    new_mol = mol.GetMol()
-    conf = Chem.Conformer(new_mol.GetNumAtoms())
-    
-    for atom, (x, y, z) in zip(selected_atoms, coords):
-        conf.SetAtomPosition(atom_index[atom], (x, y, z))
-    new_mol.AddConformer(conf, assignId=True)
-    
-    #    LYS:  NZ → +1
-    #    ARG:  NE → +1    (guanidinium protonation simplified to NE)
-    #    ASP:  OD2 → –1   (OD2 is the single‐bonded oxygen in our template)
-    #    GLU:  OE2 → –1   (OE2 is the single‐bonded oxygen in our template)
-    #    HIS:  ND1 → +1   (choose ND1 to represent the protonated imidazolium)
-    #
-    #    After this, N or O atoms that carry a formal charge will have their implicit H‐count
-    #    and valence set correctly when we update the property cache.
-    
-    for atom in selected_atoms:
-        rd_idx = atom_index[atom]
-        rd_atom = new_mol.GetAtomWithIdx(rd_idx)
-        resname = atom.residue.name
-        aname = atom.name
-        z = atom.atomic_number
-        # ── 6.1 Lysine NZ → +1 ──
-        if resname == "LYS" and aname == "NZ":
-            rd_atom.SetFormalCharge(1)
-            continue
-        
-        # ── 6.2 Arginine NE → +1 ──
-        if resname == "ARG" and aname == "NH1":
-            rd_atom.SetFormalCharge(1)
-            continue
-        
-        # ── 6.3 Aspartate OD2 → −1 ──
-        if resname == "ASP" and aname == "OD2":
-            rd_atom.SetFormalCharge(-1)
-            continue
-        
-        # ── 6.4 Glutamate OE2 → −1 ──
-        if resname == "GLU" and aname == "OE2":
-            rd_atom.SetFormalCharge(-1)
-            continue
-        
-        # ── 6.5 N‐terminus detection: backbone N with exactly one heavy neighbor → +1 ──
-        if z == 7 and aname == "N":
-            # Count heavy neighbors in ParmEd (atomic_number != 1)
-            heavy_neighbors = sum(1 for p in atom.bond_partners if p.atomic_number != 1)
-            if heavy_neighbors == 1:
-                rd_atom.SetFormalCharge(1)
-            continue
-        
-        # ── 6.6 C‐terminus detection: OXT with no H neighbors → −1 ──
-        if z == 8 and aname == "OXT":
-            # Count hydrogen neighbors (atomic_number == 1)
-            h_neighbors = sum(1 for p in atom.bond_partners if p.atomic_number == 1)
-            if h_neighbors == 0:
-                rd_atom.SetFormalCharge(-1)
-            continue
-        
-        # ── 6.7 Histidine protonation by explicit H count → +1 if ≥2 Hs ──
-        if resname == "HIS" and z == 7:
-            h_neighbors = sum(1 for p in atom.bond_partners if p.atomic_number == 1)
-            if h_neighbors >= 2:
-                rd_atom.SetFormalCharge(1)
-            # (If h_neighbors == 1, that’s a neutral tautomer; if 0, no H = unusual; both leave charge=0)
-            continue
-   
-    
-    #new_mol.UpdatePropertyCache(strict=False)
-    #Chem.SanitizeMol(new_mol)
-    
-    try:
-        Chem.SanitizeMol(new_mol)
-    except MolSanitizeException as e:
-        print(f"RDKit sanitization failed: {e}")
-    
-    new_mol = Chem.RemoveHs(new_mol)
-    
-    if write and (pdb_path is not None):
-        Chem.MolToPDBFile(new_mol, pdb_path)
-    
-    return new_mol
+# Re-exported from ChemEM.tools.biomolecule rather than duplicated. This module
+# used to carry its own byte-identical copy of both functions; keeping two
+# implementations of the mol the ECHO precompute is built from is how they drift
+# apart, and the hydrogen-reference contract below depends on the two staying in
+# step. Nothing in-tree calls this copy -- only get_role_int and
+# find_atoms_outside_ligand are imported from here -- so this is purely to stop a
+# future caller picking up a stale variant.
+from ChemEM.tools.biomolecule import (  # noqa: E402  (re-export)
+    write_residues_to_pdb,
+    get_protein_hydrogen_reference,
+)
 
 def select_atoms(structure, indices=None, residues=None, include="heavy", exclude_indices=None):
     """
@@ -422,18 +297,6 @@ def compute_protein_ring_types(residues, protein_positions, tol=1e-8):
                 indices.append(np.array(heavy_idxs, dtype=np.int32))
                 
     return rings, coords, indices
-
-
-def get_protein_hydrogen_reference(mol):
-    hydrogen_ref = []
-    molHs = Chem.AddHs(mol,addCoords=True)
-    positions = molHs.GetConformer().GetPositions()
-    for atom in molHs.GetAtoms():
-        if atom.GetSymbol() != 'H':
-            nei_Hs = [i.GetIdx() for i in atom.GetNeighbors() if i.GetSymbol() == 'H']
-            nei_Hs = [positions[i] for i in nei_Hs]
-            hydrogen_ref.append( nei_Hs )
-    return hydrogen_ref
 
 
 def compute_charges(protein_structure, protein_system, collapse_hydrogens=True):

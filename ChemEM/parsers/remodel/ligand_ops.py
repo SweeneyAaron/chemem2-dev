@@ -35,27 +35,43 @@ def set_ligand_rings(mol):
         )
 
 def transfer_mol_coords(ref_mol, new_mol):
-    
+    """Copy ref_mol's coordinates onto new_mol via a substructure match.
+
+    new_mol does not need a conformer: every matched position is overwritten
+    here, so an empty one is allocated rather than requiring the caller to
+    embed first (ETKDG can fail on large flexible ligands, and the embedded
+    coordinates would be discarded anyway).
+
+    Returns None if the coordinates can't be transferred faithfully, letting
+    callers fall back rather than propagate a half-populated conformer.
+    """
+
+    if not ref_mol.GetNumConformers():
+        return None
+
     match = new_mol.GetSubstructMatch(ref_mol)
     if not match:
         return None
-    
-    #if mol.GetNumConformers()
-    
+
+    # GetSubstructMatch always covers the whole query, so the meaningful check
+    # is on new_mol: any atom of it left out of the match would keep the origin
+    # placeholder coordinates of a freshly allocated conformer.
+    if len(match) != new_mol.GetNumAtoms():
+        return None
+
+    if not new_mol.GetNumConformers():
+        new_mol.AddConformer(Chem.Conformer(new_mol.GetNumAtoms()), assignId=True)
+
     ref_mol_conformer = ref_mol.GetConformer()
     new_mol_conformer = new_mol.GetConformer()
-    
-    # Map heavy atoms: mol_noH atom i corresponds to prot_noH atom match[i]
-    ref_heavy = [a.GetIdx() for a in ref_mol.GetAtoms() if a.GetSymbol() != "H"]
-    new_heavy = [a.GetIdx() for a in new_mol.GetAtoms() if a.GetSymbol() != "H"]
 
-    for ref_mol_idx, new_mol_idx in enumerate(match):
-        ref_atom_idx = ref_heavy[ref_mol_idx]
-        new_atom_idx = new_heavy[new_mol_idx]
-        new_mol_conformer.SetAtomPosition(new_mol_idx, ref_mol_conformer.GetAtomPosition(ref_atom_idx))
-    
+    # match[i] is already a new_mol atom index for ref_mol atom i.
+    for ref_atom_idx, new_atom_idx in enumerate(match):
+        new_mol_conformer.SetAtomPosition(new_atom_idx,
+                                          ref_mol_conformer.GetAtomPosition(ref_atom_idx))
+
     return new_mol
-        
+
 
 
 

@@ -20,11 +20,14 @@ from .refine_utils import (create_structure_subset,
 
 from ChemEM.protocols.core.forces import ForceBuilder
 from ChemEM.protocols.core.core_utils import all_pairwise_distances_leq
+from ChemEM.protocols.core.simulation import resolve_global_k, resolve_implicit_solvent
 from ChemEM.parsers.parametised_ions import (
     create_parameterized_ion_structure,
     propose_dummy_water_oxygen_positions,
-    coord_geom_to_int,
+    coord_geom_to_cn,
     create_parametrised_tip3p_water,
+    ION_TEMPLATE_INFO,
+    _norm_ion_name,
 )
 
 from ChemEM.parsers.parse_forcefield import ff_load
@@ -83,12 +86,18 @@ class IonFixer:
         self.coord_assignment = None
         self.ion_restraint_forces = None
 
+        # Existing-ion mode: refine around an ion already present in the input
+        # structure instead of placing a new one.
+        self.existing_ion_spec = None
+        self.use_existing_ion = False
+
         # Track what we add at merge time
         self.added_ion_resnum = None
         self.added_ion_atom_idx = None
         self.added_water_resnums = []
         self.added_water_oxygen_indices = []
-        
+        self.added_water_atom_indices = []
+
         self.pin_atom_indices = None
         self.pin_atoms = None
         self.pin_force = None
@@ -132,6 +141,21 @@ class IonFixer:
             else:
                 self.exclude_atom_specs.append(self.system.protein.get_atom_idx_from_spec(spec))
 
+        ion_spec = getattr(self.system.options, "ion_spec", None)
+        if ion_spec:
+            if str(ion_spec).startswith("LIG"):
+                raise RuntimeError(
+                    f"[ERROR] --ion-spec {ion_spec!r} must name an ion in the protein "
+                    "structure, not a ligand atom. Format: A:ZN:301:ZN"
+                )
+            self.existing_ion_spec = self.system.protein.get_atom_idx_from_spec(ion_spec)
+            self.use_existing_ion = True
+            print(
+                f"[DEBUG ion_spec] {ion_spec} -> EXISTING ION, "
+                f"elem={self.existing_ion_spec.get_element()}, "
+                f"xyz={self.existing_ion_spec.get_point()}"
+            )
+
         spec_signatures = {
             (
                 str(a.get_element()).upper(),
@@ -154,10 +178,71 @@ class IonFixer:
                 "[ERROR] atom_specs and exclude_specs overlap. "
                 "A coordinating atom cannot also be excluded/pinned."
             )
-        
-        
+
+        if self.use_existing_ion:
+            ion_signature = (
+                str(self.existing_ion_spec.get_element()).upper(),
+                tuple(np.round(np.asarray(self.existing_ion_spec.get_point(), dtype=float), 3)),
+            )
+            if ion_signature in spec_signatures:
+                raise RuntimeError(
+                    "[ERROR] --ion-spec and --atom-spec resolve to the same atom. "
+                    "The ion cannot also be one of its own coordinating atoms."
+                )
+            if ion_signature in exclude_signatures:
+                raise RuntimeError(
+                    "[ERROR] --ion-spec and --exclude-spec resolve to the same atom. "
+                    "The ion is refined, so it cannot also be excluded/pinned."
+                )
+
+    def resolve_existing_ion_type(self):
+        """
+        Infer options.ion_type from the ion named by --ion-spec.
+
+        The ion residue must be monatomic and of a type the ion force field knows
+        about, otherwise the downstream distance targets and vdW radii are guesses.
+        When the user also passed --ion-type, the two must agree.
+        """
+        if not self.use_existing_ion:
+            return None
+
+        atom = self.existing_ion_spec._get_atom()
+        residue = atom.residue
+
+        res_atoms = list(residue.atoms)
+        if len(res_atoms) != 1:
+            raise RuntimeError(
+                f"[ERROR] --ion-spec residue {residue.chain}:{residue.name}:{residue.number} "
+                f"contains {len(res_atoms)} atoms; an ion residue must be monatomic."
+            )
+
+        inferred = _norm_ion_name(residue.name)
+        if inferred not in ION_TEMPLATE_INFO:
+            known = ", ".join(sorted(ION_TEMPLATE_INFO))
+            raise RuntimeError(
+                f"[ERROR] --ion-spec residue {residue.name!r} (element "
+                f"{atom.element_name}) is not a supported ion. Supported: {known}"
+            )
+
+        requested = getattr(self.system.options, "ion_type", None)
+        if requested is None:
+            self.system.options.ion_type = inferred
+            print(f"[DEBUG ion_spec] inferred ion_type={inferred} from residue {residue.name!r}")
+        elif _norm_ion_name(requested) != inferred:
+            raise RuntimeError(
+                f"[ERROR] --ion-type {requested!r} disagrees with --ion-spec, which names a "
+                f"{residue.name!r} residue (inferred {inferred!r}). Drop --ion-type to use "
+                "the ion already in the structure."
+            )
+
+        return inferred
+
     def get_coordination_number(self):
-        self.coordination_number = coord_geom_to_int(self.system.options.coordination_geometry)
+        # Must be the coordination NUMBER, not the geometry's enum id: this gates how many
+        # coordinating atoms the user has to supply (see the len(coord_atoms) check below) and
+        # feeds _default_k_ang_for_cn. coord_geom_to_int would give 2 for tetrahedral and 0 for
+        # linear, and would disagree with the CN propose_dummy_water_oxygen_positions uses.
+        self.coordination_number = coord_geom_to_cn(self.system.options.coordination_geometry)
 
     def create_complex_structure(self):
         self._spec_atoms_exist()
@@ -180,6 +265,13 @@ class IonFixer:
 
         cutoff = float(self.select_residues_within)
         spec_points = np.asarray([atom.get_point() for atom in self.spec_atoms], dtype=float)
+
+        # The supplied ion anchors the site, so select around it too. This both
+        # guarantees the ion residue itself is in the subset and pulls in its own
+        # environment, which need not be within cutoff of any donor.
+        if self.use_existing_ion:
+            ion_point = np.asarray(self.existing_ion_spec.get_point(), dtype=float)
+            spec_points = np.vstack([spec_points, ion_point[None, :]])
 
         selected_residues = []
         selected_keys = set()
@@ -208,6 +300,20 @@ class IonFixer:
         
     
     def get_initial_position(self):
+        if self.use_existing_ion:
+            # The ion is already placed; its deposited position is the anchor and
+            # the placement optimiser must not run.
+            self.initial_pos = np.asarray(self.existing_ion_spec.get_point(), dtype=float)
+            spec_xyz = np.asarray([atom.get_point() for atom in self.spec_atoms], dtype=float)
+            init_dists = [
+                float(np.linalg.norm(xyz - self.initial_pos)) for xyz in spec_xyz
+            ]
+            print("[DEBUG initial_pos] source=existing ion (--ion-spec), optimiser skipped")
+            print(f"[DEBUG initial_pos] ion_position={self.initial_pos.tolist()}")
+            print(f"[DEBUG initial_pos] distances_to_spec_atoms={[f'{d:.2f}' for d in init_dists]}")
+            print(f"[DEBUG initial_pos] is_ligand={self.spec_atom_is_ligand}")
+            return
+
         spec_xyz = np.asarray([atom.get_point() for atom in self.spec_atoms], dtype=float)
         spec_signatures = {
             (
@@ -258,6 +364,10 @@ class IonFixer:
     
     
     def get_paramitised_ion(self):
+        if self.use_existing_ion:
+            self.locate_existing_ion()
+            return
+
         forcefield = ff_load(self.system.options.ion_forcefield)
         if forcefield is None:
             raise RuntimeError(f"[ERROR] Can't load Forcefield {self.system.options.ion_forcefield}")
@@ -274,13 +384,48 @@ class IonFixer:
         self.curr_resnum += 1
         self.ion_structure = ion_structure
 
+    def locate_existing_ion(self):
+        """
+        Record the --ion-spec ion's index in selected_structure.
+
+        No ion residue is created or appended: the ion already lives in
+        complex_structure with force-field parameters attached, and
+        get_residue_selection() has carried it into the subset. This mirrors what
+        merge_system() records for a freshly placed ion so every downstream step
+        (restraints, pinning, map selection, geometry summary) is unchanged.
+        """
+        self._selected_structure_exists()
+
+        ion_atom = find_atom_from_spec_by_coord_and_element(
+            self.existing_ion_spec,
+            self.selected_structure,
+        )
+
+        self.ion_structure = None
+        self.ion_resnum = int(ion_atom.residue.number)
+        self.added_ion_resnum = int(ion_atom.residue.number)
+        self.added_ion_atom_idx = int(ion_atom.idx)
+
+        print(
+            f"[DEBUG ion_spec] existing ion resolved in subset: idx={self.added_ion_atom_idx}, "
+            f"residue={ion_atom.residue.chain}:{ion_atom.residue.name}:{self.added_ion_resnum}"
+        )
+        return ion_atom
+
     def get_paramitised_waters(self):
         ion_to_water_O_dist = 2.1
         donor_xyz = np.asarray([a.get_point() for a in self.spec_atoms], dtype=float)
 
+        # In existing-ion mode the ion is part of selected_structure. It sits
+        # ion_to_water_O_dist from every proposed water by construction, so it must
+        # not be treated as an obstacle.
+        ion_idx = int(self.added_ion_atom_idx) if self.use_existing_ion else None
+
         obstacle_xyz = []
         for a in self.selected_structure.atoms:
             if a.element_name.upper() == "H":
+                continue
+            if ion_idx is not None and int(a.idx) == ion_idx:
                 continue
             obstacle_xyz.append([a.xx, a.xy, a.xz])
 
@@ -323,22 +468,32 @@ class IonFixer:
         self._selected_structure_exists()
         self._ion_and_waters_exist()
 
-        self.added_ion_resnum = None
-        self.added_ion_atom_idx = None
         self.added_water_resnums = []
         self.added_water_oxygen_indices = []
+        self.added_water_atom_indices = []
 
-        # Add ion and record exactly what got appended
-        self.selected_structure += self.ion_structure
-        ion_res = self.selected_structure.residues[-1]
-        self.added_ion_resnum = ion_res.number
+        if self.use_existing_ion:
+            # The ion is already in selected_structure; locate_existing_ion() has
+            # recorded its indices. Appending would create a duplicate.
+            if self.added_ion_atom_idx is None:
+                raise RuntimeError(
+                    "[ERROR] Existing ion not resolved. Run get_paramitised_ion() first."
+                )
+        else:
+            self.added_ion_resnum = None
+            self.added_ion_atom_idx = None
 
-        ion_atoms = list(ion_res.atoms)
-        if len(ion_atoms) != 1:
-            raise RuntimeError(
-                f"[ERROR] Expected exactly one ion atom in merged ion residue, found {len(ion_atoms)}"
-            )
-        self.added_ion_atom_idx = int(ion_atoms[0].idx)
+            # Add ion and record exactly what got appended
+            self.selected_structure += self.ion_structure
+            ion_res = self.selected_structure.residues[-1]
+            self.added_ion_resnum = ion_res.number
+
+            ion_atoms = list(ion_res.atoms)
+            if len(ion_atoms) != 1:
+                raise RuntimeError(
+                    f"[ERROR] Expected exactly one ion atom in merged ion residue, found {len(ion_atoms)}"
+                )
+            self.added_ion_atom_idx = int(ion_atoms[0].idx)
 
         # Add dummy waters and record each oxygen directly
         for w in self.waters:
@@ -347,6 +502,8 @@ class IonFixer:
             self.added_water_resnums.append(water_res.number)
 
             atoms = list(water_res.atoms)
+            self.added_water_atom_indices.extend(int(a.idx) for a in atoms)
+
             oxygens = [a for a in atoms if str(a.element_name).upper() == "O"]
             if not oxygens:
                 oxygens = [a for a in atoms if str(a.name).upper().startswith("O")]
@@ -1032,6 +1189,49 @@ class IonFixer:
         self._sync_structure_coordinate_arrays(ion_copy)
         return ion_copy
 
+    def _verify_existing_ion_synced(self, structure, label, tol=1e-3):
+        """
+        Confirm the --ion-spec ion in `structure` carries the refined coordinates.
+
+        In existing-ion mode nothing appends the ion; it rides along on
+        _copy_matching_atom_positions, which matches by
+        (chain, resnum, resname, atom_name, occurrence). If that identity key ever
+        drifts the copy silently no-ops and the written model keeps the input
+        position, so assert rather than trust it.
+        """
+        refined = self._find_ion_atom_in_selected_structure()
+        refined_xyz = np.array([refined.xx, refined.xy, refined.xz], dtype=float)
+
+        chain = str(getattr(refined.residue, "chain", ""))
+        resnum = int(refined.residue.number)
+        resname = str(refined.residue.name).upper()
+        atom_name = str(refined.name)
+
+        matches = [
+            atom
+            for res in structure.residues
+            if str(getattr(res, "chain", "")) == chain
+            and int(res.number) == resnum
+            and str(res.name).upper() == resname
+            for atom in res.atoms
+            if str(atom.name) == atom_name
+        ]
+
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"[ERROR] Expected exactly one {chain}:{resname}:{resnum}:{atom_name} in "
+                f"{label}, found {len(matches)}. The refined ion could not be synced."
+            )
+
+        target_xyz = np.array([matches[0].xx, matches[0].xy, matches[0].xz], dtype=float)
+        if not np.allclose(target_xyz, refined_xyz, atol=tol, rtol=0.0):
+            raise RuntimeError(
+                f"[ERROR] Refined ion position did not propagate into {label}: "
+                f"expected {refined_xyz.tolist()}, found {target_xyz.tolist()}."
+            )
+
+        return matches[0]
+
     def _update_or_append_refined_ion(self, structure):
         """
         Add the refined ion to a structure if not present, otherwise update its coords.
@@ -1262,7 +1462,13 @@ class IonFixer:
         os.makedirs(refinement_dir, exist_ok=True)
 
         # 1) Sync selected refined coords into the full complex and include refined ion.
-        complex_update_info = self.update_original_complex_with_refined_positions(add_ion=True)
+        #    In existing-ion mode the ion is already a residue of complex_structure, so
+        #    _copy_matching_atom_positions updates it in place -- appending would duplicate it.
+        complex_update_info = self.update_original_complex_with_refined_positions(
+            add_ion=not self.use_existing_ion
+        )
+        if self.use_existing_ion:
+            self._verify_existing_ion_synced(self.complex_structure, "complex_structure")
 
         # 2) Propagate full-complex refined coords back into ligand structures/mols.
         ligand_complex_updates = self._update_ligand_complex_structures_from_refined_complex()
@@ -1286,7 +1492,10 @@ class IonFixer:
             source_structure=self.complex_structure,
             target_structure=protein_no_ligands,
         )
-        self._update_or_append_refined_ion(protein_no_ligands)
+        if self.use_existing_ion:
+            self._verify_existing_ion_synced(protein_no_ligands, "protein_no_ligands")
+        else:
+            self._update_or_append_refined_ion(protein_no_ligands)
         no_ligands_pdb = os.path.join(refinement_dir, "refined_protein_no_ligands.pdb")
         with open(no_ligands_pdb, "w") as f:
             app.PDBFile.writeFile(
@@ -1360,7 +1569,12 @@ class IonFixer:
             )
 
     def _ion_and_waters_exist(self):
-        if not hasattr(self, "ion_structure") or self.ion_structure is None:
+        if self.use_existing_ion:
+            if self.added_ion_atom_idx is None:
+                raise RuntimeError(
+                    "[ERROR] Existing ion not resolved. Run get_paramitised_ion() first."
+                )
+        elif not hasattr(self, "ion_structure") or self.ion_structure is None:
             raise RuntimeError("[ERROR] Ion structure not built. Run get_paramitised_ion() first.")
         if not hasattr(self, "waters") or self.waters is None:
             raise RuntimeError("[ERROR] Dummy waters not built. Run get_paramitised_waters() first.")
@@ -1369,10 +1583,18 @@ class IonFixer:
         if self.openmm_system is None:
             raise RuntimeError("[ERROR] OpenMM System not built. Run build_system() first.")
     
+    def _get_density_map(self):
+        """Return the configured EM map, retaining the legacy attribute fallback."""
+        density = getattr(self.system, "density_map", None)
+        if density is None:
+            density = getattr(self.system, "density", None)
+        return density
+
     def should_apply_map_restraint(self):
+        options = getattr(self.system, "options", None)
         return (
-            getattr(self.system, "density", None) is not None
-            and not bool(getattr(self.system.options, "no_map", False))
+            self._get_density_map() is not None
+            and not bool(getattr(options, "no_map", False))
         )
     
     def validate_spec_atom_distances(self):
@@ -1386,14 +1608,6 @@ class IonFixer:
                 "[WARNING] atom-spec distances are greater then 12.0 Å this may causse issues fixing ions"
             )
     
-    def should_apply_map_restraint(self):
-        return (
-            getattr(self.system, "density", None) is not None
-            and not bool(getattr(self.system.options, "no_map", False))
-        )
-    
-    
-    
     def build_system(self):
         bad_bonds = debug_missing_bond_params(self.selected_structure)
         if bad_bonds:
@@ -1402,11 +1616,23 @@ class IonFixer:
                 print(row)
             raise RuntimeError("selected_structure contains bonds with missing parameters")
 
-        self.openmm_system = self.selected_structure.createSystem(
-            nonbondedMethod=app.NoCutoff,
-            constraints=app.HBonds,
-            rigidWater=True,
-        )
+        # Default None = vacuum, as this protocol has always run. IonFixer places
+        # explicit dummy waters to complete the coordination shell, so an implicit
+        # continuum double-counts solvation at exactly those sites -- hence opt-in.
+        # implicitSolvent and rigidWater are mutually exclusive here, matching
+        # finalize_system_from_structure().
+        solvent = resolve_implicit_solvent(self.system.options, None)
+
+        kwargs = {
+            "nonbondedMethod": app.NoCutoff,
+            "constraints": app.HBonds,
+        }
+        if solvent is None:
+            kwargs["rigidWater"] = True
+        else:
+            kwargs["implicitSolvent"] = solvent
+
+        self.openmm_system = self.selected_structure.createSystem(**kwargs)
 
         return self.openmm_system
 
@@ -1504,19 +1730,16 @@ class IonFixer:
         excluded_spec_atoms = self._find_excluded_spec_atoms_in_selected_structure(tol=tol)
         excluded_spec_idx_set = {int(a.idx) for a in excluded_spec_atoms}
 
-        added_water_resnums = {int(x) for x in self.added_water_resnums}
+        # Identify the ion and the dummy waters by atom index, not residue number.
+        # A deposited ion (--ion-spec) keeps its real resSeq, which can collide with
+        # a polymer residue in another chain and silently unpin it.
+        added_water_idx_set = {int(x) for x in self.added_water_atom_indices}
+        ion_idx = int(self.added_ion_atom_idx) if self.added_ion_atom_idx is not None else None
 
         pin_atoms = []
         seen = set()
 
         for res in self.selected_structure.residues:
-            resnum = int(res.number)
-
-            if self.added_ion_resnum is not None and resnum == int(self.added_ion_resnum):
-                continue
-            if resnum in added_water_resnums:
-                continue
-
             resname = str(res.name).upper()
             is_supported_polymer = (
                 self._is_protein_residue_name(resname)
@@ -1528,6 +1751,11 @@ class IonFixer:
                     continue
 
                 idx = int(atom.idx)
+
+                if ion_idx is not None and idx == ion_idx:
+                    continue
+                if idx in added_water_idx_set:
+                    continue
 
                 if idx in excluded_spec_idx_set:
                     if idx not in seen:
@@ -1645,9 +1873,9 @@ class IonFixer:
         """
         self._selected_structure_exists()
     
-        density = getattr(self.system, "density", None)
+        density = self._get_density_map()
         if density is None:
-            raise RuntimeError("[ERROR] self.system.density is None, cannot cut local map.")
+            raise RuntimeError("[ERROR] No system density map is available; cannot cut local map.")
     
         coords = []
         for atom in self.selected_structure.atoms:
@@ -1698,7 +1926,7 @@ class IonFixer:
         """
         self._selected_structure_exists()
 
-        added_water_resnums = {int(x) for x in self.added_water_resnums}
+        added_water_idx_set = {int(x) for x in self.added_water_atom_indices}
         ion_idx = int(self.added_ion_atom_idx) if self.added_ion_atom_idx is not None else None
         coord_idx_set = set(int(i) for i in (self.coord_atom_indices or []))
 
@@ -1709,11 +1937,9 @@ class IonFixer:
             if not self._is_heavy_atom(atom):
                 continue
 
-            resnum = int(atom.residue.number)
-            if resnum in added_water_resnums:
-                continue
-
             idx = int(atom.idx)
+            if idx in added_water_idx_set:
+                continue
             resname = str(atom.residue.name).upper()
             is_supported_polymer = (
                 self._is_protein_residue_name(resname)
@@ -1770,17 +1996,14 @@ class IonFixer:
         if not self.map_atom_indices:
             raise RuntimeError("[ERROR] No atoms identified for map restraint.")
     
-        added_water_resnums = {int(x) for x in self.added_water_resnums}
-    
+        added_water_idx_set = {int(x) for x in self.added_water_atom_indices}
+
         filtered_map_atom_indices = []
         for atom_idx in self.map_atom_indices:
-            atom = self._get_atom_by_idx(int(atom_idx))
-            resnum = int(atom.residue.number)
-    
             # exclude dummy waters only
-            if resnum in added_water_resnums:
+            if int(atom_idx) in added_water_idx_set:
                 continue
-    
+
             filtered_map_atom_indices.append(int(atom_idx))
     
         if not filtered_map_atom_indices:
@@ -1895,7 +2118,7 @@ class IonFixer:
 
         coord_idx_set = set(int(i) for i in (self.coord_atom_indices or []))
         ion_idx = int(self.added_ion_atom_idx) if self.added_ion_atom_idx is not None else None
-        added_water_resnums = {int(x) for x in self.added_water_resnums}
+        added_water_idx_set = {int(x) for x in self.added_water_atom_indices}
 
         obstacle_xyz = []
         obstacle_elements = []
@@ -1909,7 +2132,7 @@ class IonFixer:
                 continue
             if idx in coord_idx_set:
                 continue
-            if int(atom.residue.number) in added_water_resnums:
+            if idx in added_water_idx_set:
                 continue
 
             obstacle_xyz.append(all_pos_A[idx])
@@ -2088,6 +2311,7 @@ class IonFixer:
 
     def run(self):
         self.get_spec_atoms()
+        self.resolve_existing_ion_type()
         self.get_coordination_number()
         self.create_complex_structure()
         self.get_residue_selection()
@@ -2108,13 +2332,14 @@ class IonFixer:
         distance_only_k_dist_end_fraction=1.0
         k_dist_start=500.0
         k_dist_end=5000.0
-        k_map=150.0
+        # Base map weight; the stage scale factors below are applied to it.
+        k_map = resolve_global_k(self.system.options, 150.0)
         distance_only_k_map_scale=0.5
         step_size_ps=0.002
         friction_per_ps = 1.0
         final_md_temperature_K=50.0
         map_normalise=True
-        map_smooth_sigma_A=0.0,
+        map_smooth_sigma_A=0.0
         map_smooth_sigma_vox=0.0
         map_pad_A=4.0
         k_pin=5000.0
@@ -2145,7 +2370,11 @@ class IonFixer:
         stage1_k_dist_end = min(stage1_k_dist_end, float(k_dist_end))
         
         stage1_k_map = max(float(k_map) * float(distance_only_k_map_scale), 0.0)
-        
+
+        # A supplied ion anchors the site: it relaxes under the restraints but must
+        # not be teleported to the placement optimiser's guess each cycle.
+        stage1_reposition = 0.0 if self.use_existing_ion else 1.0
+
         self._prepare_refinement_system_from_current_structure(
             include_angles=include_angles,
             target_dist_A=target_dist_A,
@@ -2178,7 +2407,7 @@ class IonFixer:
             final_md_steps=0,
             final_md_temperature_K=final_md_temperature_K,
             platform_name=self.system.platform,
-            ion_reposition_fraction=1.0,
+            ion_reposition_fraction=stage1_reposition,
             stage_label="distance_only",
         )
         

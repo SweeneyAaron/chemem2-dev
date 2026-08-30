@@ -116,7 +116,9 @@ class SmartOrchestrator:
         # 4. Gate 2 -- map fit + optional single-frame MMGBSA.
         self._score_qscore(gate1)
         self._score_density_fit(gate1, stage_name="gate2")
-        if not bool(self._opt("orch_skip_mmgbsa", False)):
+        # evidence mode ranks Gate 2 on qscore only; MM-GBSA is reserved (targeted) for the Gate-3
+        # which-ligand tie-break, so skip the Gate-2 energy pass entirely.
+        if not bool(self._opt("orch_skip_mmgbsa", False)) and self._score_mode() != "evidence":
             self._score_mmgbsa(gate1)
         self._assign_rank_scores(gate1, include_mmgbsa=True)
         self._audit_candidates("04_gate2_scored", gate1)
@@ -144,6 +146,7 @@ class SmartOrchestrator:
             self._score_mmgbsa(gate2)
         self._assign_rank_scores(gate2, include_mmgbsa=True)
         self._audit_candidates("07_gate3_scored", gate2)
+        _er = self._opt("orch_energy_reject", None)
         assignments, rejections = triage.gate3_select(
             gate2,
             **self._rank_kwargs(include_mmgbsa=True),
@@ -153,6 +156,14 @@ class SmartOrchestrator:
             same_ligand_mmgbsa_window=float(
                 self._opt("orch_mmgbsa_pose_window", 0.15)
             ),
+            qscore_floor=float(self._opt("orch_qscore_floor", 0.25)),
+            qscore_strong=float(self._opt("orch_qscore_strong", 0.5)),
+            qscore_accept_z=float(self._opt("orch_qscore_accept_z", -0.5)),
+            wl_energy=(str(self._opt("orch_wl_energy", "on")).lower() != "off"),
+            wl_margin=float(self._opt("orch_wl_margin", 0.05)),
+            wl_energy_w=float(self._opt("orch_wl_energy_w", 0.6)),
+            energy_reject=(None if _er in (None, "") else float(_er)),
+            gate3_topk=int(self._opt("orch_gate3_topk", 1)),
             return_rejections=True,
         )
         orch_io.write_gate_json(gate2, os.path.join(self.output, "gate3.json"))
@@ -200,8 +211,8 @@ class SmartOrchestrator:
         os.makedirs(self.output, exist_ok=True)
 
     def _score_mode(self) -> str:
-        mode = str(self._opt("orch_score_mode", "absolute") or "absolute").lower()
-        if mode not in {"absolute", "coverage", "qscore"}:
+        mode = str(self._opt("orch_score_mode", "evidence") or "evidence").lower()
+        if mode not in {"absolute", "coverage", "qscore", "evidence"}:
             self._log(
                 f"[orchestrator] Unknown score mode {mode!r}; using absolute."
             )
@@ -489,12 +500,17 @@ class SmartOrchestrator:
         *,
         stage_name: str | None = None,
     ) -> None:
-        if self._score_mode() not in {"absolute", "coverage"}:
+        # evidence mode also needs the cheap density core (coverage/precision -> density_overlap
+        # for the which-ligand tie-break) but never the expensive SCI/shape diagnostics.
+        if self._score_mode() not in {"absolute", "coverage", "evidence"}:
             return
 
         n_total = self._count_candidates(candidates_by_site)
         compute_sci = self._density_sci_enabled()
-        compute_shape = self._shape_metrics_enabled(stage_name)
+        compute_shape = (
+            self._shape_metrics_enabled(stage_name)
+            and self._score_mode() in {"absolute", "coverage"}
+        )
         extras = []
         if compute_sci:
             extras.append("SCI")
@@ -563,36 +579,91 @@ class SmartOrchestrator:
                 c.metrics.update(metrics)
         self._log("[orchestrator] Density coverage scoring complete.")
 
-    def _score_mmgbsa(self, candidates_by_site: Dict[str, List[PoseCandidate]]) -> None:
-        n_total = self._count_candidates(candidates_by_site)
-        self._log(
-            f"[orchestrator] MMGBSA scoring {n_total} candidate(s) "
-            "(single-frame OpenMM energy evaluation)."
-        )
-        done = 0
+    def _evidence_mmgbsa_targets(
+        self, candidates_by_site: Dict[str, List[PoseCandidate]]
+    ) -> List[PoseCandidate]:
+        """Candidates that need MM-GBSA in evidence mode: the competing-ligand representatives at
+        sites where the top ligands are within the which-ligand qscore margin (energy decides the
+        winner), plus — only when --orch-energy-reject is set — the winner at sites near the accept
+        threshold (fittable-decoy check)."""
+        wl_margin = float(self._opt("orch_wl_margin", 0.05))
+        wl_energy = str(self._opt("orch_wl_energy", "on")).lower() != "off"
+        er = self._opt("orch_energy_reject", None)
+        do_decoy = er not in (None, "")
+        accept_z = float(self._opt("orch_qscore_accept_z", -0.5))
+
+        targets: List[PoseCandidate] = []
+        seen: set = set()
+        best_reps: Dict[str, List[PoseCandidate]] = {}
         for site_id, candidates in candidates_by_site.items():
-            for c in candidates:
-                done += 1
-                label = self._candidate_label(c)
-                self._log(f"[orchestrator] MMGBSA {done}/{n_total}: {label}")
-                ligand = self.system.ligand[c.ligand_idx]
-                ps = scoring.mmgbsa_single_frame(
-                    c.coords,
-                    ligand,
-                    self.system.protein,
-                    pose_idx=c.pose_idx,
-                    resource_owner=self.system,
+            scored = [c for c in candidates if c.qscore is not None]
+            if not scored:
+                continue
+            reps = [
+                max(g, key=lambda c: (float(c.qscore), -int(c.pose_idx)))
+                for g in triage._by_ligand(scored).values()
+            ]
+            reps.sort(key=lambda c: -float(c.qscore))
+            best_reps[str(site_id)] = reps
+            if wl_energy and len(reps) >= 2:
+                top_q = float(reps[0].qscore)
+                ambiguous = [r for r in reps if top_q - float(r.qscore) <= wl_margin]
+                if len(ambiguous) >= 2:
+                    for r in ambiguous:
+                        if id(r) not in seen:
+                            seen.add(id(r))
+                            targets.append(r)
+        if do_decoy and best_reps:
+            sites = list(best_reps.keys())
+            bq = np.asarray([float(best_reps[s][0].qscore) for s in sites], dtype=float)
+            for s, zz in zip(sites, triage._zscore(bq)):
+                if abs(float(zz) - accept_z) <= 0.5:          # borderline of the accept gate
+                    w = best_reps[s][0]
+                    if id(w) not in seen:
+                        seen.add(id(w))
+                        targets.append(w)
+        return targets
+
+    def _score_mmgbsa(self, candidates_by_site: Dict[str, List[PoseCandidate]]) -> None:
+        if self._score_mode() == "evidence":
+            candidates = self._evidence_mmgbsa_targets(candidates_by_site)
+            if not candidates:
+                self._log("[orchestrator] evidence mode: no MM-GBSA targets (no which-ligand ties).")
+                return
+            self._log(
+                f"[orchestrator] MMGBSA (targeted) scoring {len(candidates)} candidate(s) "
+                "for the which-ligand tie-break."
+            )
+            score_kwargs = dict(minimise_ligand=True, reuse_cache=True)
+        else:
+            candidates = [c for cs in candidates_by_site.values() for c in cs]
+            self._log(
+                f"[orchestrator] MMGBSA scoring {len(candidates)} candidate(s) "
+                "(single-frame OpenMM energy evaluation)."
+            )
+            score_kwargs = {}
+
+        for done, c in enumerate(candidates, 1):
+            label = self._candidate_label(c)
+            self._log(f"[orchestrator] MMGBSA {done}/{len(candidates)}: {label}")
+            ligand = self.system.ligand[c.ligand_idx]
+            ps = scoring.mmgbsa_single_frame(
+                c.coords,
+                ligand,
+                self.system.protein,
+                pose_idx=c.pose_idx,
+                resource_owner=self.system,
+                **score_kwargs,
+            )
+            if ps is None:
+                c.mmgbsa = None
+                c.notes.append("mmgbsa_failed")
+                self._log(f"[orchestrator] MMGBSA failed: {label}")
+            else:
+                c.mmgbsa = float(ps.deltaG)
+                self._log(
+                    f"[orchestrator] MMGBSA complete: {label}, deltaG={c.mmgbsa:.3f}"
                 )
-                if ps is None:
-                    c.mmgbsa = None
-                    c.notes.append("mmgbsa_failed")
-                    self._log(f"[orchestrator] MMGBSA failed: {label}")
-                else:
-                    c.mmgbsa = float(ps.deltaG)
-                    self._log(
-                        f"[orchestrator] MMGBSA complete: {label}, "
-                        f"deltaG={c.mmgbsa:.3f}"
-                    )
         self._log("[orchestrator] MMGBSA scoring complete.")
 
     # ---- refine wrappers ----

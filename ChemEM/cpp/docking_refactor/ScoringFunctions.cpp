@@ -31,6 +31,17 @@ struct Terms {
     double unsat_polar = 0.0;
     double bias = 0.0;
     double constraint = 0.0;
+    double covalent = 0.0;   // ligand warhead -> fixed protein anchor (covalent docking; 0 when disabled)
+    // Split channels for offline weight-fitting (reported by score_terms / run_echo_terms).
+    // score() and apply_weights() keep using the lumped `aromatic`/`nonbond` above, so the
+    // deployed scoring is unchanged. Invariants:
+    //   aromatic == aromatic_attr + aromatic_clash
+    //   nonbond  == nonbond_attr  + nonbond_rep + clash
+    double aromatic_attr = 0.0;
+    double aromatic_clash = 0.0;
+    double nonbond_attr = 0.0;
+    double nonbond_rep = 0.0;
+    double clash = 0.0;
 };
 
 inline double apply_weights(const Terms& t, const ECHOWeights& w) {
@@ -46,9 +57,12 @@ inline double apply_weights(const Terms& t, const ECHOWeights& w) {
         w.unsat_polar * t.unsat_polar +
         w.ligand_torsion * t.ligand_torsion +
         w.ligand_intra * t.ligand_intra +
-        w.nonbond * t.nonbond +
+        w.nonbond_attr * t.nonbond_attr +
+        w.nonbond_rep * t.nonbond_rep +
+        w.clash * t.clash +
         w.hbond_raw * t.hbond_raw +
-        w.aromatic * t.aromatic;
+        w.aromatic_attr * t.aromatic_attr +
+        w.aromatic_clash * t.aromatic_clash;
 }
 
 
@@ -159,9 +173,12 @@ inline void compute_aromatic(Terms &t,
             if (std::isfinite(sc)) {
                 if (sc <= 0.0) {
                     t.aromatic += sc;
+                    t.aromatic_attr += sc;
                 } else {
                     const double x = sc / rep_max;
-                    t.aromatic += sc * std::tanh(x);
+                    const double capped = sc * std::tanh(x);
+                    t.aromatic += capped;
+                    t.aromatic_clash += capped;
                 }
             }
 
@@ -175,7 +192,9 @@ inline void compute_aromatic(Terms &t,
                         const double clash_vdw = clash_mat(i, j);
                         if (clash_vdw > 0.0) {
                             const double x = clash_vdw / rep_max;
-                            t.aromatic += clash_vdw * std::tanh(x);
+                            const double capped = clash_vdw * std::tanh(x);
+                            t.aromatic += capped;
+                            t.aromatic_clash += capped;
                         }
                         SKIP(ai, pi) = 1u;
                     }
@@ -271,8 +290,9 @@ inline void compute_nonbond_hbond_salt(
                 const double pen = rep_max  * (1.0 + f);
             
                 // add as a clash / nonbond penalty
-                t.nonbond += pen;      // or t.clash += pen;
-            
+                t.nonbond += pen;
+                t.clash   += pen;      // split channel (subset of nonbond)
+
                 // don't allow any attractive interactions for this pair
                 continue;
             }
@@ -377,12 +397,16 @@ inline void compute_nonbond_hbond_salt(
                 contrib = rep_max * std::tanh(x);
             }
 
+            double add = 0.0;
             if (is_hbond) {
                 // attractive hbonds already counted in hbond_raw; keep only repulsive in nonbond
-                if (contrib > 0.0) t.nonbond += contrib;
+                if (contrib > 0.0) add = contrib;
             } else {
-                t.nonbond += contrib;
+                add = contrib;
             }
+            t.nonbond += add;                                   // unchanged total
+            if (add < 0.0)      t.nonbond_attr += add;          // split channels
+            else if (add > 0.0) t.nonbond_rep  += add;
         }
     }
 }
@@ -551,7 +575,104 @@ inline void compute_constraint(Terms &t,
     }
 }
 
-} 
+// Covalent-docking anchor: harmonic tether between the ligand warhead heavy atom
+// and a FIXED protein point (the protein is rigid during the search). No-op unless
+// the optional CovalentData was supplied, so non-covalent docking is unaffected.
+inline void compute_covalent(Terms &t,
+                             const MatX3d &ligXYZ,
+                             const ProteinData &prot,
+                             const CovalentData &cov) {
+    t.covalent = 0.0;
+    if (!cov.enabled) return;
+
+    // Sum over every covalent bond, so a crosslinker is held at both ends. With a
+    // single anchor this is bit-for-bit the previous single-tether expression.
+    for (const auto &a : cov.anchors) {
+        if (a.warhead_idx < 0 || a.warhead_idx >= ligXYZ.rows()) continue;
+
+        const Eigen::RowVector3d anchor =
+            (a.anchor_prot_idx >= 0 && a.anchor_prot_idx < prot.positions.rows())
+                ? prot.positions.row(a.anchor_prot_idx)
+                : a.anchor_xyz;
+
+        const double dx = ligXYZ(a.warhead_idx, 0) - anchor(0);
+        const double dy = ligXYZ(a.warhead_idx, 1) - anchor(1);
+        const double dz = ligXYZ(a.warhead_idx, 2) - anchor(2);
+        const double r  = std::sqrt(dx*dx + dy*dy + dz*dz);
+        const double dr = r - a.r0;
+        t.covalent += a.k * (dr * dr);
+    }
+}
+
+// Single source of truth for the physics terms: fills `terms` (lumped + split channels).
+// Both score() and score_terms() call this so the two can never drift. Leaves
+// scratch.ligXYZ populated for the caller (score() reuses it for the map term).
+inline void compute_all_terms(const ECHOScore &self,
+                              const RDKit::Conformer &conf,
+                              double rep_max,
+                              Terms &terms) {
+    const PreComputedData &pre = self.pre;
+
+    const auto &lig  = pre.ligand();
+    const auto &prot = pre.protein();
+    const auto &cfg  = pre.config();
+    const auto &hb   = pre.hbond();
+    const auto &ls   = pre.ligand_score();
+
+    const int n_prot_atoms = prot.positions.rows();
+    const int heavy_end    = static_cast<int>(lig.heavy_end_idx);
+    const int n_heavy      = heavy_end + 1;
+
+    const double cutoff_sq = self.interaction_cutoff * self.interaction_cutoff;
+
+    fill_lig_xyz(conf, scratch.ligXYZ);
+    reset_skip_and_flags(scratch, n_heavy, n_prot_atoms);
+
+    // Covalent docking: exclude the intended warhead<->anchor protein pair from
+    // the nonbond/clash ramp so the hard r<2.0 penalty doesn't fight the covalent
+    // tether. Must run before compute_nonbond_hbond_salt. Gated on a real
+    // protein-atom anchor index; no effect for non-covalent ligands.
+    {
+        const auto &cov = pre.covalent();
+        if (cov.enabled) {
+            for (const auto &a : cov.anchors) {
+                if (a.anchor_prot_idx >= 0
+                        && a.warhead_idx >= 0 && a.warhead_idx < n_heavy
+                        && a.anchor_prot_idx < n_prot_atoms) {
+                    scratch.skip_flat[static_cast<std::size_t>(a.warhead_idx)
+                                          * static_cast<std::size_t>(n_prot_atoms)
+                                      + static_cast<std::size_t>(a.anchor_prot_idx)] = 1u;
+                }
+            }
+        }
+    }
+
+    {
+        const Eigen::RowVector3d c = ligand_centroid_heavy(scratch.ligXYZ, n_heavy);
+        compute_bias(terms, c, cfg);
+    }
+
+    compute_aromatic(terms, scratch, scratch.ligXYZ, n_heavy, n_prot_atoms,
+                     rep_max, lig, prot, pre.aromatic_scorer());
+
+    compute_nonbond_hbond_salt(terms, scratch, scratch.ligXYZ,
+                               n_heavy, n_prot_atoms,
+                               self.interaction_cutoff, cutoff_sq, rep_max,
+                               pre, lig, prot, cfg, hb);
+
+    compute_ligand_intra(terms, scratch.ligXYZ, n_heavy, cutoff_sq, ls);
+    compute_ligand_torsion(terms, scratch.ligXYZ, ls);
+    compute_electro_and_desolv(terms, scratch.ligXYZ, self.electro_clamp,
+                               lig, pre.electro_grid(), pre.environment_grid());
+    compute_hydrophobics(terms, scratch.ligXYZ, n_heavy, scratch,
+                         lig, pre.hydrohpobic_grid_raw(), pre.hydrophobic_enclosure_grid());
+    compute_unsat_polar(terms, scratch.ligXYZ, n_heavy, scratch,
+                        lig, pre.environment_grid());
+    compute_constraint(terms, scratch.ligXYZ, ls);
+    compute_covalent(terms, scratch.ligXYZ, prot, pre.covalent());
+}
+
+}
 
 
 
@@ -586,7 +707,8 @@ namespace {
         oss << "unsat_polar, " << t.unsat_polar << "\n";
         oss << "bias, " << t.bias << "\n";
         oss << "constraint, " << t.constraint << "\n";
-        
+        oss << "covalent, " << t.covalent << "\n";
+
         oss << "---- Weights (snapshot) ----\n";
         oss << "w.aromatic, " << w.aromatic << "\n";
         oss << "w.nonbond, " << w.nonbond << "\n";
@@ -616,53 +738,12 @@ namespace {
 }
 
 double ECHOScore::score(const RDKit::Conformer &conf, double rep_max, double use_map_score) const {
-    
-    
+
     Terms terms;
+    compute_all_terms(*this, conf, rep_max, terms);
 
-    // setup
     const auto &lig = pre.ligand();
-    const auto &prot = pre.protein();
     const auto &cfg = pre.config();
-    const auto &hb = pre.hbond();
-    const auto &ls = pre.ligand_score();
-    
-    const int n_prot_atoms = prot.positions.rows();
-    const int heavy_end = static_cast<int>(lig.heavy_end_idx);
-    const int n_heavy = heavy_end + 1;
-
-    const double cutoff_sq = interaction_cutoff * interaction_cutoff;
-
-    
-    fill_lig_xyz(conf, scratch.ligXYZ);
-    reset_skip_and_flags(scratch, n_heavy, n_prot_atoms);
-    
-    {
-        const Eigen::RowVector3d c = ligand_centroid_heavy(scratch.ligXYZ, n_heavy);
-        compute_bias(terms, c, cfg);
-    }
-    
-    //interaction terms
-    compute_aromatic(terms, scratch, scratch.ligXYZ, n_heavy, n_prot_atoms,
-                     rep_max, lig, prot, pre.aromatic_scorer());
-                     
-    compute_nonbond_hbond_salt(terms, scratch, scratch.ligXYZ,
-                               n_heavy, n_prot_atoms,
-                               interaction_cutoff, cutoff_sq, rep_max,
-                               pre, lig, prot, cfg, hb);
-                               
-    compute_ligand_intra(terms, scratch.ligXYZ, n_heavy, cutoff_sq, ls);
-    compute_ligand_torsion(terms, scratch.ligXYZ, ls);
-    compute_electro_and_desolv(terms, scratch.ligXYZ, electro_clamp,
-                               lig, pre.electro_grid(), pre.environment_grid());
-                               
-    compute_hydrophobics(terms, scratch.ligXYZ, n_heavy, scratch,
-                         lig, pre.hydrohpobic_grid_raw(), pre.hydrophobic_enclosure_grid());
-                         
-    compute_unsat_polar(terms, scratch.ligXYZ, n_heavy, scratch,
-                        lig, pre.environment_grid());
-                        
-    compute_constraint(terms, scratch.ligXYZ, ls);
     //get map score 
     double total_linear = apply_weights(terms, weights);
     
@@ -712,8 +793,39 @@ double ECHOScore::score(const RDKit::Conformer &conf, double rep_max, double use
         }
     }
     
-    double total = -(total_linear + map_score) + terms.bias + terms.constraint;
-    
+    double total = -(total_linear + map_score) + terms.bias + terms.constraint + terms.covalent;
+
     //debug_print_terms(terms, total_linear, total, weights);
     return total;
+}
+
+
+std::map<std::string, double>
+ECHOScore::score_terms(const RDKit::Conformer &conf, double rep_max) const {
+    Terms t;
+    compute_all_terms(*this, conf, rep_max, t);
+    return {
+        {"aromatic_attr", t.aromatic_attr},
+        {"aromatic_clash", t.aromatic_clash},
+        {"nonbond_attr", t.nonbond_attr},
+        {"nonbond_rep", t.nonbond_rep},
+        {"clash", t.clash},
+        {"saltbridge_raw", t.saltbridge_raw},
+        {"hbond_raw", t.hbond_raw},
+        {"ligand_intra", t.ligand_intra},
+        {"ligand_torsion", t.ligand_torsion},
+        {"electro_attractive", t.electro_attractive},
+        {"electro_repulsive_clamp", t.electro_repulsive_clamp},
+        {"desolvation_penalty_scaled", t.desolvation_penalty_scaled},
+        {"hphobe_raw_hpho", t.hphobe_raw_hpho},
+        {"hphobe_raw_hpil", t.hphobe_raw_hpil},
+        {"hphob_enc_gt_7_only_hpho", t.hphob_enc_gt_7_only_hpho},
+        {"hphob_enc_gt_7_only_hpil_unsat", t.hphob_enc_gt_7_only_hpil_unsat},
+        {"unsat_polar", t.unsat_polar},
+        {"aromatic", t.aromatic},
+        {"nonbond", t.nonbond},
+        {"bias", t.bias},
+        {"constraint", t.constraint},
+        {"covalent", t.covalent},
+    };
 }

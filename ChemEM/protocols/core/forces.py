@@ -32,7 +32,7 @@ def add_sse_rmsd_forces(
     complex_structure,
     ref_nm,
     sse_groups,
-    ligand_set,
+    all_ligand_indices,
     ligand_heavy_indices,
     sse_k: float,
     localise: bool = False
@@ -45,7 +45,7 @@ def add_sse_rmsd_forces(
         
     for grp in sse_groups:
         # Filter out ligand atoms
-        valid_grp = [i for i in grp if i not in ligand_set]
+        valid_grp = [i for i in grp if i not in all_ligand_indices]
         
         # Filter out atoms too far from the ligand (if localise is True)
         if localise:

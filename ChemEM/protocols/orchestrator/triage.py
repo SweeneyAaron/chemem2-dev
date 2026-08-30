@@ -247,6 +247,11 @@ def composite(
         )
         return _absolute_scores(candidates, weights)
 
+    if str(score_mode).lower() == "evidence":
+        # Benchmark-backed gate ranking: within-case z(qscore) only. Combining the map metrics
+        # gives no gain for the gate; energy is reserved for the Gate-3 which-ligand tie-break.
+        return _zscore(_metric_array(candidates, "qscore"))
+
     q = _metric_array(candidates, "qscore")
     m = _metric_array(candidates, "mmgbsa")
     qz = _zscore(q)
@@ -466,6 +471,181 @@ def gate2_select(
     return out
 
 
+def _bigger_better_rank(values: np.ndarray) -> np.ndarray:
+    """Rank where a larger value gets a larger rank; non-finite -> worst. TIED values get the SAME
+    (average) rank, so a tie in the which-ligand blend leaves argmax on the first (best-qscore) rep
+    rather than favouring the last index."""
+    v = np.asarray(
+        [x if np.isfinite(x) else -np.inf for x in np.asarray(values, dtype=float)],
+        dtype=float,
+    )
+    order = np.argsort(v, kind="stable")
+    ordinal = np.empty(len(v), dtype=float)
+    ordinal[order] = np.arange(1, len(v) + 1, dtype=float)
+    ranks = ordinal.copy()
+    uniq, inv = np.unique(v, return_inverse=True)
+    for g in range(len(uniq)):                       # collapse ties to their average rank
+        mask = inv == g
+        if int(mask.sum()) > 1:
+            ranks[mask] = float(ordinal[mask].mean())
+    return ranks
+
+
+def _which_ligand_winner(
+    reps: List[PoseCandidate], *, wl_energy: bool, wl_margin: float, wl_energy_w: float
+) -> List[PoseCandidate]:
+    """Reorder per-ligand representatives (given best-qscore-first) so the which-ligand winner is
+    first. If the top competing ligands are within `wl_margin` of the best qscore (qscore can't
+    separate them), pick by the MM-GBSA + density_overlap blend (wl_energy_w·rank(-mmgbsa) +
+    (1-w)·rank(overlap), within-site rank); fall back to overlap alone if any competitor's MM-GBSA
+    is missing. Benchmark: 0.75 Recall@1 vs 0.50 chance."""
+    if not wl_energy or len(reps) < 2:
+        return reps
+    top_q = _finite_metric(reps[0], "qscore")
+    ambiguous = [r for r in reps if top_q - _finite_metric(r, "qscore") <= float(wl_margin)]
+    if len(ambiguous) < 2:
+        return reps
+    mm = np.array([
+        float(r.mmgbsa) if (r.mmgbsa is not None and np.isfinite(float(r.mmgbsa))) else np.nan
+        for r in ambiguous
+    ])
+    ov = np.array([_finite_metric(r, "density_overlap", np.nan) for r in ambiguous])
+    if np.isnan(mm).any():
+        blend = _bigger_better_rank(ov)                       # overlap fallback (MM-GBSA missing)
+        by_energy = False
+    else:
+        blend = (float(wl_energy_w) * _bigger_better_rank(-mm)
+                 + (1.0 - float(wl_energy_w)) * _bigger_better_rank(ov))
+        by_energy = True
+    winner = ambiguous[int(np.argmax(blend))]
+    winner.metrics["which_ligand_by_energy"] = by_energy
+    rest = [r for r in reps if r is not winner]
+    return [winner] + rest
+
+
+def _gate3_evidence(
+    candidates_by_site: Dict[str, List[PoseCandidate]],
+    *,
+    qscore_floor: float,
+    qscore_strong: float,
+    qscore_accept_z: float,
+    wl_energy: bool,
+    wl_margin: float,
+    wl_energy_w: float,
+    energy_reject: Optional[float],
+    gate3_topk: int,
+    return_rejections: bool,
+) -> List[FinalAssignment] | tuple[List[FinalAssignment], List[AssignmentRejection]]:
+    """Evidence-mode Gate 3: qscore accept with a safe absolute floor + a within-structure relative
+    gate that only rejects MODERATE sites which are relative outliers-low (fittable decoys); a
+    clearly-strong qscore is always accepted, and the relative gate is bypassed for structures with
+    too few sites / no real spread (so single-site or all-real structures are not wrongly rejected).
+    No coverage floor. Energy blend only to disambiguate competing ligands; top-N per site."""
+    chain_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    # Pass 1 — per site: one rep per ligand (best-qscore pose), then which-ligand ordering.
+    site_reps: Dict[str, List[PoseCandidate]] = {}
+    for site_id, candidates in candidates_by_site.items():
+        scored = [c for c in candidates if c.qscore is not None]
+        if not scored:
+            continue
+        reps = [
+            max(grouped, key=lambda c: (float(c.qscore), -int(c.pose_idx)))
+            for grouped in _by_ligand(scored).values()
+        ]
+        reps.sort(key=lambda c: (-float(c.qscore), int(c.ligand_idx), int(c.pose_idx)))
+        reps = _which_ligand_winner(
+            reps, wl_energy=wl_energy, wl_margin=wl_margin, wl_energy_w=wl_energy_w
+        )
+        for c in reps:
+            c.rank_score = float(c.qscore)
+        site_reps[str(site_id)] = reps
+
+    # Within-structure z of each site's best-candidate qscore = the relative decoy signal. It is
+    # only trustworthy with enough sites AND real spread (else _zscore amplifies tiny differences).
+    sites = [s for s in site_reps if site_reps[s]]
+    best_q = np.asarray([float(site_reps[s][0].qscore) for s in sites], dtype=float)
+    zmap = {s: float(z) for s, z in zip(sites, _zscore(best_q))}
+    z_meaningful = len(sites) >= 3 and float(np.std(best_q)) > 0.02
+
+    assignments: List[FinalAssignment] = []
+    rejections: List[AssignmentRejection] = []
+    used_per_ligand: Dict[int, int] = {}
+    for site_id in sorted(sites, key=str):
+        reps = site_reps[site_id]
+        winner = reps[0]
+        wq = float(winner.qscore)
+        z = zmap[site_id]
+        margin = float(wq - float(reps[1].qscore)) if len(reps) > 1 else None
+        winner.metrics["assignment_qscore"] = wq
+        winner.metrics["assignment_qscore_z"] = z
+        winner.metrics["assignment_margin"] = margin
+
+        reason = None
+        if wq < float(qscore_floor):
+            reason = "qscore_below_floor"
+        elif (
+            z_meaningful
+            and wq < float(qscore_strong)          # strong sites are accepted regardless of z
+            and z < float(qscore_accept_z)         # moderate site that is a relative outlier-low
+        ):
+            reason = "qscore_zscore_below_accept"
+        elif (
+            energy_reject is not None
+            and winner.mmgbsa is not None
+            and np.isfinite(float(winner.mmgbsa))
+            and float(winner.mmgbsa) > float(energy_reject)
+        ):
+            reason = "energy_clash_decoy"
+
+        if reason is not None:
+            winner.metrics["rejection_reason"] = reason
+            rejections.append(
+                AssignmentRejection(
+                    site_id=str(site_id),
+                    best_ligand_idx=int(winner.ligand_idx),
+                    best_pose_idx=int(winner.pose_idx),
+                    qscore=wq,
+                    mmgbsa=None if winner.mmgbsa is None else float(winner.mmgbsa),
+                    assignment_score=wq,
+                    assignment_margin=margin,
+                    rejection_reason=reason,
+                    stage=winner.stage,
+                    metrics=dict(winner.metrics),
+                    rank_score=winner.rank_score,
+                )
+            )
+            continue
+
+        emitted = 0
+        for rep in reps:                                       # top-N per site (default 1)
+            if emitted >= max(1, int(gate3_topk)):
+                break
+            if rep.qscore is None or float(rep.qscore) < float(qscore_floor):
+                continue
+            copy_idx = used_per_ligand.get(int(rep.ligand_idx), 0)
+            used_per_ligand[int(rep.ligand_idx)] = copy_idx + 1
+            assignments.append(
+                FinalAssignment(
+                    site_id=str(site_id),
+                    ligand_idx=int(rep.ligand_idx),
+                    pose_idx=int(rep.pose_idx),
+                    coords=np.asarray(rep.coords, dtype=float),
+                    qscore=float(rep.qscore),
+                    mmgbsa=None if rep.mmgbsa is None else float(rep.mmgbsa),
+                    composite=float(rep.qscore),
+                    stage=rep.stage,
+                    chain_id=chain_alphabet[copy_idx % len(chain_alphabet)],
+                    metrics=dict(rep.metrics),
+                    rank_score=rep.rank_score,
+                )
+            )
+            emitted += 1
+
+    if return_rejections:
+        return assignments, rejections
+    return assignments
+
+
 def gate3_select(
     candidates_by_site: Dict[str, List[PoseCandidate]],
     w_qscore: float,
@@ -481,6 +661,14 @@ def gate3_select(
     min_density_coverage: float = DEFAULT_MIN_DENSITY_COVERAGE,
     min_assignment_margin: float = DEFAULT_MIN_ASSIGNMENT_MARGIN,
     same_ligand_mmgbsa_window: float = DEFAULT_SAME_LIGAND_MMGSA_WINDOW,
+    qscore_floor: float = 0.25,
+    qscore_strong: float = 0.5,
+    qscore_accept_z: float = -0.5,
+    wl_energy: bool = True,
+    wl_margin: float = 0.05,
+    wl_energy_w: float = 0.6,
+    energy_reject: Optional[float] = None,
+    gate3_topk: int = 1,
     return_rejections: bool = False,
 ) -> List[FinalAssignment] | tuple[List[FinalAssignment], List[AssignmentRejection]]:
     """Per site, pick the single best candidate.
@@ -489,6 +677,20 @@ def gate3_select(
     Distinct chain IDs are assigned per copy of a ligand across sites
     (A, B, C, ...) in deterministic site_id order.
     """
+    if str(score_mode).lower() == "evidence":
+        return _gate3_evidence(
+            candidates_by_site,
+            qscore_floor=qscore_floor,
+            qscore_strong=qscore_strong,
+            qscore_accept_z=qscore_accept_z,
+            wl_energy=wl_energy,
+            wl_margin=wl_margin,
+            wl_energy_w=wl_energy_w,
+            energy_reject=energy_reject,
+            gate3_topk=gate3_topk,
+            return_rejections=return_rejections,
+        )
+
     assignments: List[FinalAssignment] = []
     rejections: List[AssignmentRejection] = []
     chain_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"

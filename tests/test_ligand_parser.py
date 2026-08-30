@@ -96,6 +96,21 @@ def test_load_ligands_raises_runtime_error_on_exception(mock_exists, mock_from_s
         LigandParser.load_ligands("CCO")
 
 
+@patch("ChemEM.parsers.ligand_parser.ligand_from_smiles")
+@patch("os.path.exists")
+def test_load_ligands_preserves_underlying_exception(mock_exists, mock_from_smiles):
+    """The blanket handler must not hide why loading actually failed."""
+    mock_exists.return_value = False
+    inner = ValueError("Bad Conformer Id")
+    mock_from_smiles.side_effect = inner
+
+    with pytest.raises(RuntimeError) as excinfo:
+        LigandParser.load_ligands("CCO")
+
+    assert "Bad Conformer Id" in str(excinfo.value)
+    assert excinfo.value.__cause__ is inner
+
+
 # --- Tests for ligand_from_smiles ---
 
 @patch("ChemEM.parsers.ligand_parser._make_ligand_from_rd_mol")

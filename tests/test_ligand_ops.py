@@ -121,13 +121,71 @@ def test_transfer_mol_coords_successful(mol3d):
     
     # Do the transfer
     result_mol = ligand_ops.transfer_mol_coords(ref_mol, new_mol)
-    
+
     assert result_mol is not None
-    # Check that heavy atom 0 coordinates match
-    res_pos = result_mol.GetConformer().GetAtomPosition(0)
-    assert res_pos.x == pytest.approx(ref_pos.x)
-    assert res_pos.y == pytest.approx(ref_pos.y)
-    assert res_pos.z == pytest.approx(ref_pos.z)
+    # Check EVERY atom, not just atom 0: a single-atom check can't catch an
+    # index-mapping bug that scrambles the remaining positions.
+    match = new_mol.GetSubstructMatch(ref_mol)
+    ref_conf = ref_mol.GetConformer()
+    res_conf = result_mol.GetConformer()
+    for ref_idx, new_idx in enumerate(match):
+        expected = ref_conf.GetAtomPosition(ref_idx)
+        got = res_conf.GetAtomPosition(new_idx)
+        assert got.x == pytest.approx(expected.x)
+        assert got.y == pytest.approx(expected.y)
+        assert got.z == pytest.approx(expected.z)
+
+
+def test_transfer_mol_coords_allocates_missing_conformer(mol3d):
+    """new_mol straight from SMILES has no conformer; one must be allocated.
+
+    Regression: transfer_mol_coords used to require the caller to embed first,
+    and AllChem.EmbedMolecule returns -1 (no conformer) on large flexible
+    ligands, giving 'ValueError: Bad Conformer Id'.
+    """
+    ref_mol = Chem.RemoveHs(mol3d("c1ccccc1"))
+
+    new_mol = Chem.MolFromSmiles("c1ccccc1")
+    assert new_mol.GetNumConformers() == 0  # deliberately not embedded
+
+    result_mol = ligand_ops.transfer_mol_coords(ref_mol, new_mol)
+
+    assert result_mol is not None
+    assert result_mol.GetNumConformers() == 1
+
+    ref_conf = ref_mol.GetConformer()
+    res_conf = result_mol.GetConformer()
+    for ref_idx, new_idx in enumerate(new_mol.GetSubstructMatch(ref_mol)):
+        expected = ref_conf.GetAtomPosition(ref_idx)
+        got = res_conf.GetAtomPosition(new_idx)
+        assert (got.x, got.y, got.z) == pytest.approx((expected.x, expected.y, expected.z))
+
+
+def test_transfer_mol_coords_no_ref_conformer_returns_none():
+    """A conformer-less reference has nothing to transfer -> None, not a crash."""
+    ref_mol = Chem.MolFromSmiles("c1ccccc1")
+    assert ref_mol.GetNumConformers() == 0
+
+    new_mol = Chem.MolFromSmiles("c1ccccc1")
+
+    assert ligand_ops.transfer_mol_coords(ref_mol, new_mol) is None
+
+
+def test_transfer_mol_coords_partial_match_returns_none(mol3d):
+    """A proper-substructure match would leave atoms parked at the origin."""
+    # Benzene matches toluene, but only covers 6 of its 7 heavy atoms.
+    ref_mol = Chem.RemoveHs(mol3d("c1ccccc1"))
+    new_mol = Chem.MolFromSmiles("Cc1ccccc1")
+
+    assert new_mol.GetSubstructMatch(ref_mol)  # a match does exist...
+    assert ligand_ops.transfer_mol_coords(ref_mol, new_mol) is None  # ...but is partial
+
+
+def test_transfer_mol_coords_no_match_returns_none(mol3d):
+    ref_mol = Chem.RemoveHs(mol3d("c1ccccc1"))
+    new_mol = Chem.MolFromSmiles("CCO")
+
+    assert ligand_ops.transfer_mol_coords(ref_mol, new_mol) is None
 
 # --- Tests for get_charged_atoms ---
 

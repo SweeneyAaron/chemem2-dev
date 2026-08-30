@@ -197,6 +197,239 @@ class TestFinalPolishGate(unittest.TestCase):
         self.assertAlmostEqual(sr._result_best_objective(out_res), 0.95)
 
 
+class _Clash:
+    """Minimal stand-in for the ClashResult fields _objective_from_eval reads."""
+
+    def __init__(self, count, penalty):
+        self.count = int(count)
+        self.penalty = float(penalty)
+
+
+class TestObjectiveFromEval(unittest.TestCase):
+    """The single objective convention. Regression guard for the bug where the
+    polish and branch-walker paths hard-coded `-inf` on any clash while
+    fit_in_map used the configured (soft) clash mode: on any ligand that cannot
+    reach zero clashes the two met at the no-regression gate, `-inf` lost to the
+    finite anchor, and the entire search was reverted away."""
+
+    def test_soft_mode_is_finite_for_a_clashing_pose(self):
+        cfg = types.SimpleNamespace(clash_mode="soft", clash_weight=1.0)
+        obj = sr._objective_from_eval(0.68, _Clash(count=7, penalty=0.5), cfg, 44)
+        self.assertTrue(np.isfinite(obj), "a clashing pose must stay rankable")
+        # raw - weight * penalty / n_atoms
+        self.assertAlmostEqual(obj, 0.68 - 0.5 / 44)
+
+    def test_soft_mode_ranks_two_clashing_poses(self):
+        cfg = types.SimpleNamespace(clash_mode="soft", clash_weight=1.0)
+        better = sr._objective_from_eval(0.68, _Clash(7, 0.5), cfg, 44)
+        worse = sr._objective_from_eval(0.55, _Clash(7, 0.5), cfg, 44)
+        self.assertGreater(better, worse)
+
+    def test_hard_mode_still_available_when_asked_for(self):
+        cfg = types.SimpleNamespace(clash_mode="hard", clash_weight=1.0)
+        self.assertEqual(
+            sr._objective_from_eval(0.68, _Clash(1, 0.5), cfg, 44), float("-inf")
+        )
+        self.assertAlmostEqual(
+            sr._objective_from_eval(0.68, _Clash(0, 0.0), cfg, 44), 0.68
+        )
+
+    def test_defaults_to_soft_when_config_lacks_the_fields(self):
+        obj = sr._objective_from_eval(0.68, _Clash(3, 0.44), types.SimpleNamespace(), 44)
+        self.assertTrue(np.isfinite(obj))
+
+    def test_branch_walk_config_carries_the_clash_convention(self):
+        cfg = sr.BranchWalkConfig()
+        self.assertEqual(cfg.clash_mode, "soft")
+        self.assertAlmostEqual(cfg.clash_weight, 1.0)
+
+
+class TestNoRegressionGateCrossConvention(unittest.TestCase):
+    """The gate must never rewind a run because one side carries a sentinel."""
+
+    def _fake_rl(self, final_result):
+        return types.SimpleNamespace(
+            _last_fit_in_map_result=final_result,
+            _atom_positions=np.zeros((1, 3)),
+        )
+
+    def _run_gate(self, rl, anchor, anchor_objective):
+        applied = {}
+
+        def fake_apply(refine_ligand, result):
+            applied["result"] = result
+            refine_ligand._atom_positions = np.asarray(result.best_coords_A).copy()
+            return refine_ligand
+
+        orig = sr.apply_refinement
+        sr.apply_refinement = fake_apply
+        try:
+            out = sr._apply_no_regression_gate(rl, anchor, anchor_objective)
+        finally:
+            sr.apply_refinement = orig
+        return out, applied
+
+    def test_does_not_revert_when_final_objective_is_inf_but_raw_is_better(self):
+        # The exact 8ul9_dga failure: search reached raw 0.68, a polish stamped
+        # -inf onto its objective, and the finite anchor (0.55) won the compare.
+        anchor = _result(0.55350, best_coords=[[0.0, 0.0, 0.0]], best_raw=0.56644)
+        final = _result(float("-inf"), best_coords=[[3.0, 0.0, 0.0]], best_raw=0.68)
+        rl = self._fake_rl(final)
+
+        out, applied = self._run_gate(rl, anchor, 0.55350)
+
+        self.assertFalse(out._sr2_reverted_to_anchor)
+        self.assertNotIn("result", applied)
+        self.assertIs(out._last_fit_in_map_result, final)
+        np.testing.assert_allclose(out._atom_positions, np.zeros((1, 3)))
+
+    def test_still_reverts_when_inf_final_is_genuinely_worse_on_raw(self):
+        anchor = _result(0.55350, best_coords=[[0.0, 0.0, 0.0]], best_raw=0.56644)
+        final = _result(float("-inf"), best_coords=[[9.0, 0.0, 0.0]], best_raw=0.21)
+        rl = self._fake_rl(final)
+
+        out, applied = self._run_gate(rl, anchor, 0.55350)
+
+        self.assertTrue(out._sr2_reverted_to_anchor)
+        self.assertIs(applied["result"], anchor)
+
+    def test_both_inf_keeps_the_search_result(self):
+        anchor = _result(float("-inf"), best_coords=[[0.0, 0.0, 0.0]], best_raw=0.55)
+        final = _result(float("-inf"), best_coords=[[2.0, 0.0, 0.0]], best_raw=0.68)
+        rl = self._fake_rl(final)
+
+        out, applied = self._run_gate(rl, anchor, float("-inf"))
+
+        self.assertFalse(out._sr2_reverted_to_anchor)
+        self.assertNotIn("result", applied)
+
+    def test_unrankable_pair_keeps_the_search_result(self):
+        anchor = _result(float("-inf"), best_coords=[[0.0, 0.0, 0.0]], best_raw=float("nan"))
+        final = _result(float("-inf"), best_coords=[[2.0, 0.0, 0.0]], best_raw=float("nan"))
+        rl = self._fake_rl(final)
+
+        out, applied = self._run_gate(rl, anchor, float("-inf"))
+
+        self.assertFalse(out._sr2_reverted_to_anchor)
+        self.assertNotIn("result", applied)
+
+
+class TestFragmentMinDecision(unittest.TestCase):
+    """`-inf >= -inf` made the overall-objective test a tautology, so the
+    fragment minimiser accepted on iteration 1 and never pinned a fragment —
+    `--sr2-minimiser fragment` silently degraded to a plain minimisation."""
+
+    def test_does_not_blindly_accept_when_both_objectives_are_inf(self):
+        # No block dropped, so the ONLY thing standing between this and "accept"
+        # is the overall-objective test. `-inf >= -inf` used to pass it.
+        blocks = [0.60, 0.55, 0.50]
+        decision, _ = sr._fragment_min_decision(
+            blocks, [0.61, 0.56, 0.51], float("-inf"), float("-inf"), block_tol=0.1
+        )
+        self.assertNotEqual(decision, "accept")
+
+    def test_pins_the_collapsed_block_when_objectives_are_inf(self):
+        decision, dropped = sr._fragment_min_decision(
+            [0.60, 0.55, 0.50], [0.60, 0.20, 0.50],  # block 1 collapsed
+            float("-inf"), float("-inf"), block_tol=0.1,
+        )
+        self.assertEqual(decision, "pin")
+        self.assertEqual(dropped, [1])
+
+    def test_accepts_when_objective_improves_and_no_block_drops(self):
+        blocks = [0.60, 0.55, 0.50]
+        decision, dropped = sr._fragment_min_decision(
+            blocks, [0.62, 0.56, 0.51], 0.50, 0.55, block_tol=0.1
+        )
+        self.assertEqual(decision, "accept")
+        self.assertEqual(dropped, [])
+
+    def test_pins_worst_block_when_overall_regresses_within_tol(self):
+        decision, dropped = sr._fragment_min_decision(
+            [0.60, 0.55], [0.58, 0.52], 0.55, 0.40, block_tol=0.1
+        )
+        self.assertEqual(decision, "pin")
+        self.assertEqual(dropped, [1])  # -0.03 is the larger drop
+
+
+class TestBestPoseTracking(unittest.TestCase):
+    """The loop must revert to the best pose it produced, not to the anchor.
+
+    Previously `best_raw_score_so_far` was a bare float with no pose attached, so
+    a run that improved for several iterations and then slipped on the last one
+    rewound all the way to its input, discarding every intermediate gain."""
+
+    def _drive(self, iteration_objectives, anchor_objective=0.55):
+        """Run refine_ligand with the search stubbed out, one entry per iteration."""
+        anchor = _result(anchor_objective, best_coords=[[0.0, 0.0, 0.0]],
+                         best_raw=anchor_objective)
+        rl = types.SimpleNamespace(
+            _atom_positions=np.zeros((1, 3)),
+            _last_fit_in_map_result=anchor,
+            _rotor_tree=[types.SimpleNamespace(block_id=0)],
+            _block_qscores=[0.5],
+            get_best_block_by_qscore=lambda: 0,
+        )
+        pending = list(iteration_objectives)
+
+        def fake_fit_and_accept(refine_ligand, *a, **k):
+            return refine_ligand
+
+        def fake_branch_walker(refine_ligand, **k):
+            return ["candidate"] if pending else []
+
+        def fake_refit(base_rl, branch_results, *a, **k):
+            # Mirrors the real path: the winning clone comes back with the pose
+            # already applied AND its fit result attached.
+            objective, x = pending.pop(0)
+            base_rl._last_fit_in_map_result = _result(
+                objective, best_coords=[[x, 0.0, 0.0]], best_raw=objective
+            )
+            base_rl._atom_positions = np.asarray([[x, 0.0, 0.0]], dtype=float)
+            return base_rl
+
+        def fake_apply(refine_ligand, result):
+            refine_ligand._atom_positions = np.asarray(result.best_coords_A).copy()
+            return refine_ligand
+
+        originals = (
+            sr._fit_and_accept, sr.branch_walker,
+            sr._refit_branch_candidates, sr.apply_refinement,
+        )
+        sr._fit_and_accept = fake_fit_and_accept
+        sr.branch_walker = fake_branch_walker
+        sr._refit_branch_candidates = fake_refit
+        sr.apply_refinement = fake_apply
+        try:
+            return sr.refine_ligand(
+                rl, scorer="qscore", max_iters=len(iteration_objectives),
+                patience=None, kick_config=None, polish_cb=None,
+            )
+        finally:
+            (sr._fit_and_accept, sr.branch_walker,
+             sr._refit_branch_candidates, sr.apply_refinement) = originals
+
+    def test_reverts_to_best_iteration_not_the_anchor(self):
+        # Peaks at 0.68 on iteration 2, then slides to 0.50.
+        out = self._drive([(0.60, 1.0), (0.68, 2.0), (0.50, 3.0)])
+        self.assertTrue(out._sr2_reverted_to_anchor)
+        np.testing.assert_allclose(out._atom_positions, [[2.0, 0.0, 0.0]])
+        self.assertAlmostEqual(
+            sr._result_best_objective(out._last_fit_in_map_result), 0.68
+        )
+
+    def test_keeps_final_pose_when_it_is_the_best(self):
+        out = self._drive([(0.60, 1.0), (0.68, 2.0), (0.80, 3.0)])
+        self.assertFalse(out._sr2_reverted_to_anchor)
+        np.testing.assert_allclose(out._atom_positions, [[3.0, 0.0, 0.0]])
+
+    def test_falls_back_to_anchor_when_search_never_improves(self):
+        # Nothing beats the 0.55 anchor -> previous behaviour, revert to it.
+        out = self._drive([(0.40, 1.0), (0.30, 2.0)], anchor_objective=0.55)
+        self.assertTrue(out._sr2_reverted_to_anchor)
+        np.testing.assert_allclose(out._atom_positions, [[0.0, 0.0, 0.0]])
+
+
 class TestBlockFreezing(unittest.TestCase):
     """get_blocks_to_update freezes well-fit blocks out of the torsion search."""
 

@@ -428,6 +428,16 @@ class AlphaMask:
                     base_origin=base_origin,
                 )
                 
+            elif getattr(self.system.options, "manual_site", False):
+                # The user defined the search volume explicitly; spawning extra sites
+                # from stray density blobs is exactly the behaviour --manual-site exists
+                # to suppress (a decoy site can outscore the real one, and cross-site
+                # scores are not comparable). Drop the feature instead.
+                self.system.log(
+                    f"-- [manual-site] feature {num} centroid "
+                    f"{np.round(sub_centroid, 2).tolist()} lies outside every manual "
+                    "site; not creating a new site for it.")
+
             else:
                 binding_site, resampled_density = self._create_new_site_from_submap(
                     site_id=site_id,
@@ -605,8 +615,11 @@ class AlphaMask:
         rdkit_mol = write_residues_to_pdb(residues, self.protein_openff_structure.positions, pdb_path, write=False)
     
         pdb_path = os.path.join(self.system.output, f"site_lining_residues_{site_id}.pdb")
-        rdkit_lining_mol = write_residues_to_pdb(residues, self.protein_openff_structure.positions, pdb_path)
-    
+        rdkit_lining_mol, lining_hydrogens = write_residues_to_pdb(
+            residues, self.protein_openff_structure.positions, pdb_path,
+            return_hydrogens=True,
+        )
+
         data = {
             "residues": residues,
             "lining_residues": residues,
@@ -627,6 +640,7 @@ class AlphaMask:
             "key": site_id,
             "rdkit_mol": rdkit_mol,
             "rdkit_lining_mol": rdkit_lining_mol,
+            "lining_hydrogens": lining_hydrogens,
             "opening_points": [],
             "candidate_opening_points": [],
             "solvent_open_map": np.zeros(site_distance_map.density_map.shape),
@@ -718,8 +732,9 @@ class AlphaMask:
         # Inspection outputs alongside the lining PDB so the user can see exactly what
         # docking will receive for this site.
         pdb_path = os.path.join(self.output, f"site_{num}_lining.pdb")
-        rdkit_lining_mol = write_residues_to_pdb(
-            residues, self.protein_openff_structure.positions, pdb_path
+        rdkit_lining_mol, lining_hydrogens = write_residues_to_pdb(
+            residues, self.protein_openff_structure.positions, pdb_path,
+            return_hydrogens=True,
         )
 
         EMMap(new_origin, apix, sub_density.astype(np.float32),
@@ -764,6 +779,7 @@ class AlphaMask:
             "key": int(num),
             "rdkit_mol": None,
             "rdkit_lining_mol": rdkit_lining_mol,
+            "lining_hydrogens": lining_hydrogens,
             "opening_points": [],
             "candidate_opening_points": [],
             "solvent_open_map": np.zeros(sub_density.shape, dtype=np.float32),
@@ -927,11 +943,26 @@ class AlphaMask:
                 
                 for centroid in self.system.centroid:
                     if np.all(centroid > min_coords) and np.all(centroid < max_coords):
-                        
-                        
+
+
                         if key in self.system.binding_site_maps:
-                            new_binding_sites[key] = site 
+                            new_binding_sites[key] = site
                             new_maps[key] = self.system.binding_site_maps[key]
+                            break
+
+                        # --dock-full-map builds the docking grid from the site geometry,
+                        # so a user-supplied centroid must not be discarded just because
+                        # segmentation found no blob here. Same for --manual-site: the
+                        # user defined this volume deliberately, and segmentation finding
+                        # nothing inside it is not a reason to throw it away.
+                        if (getattr(self.system.options, "dock_full_map", False)
+                                or getattr(self.system.options, "manual_site", False)):
+                            new_binding_sites[key] = site
+                            self.system.log(
+                                f"-- Keeping centroid-selected site {key} with no "
+                                f"segmented density "
+                                f"({'--dock-full-map' if getattr(self.system.options, 'dock_full_map', False) else '--manual-site'})."
+                            )
                             break
         
             

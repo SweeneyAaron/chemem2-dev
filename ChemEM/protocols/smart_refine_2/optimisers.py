@@ -208,9 +208,12 @@ def _transform_coords(
     base_coords_A: np.ndarray,
     rotation_matrix: np.ndarray,
     translation_A: np.ndarray,
+    pivot: np.ndarray | None = None,
 ) -> np.ndarray:
-    centroid = np.mean(base_coords_A, axis=0)
-    return ((base_coords_A - centroid) @ rotation_matrix.T) + centroid + translation_A
+    # Rotate about `pivot` when given (covalent: the warhead, so it stays fixed),
+    # else the ligand centroid. Default pivot=None reproduces the original behaviour.
+    center = np.mean(base_coords_A, axis=0) if pivot is None else np.asarray(pivot, dtype=np.float64)
+    return ((base_coords_A - center) @ rotation_matrix.T) + center + translation_A
 
 
 def _ligand_radius_A(coords_A: np.ndarray) -> float:
@@ -630,6 +633,34 @@ def fit_in_map(
     ligand_radius = _ligand_radius_A(base_coords)
     rotation = np.eye(3, dtype=np.float64)
     translation = np.zeros(3, dtype=np.float64)
+    # Covalent ligand: pin the bonded warhead. Rotate the rigid body about the warhead
+    # (not the centroid) and freeze the translation DOF, so rigid-body moves can never
+    # displace the warhead off the protein anchor. Gated on _covalent_warhead_row, which
+    # is set only for covalent ligands and rides copy.copy clones -> non-covalent
+    # ligands keep pivot=None (centroid) and free translation, i.e. unchanged behaviour.
+    warhead_row = getattr(refine_ligand, "_covalent_warhead_row", None)
+    covalent_pivot = base_coords[int(warhead_row)].copy() if warhead_row is not None else None
+    freeze_translation = warhead_row is not None
+    # With MORE than one covalent bond the ligand is pinned at two points, so the
+    # only rigid move that keeps every bond intact is a rotation about the axis
+    # through the bonded atoms. Rotation gradients are projected onto that axis
+    # below; with three or more anchors no rotation is legal at all. The tether
+    # penalty alone is not enough here -- it is a soft flat-bottom term and the
+    # search will happily trade a broken bond for a better Q-score.
+    covalent_axis = None
+    freeze_rotation = False
+    _anchors = getattr(refine_ligand, "_covalent_anchors", None) or []
+    if len(_anchors) == 2:
+        rows = [int(a[0]) for a in _anchors]
+        if all(0 <= r < base_coords.shape[0] for r in rows):
+            axis = base_coords[rows[1]] - base_coords[rows[0]]
+            norm = float(np.linalg.norm(axis))
+            if norm > 1e-9:
+                covalent_axis = axis / norm
+            else:
+                freeze_rotation = True
+    elif len(_anchors) > 2:
+        freeze_rotation = True
     steps = 0
     evaluations = 0
     trace = []
@@ -692,7 +723,7 @@ def fit_in_map(
             clash=clash,
         )
 
-    current_coords = _transform_coords(base_coords, rotation, translation)
+    current_coords = _transform_coords(base_coords, rotation, translation, covalent_pivot)
     current = evaluate(current_coords)
     initial = current
     best = current
@@ -718,7 +749,7 @@ def fit_in_map(
         if step_size <= min_step:
             break
 
-        if steps % 2 == 0:
+        if steps % 2 == 0 and not freeze_translation:
             move_type = "translation"
             gradient = np.zeros(3, dtype=np.float64)
             for axis in range(3):
@@ -726,8 +757,8 @@ def fit_in_map(
                 minus_translation = translation.copy()
                 plus_translation[axis] += fd_delta
                 minus_translation[axis] -= fd_delta
-                plus_coords = _transform_coords(base_coords, rotation, plus_translation)
-                minus_coords = _transform_coords(base_coords, rotation, minus_translation)
+                plus_coords = _transform_coords(base_coords, rotation, plus_translation, covalent_pivot)
+                minus_coords = _transform_coords(base_coords, rotation, minus_translation, covalent_pivot)
                 gradient[axis] = _finite_difference_delta(
                     evaluate(plus_coords).objective,
                     evaluate(minus_coords).objective,
@@ -743,6 +774,11 @@ def fit_in_map(
                     return rotation, trial_translation
             else:
                 proposed = None
+        elif freeze_rotation:
+            #Three or more covalent bonds leave no rigid-body freedom at all;
+            #the pose is refined by torsions only.
+            move_type = "rotation"
+            proposed = None
         else:
             move_type = "rotation"
             gradient = np.zeros(3, dtype=np.float64)
@@ -754,14 +790,18 @@ def fit_in_map(
                 minus_rv[axis] = -angle_delta
                 plus_rotation = _rotation_matrix(plus_rv) @ rotation
                 minus_rotation = _rotation_matrix(minus_rv) @ rotation
-                plus_coords = _transform_coords(base_coords, plus_rotation, translation)
-                minus_coords = _transform_coords(base_coords, minus_rotation, translation)
+                plus_coords = _transform_coords(base_coords, plus_rotation, translation, covalent_pivot)
+                minus_coords = _transform_coords(base_coords, minus_rotation, translation, covalent_pivot)
                 gradient[axis] = _finite_difference_delta(
                     evaluate(plus_coords).objective,
                     evaluate(minus_coords).objective,
                     2.0 * angle_delta,
                 )
             gradient = np.where(np.isfinite(gradient), gradient, 0.0)
+            # Two covalent bonds: keep only the rotation component about the axis
+            # through the bonded atoms, the one rotation that holds both bonds.
+            if covalent_axis is not None:
+                gradient = covalent_axis * float(np.dot(gradient, covalent_axis))
             norm = float(np.linalg.norm(gradient))
             if norm > 0.0:
                 direction = gradient / norm
@@ -787,6 +827,7 @@ def fit_in_map(
                     base_coords,
                     trial_rotation,
                     trial_translation,
+                    covalent_pivot,
                 )
                 trial = evaluate(trial_coords)
                 if trial.objective > current.objective + improvement_tol:

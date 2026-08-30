@@ -29,6 +29,105 @@
 #include "SearchFunctions.h"
 #include "GeometryUtils.h"
 #include "nealderMead.h"
+#include "LbfgsRefine.h"   // joint projected L-BFGS with FD gradients (--local-minimiser lbfgs)
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+
+// ---------------------------------------------------------------------------
+// Optional refinement profiling (CHEMEM_DOCK_PROFILE=1).
+//
+// The local-refine loop is ~100% of docking runtime, so choosing between the
+// staged Nelder-Mead and the joint L-BFGS needs real evaluation counts rather
+// than an argument about asymptotics: NM costs ~1-2 score calls per iteration
+// while FD L-BFGS costs 2*D per iteration, so which one is cheaper is an
+// empirical question about how many iterations each actually burns.
+//
+// The gate is read once into a static const bool, so when profiling is off the
+// hot path pays a predictable-branch test and nothing else. Counters are atomic
+// because the refine loops are `omp for`. Times are summed across threads, so
+// they are CPU-time totals, not wall clock.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct DockProfile {
+    std::atomic<uint64_t> inner_calls{0};
+    std::atomic<uint64_t> inner_nfev{0};
+    std::atomic<uint64_t> inner_ns{0};
+    std::atomic<uint64_t> polish_calls{0};
+    std::atomic<uint64_t> polish_nfev{0};
+    std::atomic<uint64_t> polish_ns{0};
+};
+
+DockProfile g_dock_profile;
+
+const bool g_dock_profile_on = [] {
+    const char *e = std::getenv("CHEMEM_DOCK_PROFILE");
+    return e != nullptr && *e != '\0' && *e != '0';
+}();
+
+// Adds one refinement's evaluation count and elapsed time to the totals on scope
+// exit, so the single-return refine bodies below need no extra bookkeeping.
+struct ProfileScope {
+    std::atomic<uint64_t> &calls;
+    std::atomic<uint64_t> &nfev_total;
+    std::atomic<uint64_t> &ns_total;
+    const uint64_t &nfev;
+    std::chrono::steady_clock::time_point t0;
+
+    ProfileScope(std::atomic<uint64_t> &c, std::atomic<uint64_t> &n,
+                 std::atomic<uint64_t> &t, const uint64_t &counter)
+        : calls(c), nfev_total(n), ns_total(t), nfev(counter),
+          t0(std::chrono::steady_clock::now()) {}
+
+    ~ProfileScope() {
+        if (!g_dock_profile_on) return;
+        const auto dt = std::chrono::steady_clock::now() - t0;
+        calls.fetch_add(1, std::memory_order_relaxed);
+        nfev_total.fetch_add(nfev, std::memory_order_relaxed);
+        ns_total.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(dt).count()),
+            std::memory_order_relaxed);
+    }
+};
+
+void report_dock_profile(const char *minimiser_name) {
+    if (!g_dock_profile_on) return;
+    const uint64_t ic = g_dock_profile.inner_calls.load();
+    const uint64_t pc = g_dock_profile.polish_calls.load();
+    const uint64_t in = g_dock_profile.inner_nfev.load();
+    const uint64_t pn = g_dock_profile.polish_nfev.load();
+    const double   it = g_dock_profile.inner_ns.load()  / 1e6;   // ms, summed over threads
+    const double   pt = g_dock_profile.polish_ns.load() / 1e6;
+
+    std::cout << "[dock-profile] minimiser=" << minimiser_name << "\n"
+              << "[dock-profile] inner  refines=" << ic
+              << " evals=" << in
+              << " evals/refine=" << (ic ? double(in) / double(ic) : 0.0)
+              << " cpu_ms=" << it
+              << " ms/refine=" << (ic ? it / double(ic) : 0.0)
+              << " us/eval=" << (in ? (it * 1000.0) / double(in) : 0.0) << "\n"
+              << "[dock-profile] polish refines=" << pc
+              << " evals=" << pn
+              << " evals/refine=" << (pc ? double(pn) / double(pc) : 0.0)
+              << " cpu_ms=" << pt
+              << " ms/refine=" << (pc ? pt / double(pc) : 0.0)
+              << " us/eval=" << (pn ? (pt * 1000.0) / double(pn) : 0.0)
+              << std::endl;
+
+    g_dock_profile.inner_calls.store(0);
+    g_dock_profile.inner_nfev.store(0);
+    g_dock_profile.inner_ns.store(0);
+    g_dock_profile.polish_calls.store(0);
+    g_dock_profile.polish_nfev.store(0);
+    g_dock_profile.polish_ns.store(0);
+}
+
+} // namespace
 
 static inline uint64_t splitmix64(uint64_t x) {
     x += 0x9e3779b97f4a7c15ULL;
@@ -111,11 +210,15 @@ void AntColonyOptimizer::initialize_pheromones() {
 
 //initiliser
 AntColonyOptimizer::AntColonyOptimizer(const PreComputedData &precomputed_data,
-                                            const RDKit::ROMol &original_mol):
+                                            const RDKit::ROMol &original_mol,
+                                            ECHOWeights weights):
     pre(precomputed_data),
     m_original_mol(original_mol),
-    m_scorer_base(precomputed_data),
-    m_baseseed(1234567ULL),
+    m_scorer_base(precomputed_data, weights),
+    // Was a hard-coded 1234567ULL, which made every run on every machine replay one
+    // identical ACO trajectory. Now driven by --dock-seed. Reading through the ctor
+    // PARAMETER (not the `pre` member) keeps this independent of member-init order.
+    m_baseseed(precomputed_data.config().dock_seed),
     m_theta(0.25),
     m_rho(0.15),
     m_tmax(0.0), 
@@ -988,7 +1091,15 @@ AntColonyOptimizer::refinePoseSplitNmFromDiscrete(
 
     std::vector<double> x_tmp(D, 0.5);
 
+    // Counted here rather than by summing NelderMeadOptimizer::Result::nfev, because
+    // every objective call in this function -- the ladders, the jitter restarts and the
+    // bare eval_full below -- funnels through this one closure, so nothing can be missed.
+    uint64_t prof_nfev = 0;
+    ProfileScope prof_scope(g_dock_profile.inner_calls, g_dock_profile.inner_nfev,
+                            g_dock_profile.inner_ns, prof_nfev);
+
     auto eval_full = [&](const std::vector<double>& x_norm_in) -> double {
+        ++prof_nfev;
         std::vector<double> x_norm = x_norm_in;
         clamp01_inplace(x_norm);
         restore_coords(conf, baseline_coords);
@@ -998,6 +1109,39 @@ AntColonyOptimizer::refinePoseSplitNmFromDiscrete(
 
     std::vector<double> x_best_full(D, 0.5);
     double bestScore = eval_full(x_best_full);
+
+    // --local-minimiser lbfgs: one joint projected L-BFGS over all D dims, replacing the
+    // staged TR-then-torsion simplex below. x = 0.5^D decodes to a zero delta, i.e. to
+    // exactly the discrete ACO pose, so both paths start from the same point.
+    //
+    // The point of going joint is that the ladder freezes the 6 rigid-body dims before it
+    // touches the torsions, so a pose that needs to slide AND rotate a bond at the same
+    // time cannot be reached at all. The cost side is the opposite of free: a central-FD
+    // gradient is 2*D evaluations per iteration, versus ~1-2 for a simplex step.
+    if (pre.config().local_minimiser == 1) {
+        lbfgs_refine::LbfgsParams lp;
+        lp.max_iters = manyTors ? 80 : 60;
+        lp.history   = 8;
+        lp.fd_h      = 1e-2;
+        auto res = lbfgs_refine::minimize_box(eval_full, x_best_full, lp);
+
+        // minimize_box evaluates x0 first and tracks the best point seen, so res.f can
+        // only tie or beat bestScore. Guarded anyway so a future change to either cannot
+        // silently return a worse pose than the seed.
+        const std::vector<double> &x_final = (res.f < bestScore) ? res.x : x_best_full;
+        if (res.f < bestScore) bestScore = res.f;
+
+        std::vector<double> disc_refined = convertRealSpaceToDiscrete(discSol, x_final);
+
+        restore_coords(conf, baseline_coords);
+        applyNormalizedDeltasOnBaseline(pre, conf, x_final, base_tors_deg);
+
+        SplitNmResult out;
+        out.score   = bestScore;
+        out.mol     = std::move(workMol);
+        out.discSol = std::move(disc_refined);
+        return out;
+    }
 
     uint64_t seed = splitmix64(m_baseseed ^ (0x9e3779b97f4a7c15ULL + static_cast<uint64_t>(D)));
     auto mix_q = [&](double v, double scale) {
@@ -1598,7 +1742,12 @@ AntColonyOptimizer::runLocalNelderMeadFromSeeds(
         return simplex;
     };
 
+    uint64_t prof_nfev = 0;
+    ProfileScope prof_scope(g_dock_profile.polish_calls, g_dock_profile.polish_nfev,
+                            g_dock_profile.polish_ns, prof_nfev);
+
     auto obj = [&](const std::vector<double> &x_norm_in) -> double {
+        ++prof_nfev;
         std::vector<double> x_norm = x_norm_in;
         clamp01_inplace(x_norm);
 
@@ -1606,6 +1755,24 @@ AntColonyOptimizer::runLocalNelderMeadFromSeeds(
         applyNormalizedSolution(pre, conf, x_norm, ini_trans_xyz, ini_rot_deg, ini_tors_deg);
         return scorer.score(conf, rep_max, map_score_function);
     };
+
+    // --local-minimiser lbfgs: joint projected L-BFGS in place of the staged restart
+    // schedule below, on the same `obj` closure and the same normalized box. Placed
+    // ahead of the stage/RNG setup so that setup is skipped entirely in this mode.
+    // A little deeper than the inner refine, since this runs once per seed rather than
+    // once per ant per ACO iteration, and it is what the returned poses are ranked by.
+    if (pre.config().local_minimiser == 1) {
+        std::vector<double> x_lb(D, 0.5);
+        lbfgs_refine::LbfgsParams lp;
+        lp.max_iters = (nTors > 10) ? 100 : 70;
+        lp.history   = 8;
+        lp.fd_h      = 1e-2;
+        auto res = lbfgs_refine::minimize_box(obj, x_lb, lp);
+
+        restore_coords(conf, baseCoords);
+        applyNormalizedSolution(pre, conf, res.x, ini_trans_xyz, ini_rot_deg, ini_tors_deg);
+        return { res.f, std::move(workMol) };
+    }
 
     // -----------------------------
     // Staged restart schedule (speed-tuned for && stopping)
@@ -1778,32 +1945,36 @@ py::list AntColonyOptimizer::optimize() {
         }
         omp_set_num_threads(config.n_cpu);
         
-        #pragma omp parallel 
+        #pragma omp parallel
         {
-            //make sure this works
-            static thread_local std::mt19937 tl_rng;
-            static thread_local bool tl_seeded = false;
-            if (!tl_seeded) {
-                int tid = omp_get_thread_num();
-                uint64_t s = splitmix64(m_baseseed ^ uint64_t(tid));
-                // mt19937 takes 32-bit seed fine; you can also seed_seq if you want
-                tl_rng.seed(static_cast<uint32_t>(s));
-                tl_seeded = true;
-            }
+            // Each ant is seeded from (baseseed, iteration, ant index) rather than
+            // from the thread id. Two bugs this fixes:
+            //   * per-THREAD seeding made results depend on --ncpu (measured: 4 vs 8
+            //     threads moved pose scores by up to 0.5 units), because the thread
+            //     count decides which ant draws which stream;
+            //   * the generator used to be `static thread_local`, so it was seeded
+            //     once per thread per PROCESS and the stream carried across ligands
+            //     -- the same molecule docked twice in one run scored -6.217939 then
+            //     -6.221098. Ligand order changed every later ligand's result.
+            // `iter` must be in the mix or every iteration replays the same ants.
+            // The generator is declared once per thread and re-seeded per ant to
+            // avoid rebuilding mt19937's 2.5 kB state each time.
+            std::mt19937 rng;
             ECHOScore scorer = m_scorer_base;
             #pragma omp for schedule(static)
             for (int a = 0; a < static_cast<int>(config.n_global_search); ++a) {
+                 rng.seed(static_cast<uint32_t>(
+                     splitmix64(m_baseseed ^ (uint64_t(iter) << 32) ^ uint64_t(a))));
                  auto& ant = m_ants_vec[a];
-                 construct_solution(tl_rng, ant.sol, alpha_now);
+                 construct_solution(rng, ant.sol, alpha_now);
                 
                  RDKit::ROMol mol(m_original_mol); 
                  apply_ant_solution(mol.getConformer(), ant.sol);
                  ant.score = scorer.score(mol.getConformer(), repCap_discrete, inner_map_score);
                  
              }
-        }//end omp para 
-        
-        
+        }//end omp para
+
         //sort ants by best scoring
         const unsigned K = std::min<unsigned>(config.n_local_search, m_ants_vec.size());
         if (K==0) {
@@ -1923,15 +2094,17 @@ py::list AntColonyOptimizer::optimize() {
     const unsigned seedCount =
         std::min<unsigned>(static_cast<unsigned>(bestPerIter.size()), config.topN + extraSeeds);
     
-    // Collect all candidates produced by final polish (NM only)
-    std::vector<IterBest> candidateList;
-    candidateList.reserve(seedCount);
-    
+    // Collect all candidates produced by final polish (NM only).
+    // Sized up front and written by loop index: merging thread-local vectors under
+    // an omp critical made candidateList's order depend on which thread arrived
+    // first, and the std::sort below is not stable, so exactly-tied scores could
+    // permute and the greedy RMSD dedup would then keep different representatives.
+    // That would break --dock-seed's promise of --ncpu independence on ties.
+    std::vector<IterBest> candidateList(seedCount);
+
     const int nThreads = std::max(1, config.n_cpu);
     #pragma omp parallel num_threads(nThreads)
     {
-        std::vector<IterBest> localCandidates;
-        localCandidates.reserve(16);
         ECHOScore scorer = m_scorer_base;
         #pragma omp for schedule(dynamic,1)
         for (int i = 0; i < static_cast<int>(seedCount); ++i) {
@@ -1958,21 +2131,14 @@ py::list AntColonyOptimizer::optimize() {
             cand.score   = nmScore;
             cand.discSol = seed.discSol;     // keep original discrete seed (or replace if you also map back)
             cand.mol     = std::move(nmMol);
-    
-            localCandidates.push_back(std::move(cand));
-        }
-        #pragma omp critical
-        {
-            candidateList.insert(
-                candidateList.end(),
-                std::make_move_iterator(localCandidates.begin()),
-                std::make_move_iterator(localCandidates.end())
-            );
+
+            candidateList[static_cast<std::size_t>(i)] = std::move(cand);
         }
     }//end para
-    // Sort candidates by score ascending (lower is better)
-    std::sort(candidateList.begin(), candidateList.end(),
-              [](const IterBest &A, const IterBest &B){ return A.score < B.score; });
+    // Sort candidates by score ascending (lower is better). stable_sort so that
+    // exactly-tied scores keep seed order and the dedup below is reproducible.
+    std::stable_sort(candidateList.begin(), candidateList.end(),
+                     [](const IterBest &A, const IterBest &B){ return A.score < B.score; });
     
     // Greedily select up to nReturn, ensuring uniqueness by RMSD
     for (const auto &cand : candidateList) {
@@ -1991,6 +2157,8 @@ py::list AntColonyOptimizer::optimize() {
       auto coords = conformerToCoords(cand.mol.getConformer());
       out.append(py::make_tuple(cand.score, coords));
     }
+
+    report_dock_profile(config.local_minimiser == 1 ? "lbfgs" : "nelder-mead");
 
     return out;
 }

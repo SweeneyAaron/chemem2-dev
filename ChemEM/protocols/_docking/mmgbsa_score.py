@@ -10,16 +10,18 @@ Created on Fri Jul 11 12:54:59 2025
 from openmm.app import HBonds, OBC2
 from openmm import( unit,
                    CustomNonbondedForce,
-                   NonbondedForce, 
-                   CustomGBForce, 
-                   VerletIntegrator, 
-                   CustomExternalForce, 
+                   NonbondedForce,
+                   CustomGBForce,
+                   VerletIntegrator,
+                   CustomExternalForce,
                    GBSAOBCForce,
+                   LocalEnergyMinimizer,
                    )
 import parmed as pmd
 import mdtraj as md
 import numpy as np
-import copy 
+import copy
+from scipy.spatial import cKDTree
 
 from dataclasses import dataclass
 from typing import Dict, List
@@ -36,6 +38,7 @@ class PoseScore:
     pose_idx    : int
     deltaG          : float
     components  : Dict[str, float]      # {"ΔEEL": …, "ΔVDW": …, …}
+    min_shift_A : float = None          # ligand RMSD moved by pre-min (None if not minimised)
 
     def to_row(self):
         base = {"ligand": self.ligand_name, "pose": self.pose_idx, "deltaG": self.deltaG}
@@ -113,6 +116,248 @@ def ligand_traj_to_sdf(traj ,ligand ,outfile):
         with Chem.SDWriter(outfile) as w:
             w.write(rdmol)
         
+# --------------------------------------------------------------------------- #
+# Pocket minimisation: relax the ligand inside a small pinned pocket of surrounding
+# residues, then score the FULL complex (no minimise). Truncating the minimisation
+# system to the pocket makes each force eval ~10-100x cheaper than a whole-protein
+# minimise, while the 1.2 nm nonbonded cutoff means the pocket already contains every
+# atom that interacts with the ligand.
+# --------------------------------------------------------------------------- #
+def _pocket_precompute(complex_struct, rec_idx, rec_pos_A):
+    """Per-ligand-identity constants for pocket selection: a KDTree over the receptor
+    atoms and a receptor residue -> complex-atom-index map (for whole-residue expansion)."""
+    atoms = list(complex_struct.atoms)
+    row_res = np.empty(len(rec_idx), dtype=np.int64)
+    res_atoms = {}
+    for row, ai in enumerate(np.asarray(rec_idx, dtype=int)):
+        residue_idx = int(atoms[int(ai)].residue.idx)
+        row_res[row] = residue_idx
+        res_atoms.setdefault(residue_idx, []).append(int(ai))
+    return {"tree": cKDTree(np.asarray(rec_pos_A, dtype=float)),
+            "row_res": row_res, "res_atoms": res_atoms}
+
+
+def _select_pocket_atoms(precomp, lig_coords_A, cutoff_A):
+    """Sorted tuple of receptor complex-atom indices belonging to any residue that has an
+    atom within cutoff_A of any ligand atom (whole residues, deterministic for these coords)."""
+    hits = precomp["tree"].query_ball_point(np.asarray(lig_coords_A, dtype=float), r=float(cutoff_A))
+    rows = {int(r) for sub in hits for r in sub}
+    residues = {int(precomp["row_res"][r]) for r in rows}
+    out = []
+    for residue_idx in residues:
+        out.extend(precomp["res_atoms"][residue_idx])
+    return tuple(sorted(out))
+
+
+def _pocket_min_context(complex_struct, pocket_prot, lig_idx, complex_pos_nm,
+                        pin_k_kcal_per_mol_A2, resource_owner, platform_name, ncpu, platform_properties):
+    """Build the truncated pocket system (pocket protein + ligand), pin the pocket protein
+    atoms to their reference positions, and return a reusable minimisation Context + metadata.
+    Atom order in the pocket system is [sorted pocket protein ... ligand]."""
+    from ChemEM.protocols.core.forces import ForceBuilder
+    lig_list = [int(i) for i in np.asarray(lig_idx, dtype=int)]
+    pocket_idx = list(pocket_prot) + lig_list
+    pocket_struct = complex_struct[pocket_idx]
+    pocket_sys = pocket_struct.createSystem(nonbondedCutoff=1.2*unit.nanometers,
+                                            constraints=HBonds, removeCMMotion=False,
+                                            implicitSolvent=OBC2)
+    n_pp = len(pocket_prot)
+    pocket_ref_nm = np.concatenate(
+        [complex_pos_nm[list(pocket_prot)], complex_pos_nm[np.asarray(lig_list, dtype=int)]], axis=0)
+    pin = ForceBuilder.create_positional_pin(list(range(n_pp)), pocket_ref_nm, k_name="k_static_pin")
+    pocket_sys.addForce(pin)
+    ctx = _reusable_context(pocket_sys, resource_owner, platform_name, ncpu, platform_properties)
+    ctx.setParameter("k_static_pin", float(pin_k_kcal_per_mol_A2) * 418.4)  # k*dx^2, kcal/A^2 -> kJ/nm^2
+    return {"ctx": ctx, "n_pp": n_pp, "n_pocket": pocket_ref_nm.shape[0],
+            "prot_ref_nm": pocket_ref_nm[:n_pp].copy()}
+
+
+def _pocket_minimise(complex_struct, rec_idx, lig_idx, complex_pos_nm, cutoff_A, max_iters,
+                     resource_owner, platform_name, ncpu, platform_properties,
+                     precomp=None, pocket_cache=None, pin_k_kcal_per_mol_A2=1000.0):
+    """Relax the ligand inside a cutoff_A pinned pocket. Returns (full complex positions with
+    the ligand relaxed [nm], ligand_rmsd_shift_A). The pocket system is keyed on its atom-set in
+    pocket_cache (poses at one site share it); with pocket_cache=None it is built fresh."""
+    rec_idx = np.asarray(rec_idx, dtype=int)
+    lig_idx = np.asarray(lig_idx, dtype=int)
+    if precomp is None:
+        precomp = _pocket_precompute(complex_struct, rec_idx, complex_pos_nm[rec_idx] * 10.0)
+    pocket_prot = _select_pocket_atoms(precomp, complex_pos_nm[lig_idx] * 10.0, cutoff_A)
+    if not pocket_prot:
+        return complex_pos_nm, None                       # no receptor near the ligand
+    pk = pocket_cache.get(pocket_prot) if pocket_cache is not None else None
+    if pk is None:
+        pk = _pocket_min_context(complex_struct, pocket_prot, lig_idx, complex_pos_nm,
+                                 pin_k_kcal_per_mol_A2, resource_owner, platform_name, ncpu,
+                                 platform_properties)
+        if pocket_cache is not None:
+            pocket_cache[pocket_prot] = pk
+    n_pp = pk["n_pp"]
+    pocket_pos = np.empty((pk["n_pocket"], 3), dtype=float)
+    pocket_pos[:n_pp] = pk["prot_ref_nm"]
+    pocket_pos[n_pp:] = complex_pos_nm[lig_idx]
+    ctx = pk["ctx"]
+    ctx.setPositions(pocket_pos * unit.nanometer)
+    LocalEnergyMinimizer.minimize(ctx, maxIterations=int(max_iters))
+    pocket_after = np.asarray(ctx.getState(getPositions=True).getPositions(asNumpy=True)
+                              .value_in_unit(unit.nanometer), dtype=float)
+    relaxed_lig_nm = pocket_after[n_pp:]
+    out = complex_pos_nm.copy()
+    out[lig_idx] = relaxed_lig_nm
+    d = (relaxed_lig_nm - complex_pos_nm[lig_idx]) * 10.0
+    shift = float(np.sqrt((d * d).sum(axis=1).mean())) if len(lig_idx) else None
+    return out, shift
+
+
+def minimise_ligand_in_complex(complex_struct,
+                               cutoff_A=12.0,
+                               max_iters=300,
+                               pin_k_kcal_per_mol_A2=1000.0,
+                               resource_owner=None,
+                               platform_name=None,
+                               ncpu=None,
+                               platform_properties=None):
+    """Relax the ligand inside a ~cutoff_A pinned pocket (non-cached path), then return
+    (relaxed_complex_struct, ligand_rmsd_shift_A). Only the ligand moves; the receptor keeps
+    its reference coordinates. The full-complex MM-GBSA is scored separately (no minimise)."""
+    struct = copy.deepcopy(complex_struct)
+    rec_idx = [a.idx for a in struct.atoms if not a.residue.name.startswith("LIG")]
+    lig_idx = [a.idx for a in struct.atoms if a.residue.name.startswith("LIG")]
+    complex_pos_nm = np.asarray(struct.positions.value_in_unit(unit.nanometer), dtype=float)
+    out, shift = _pocket_minimise(struct, rec_idx, lig_idx, complex_pos_nm, cutoff_A, max_iters,
+                                  resource_owner, platform_name, ncpu, platform_properties,
+                                  pin_k_kcal_per_mol_A2=pin_k_kcal_per_mol_A2)
+    struct.coordinates = out * 10.0                       # nm -> A, update full complex
+    return struct, shift
+
+
+# --------------------------------------------------------------------------- #
+# Per-case system/Context reuse (opt-in via reuse_cache).
+#
+# For every pose of a case the receptor is unchanged and, for poses of the SAME
+# molecule, the complex/ligand topologies are unchanged — so the 3 OpenMM systems
+# + Contexts can be built ONCE per ligand-identity and reused across poses via
+# setPositions(), instead of rebuilt every pose. Bit-identical to the per-pose
+# path (same systems + same positions => same energies).
+# --------------------------------------------------------------------------- #
+def _mmgbsa_cache_key(ligand):
+    """Atom-order-SENSITIVE key over the parameterised ligand structure. The cached OpenMM
+    systems reuse per-atom parameters and per-pose coordinates BY INDEX, so an entry may be
+    reused only for a ligand whose complex_structure atom indexing is identical — a canonical
+    SMILES would mis-map coordinates onto the wrong atoms. Poses of the same docked ligand
+    share the atom order, so they still dedupe."""
+    st = ligand.complex_structure
+    atoms = tuple(getattr(a, "atomic_number", None) or getattr(a, "element", 0) for a in st.atoms)
+    bonds = tuple(sorted((b.atom1.idx, b.atom2.idx) for b in st.bonds))
+    return (atoms, bonds)
+
+
+def _reusable_context(system, resource_owner, platform_name, ncpu, platform_properties):
+    intg = VerletIntegrator(0.002*unit.picoseconds)
+    pn = platform_name if platform_name is not None else getattr(resource_owner, "platform", None)
+    return make_openmm_context(system, intg, platform_name=pn, source=resource_owner,
+                               ncpu=ncpu, platform_properties=platform_properties)
+
+
+def _build_mmgbsa_entry(protein, ligand, first_pose_A, resource_owner,
+                        platform_name, ncpu, platform_properties, minimise_ligand, cutoff_A=12.0):
+    """Built once per ligand-identity: the 3 full-complex systems + reusable Contexts and the
+    constant receptor positions / complex topology used for every pose. When minimising, also the
+    pocket-selection precompute + a per-pocket Context cache (poses at one site share the pocket)."""
+    complex_struct = build_complex(protein.complex_structure, ligand, first_pose_A)
+    rec_sys, lig_sys, cmp_sys, rec_idx, lig_idx = make_system_triplet(complex_struct)
+    rec_idx = np.asarray(rec_idx, dtype=int)
+    lig_idx = np.asarray(lig_idx, dtype=int)
+    complex_pos_nm = np.asarray(complex_struct.positions.value_in_unit(unit.nanometer), dtype=float)
+    entry = {
+        "rec_idx": rec_idx,
+        "lig_idx": lig_idx,
+        "n_total": complex_pos_nm.shape[0],
+        "prot_ref_nm": complex_pos_nm[rec_idx].copy(),        # receptor positions (constant)
+        "cmp_top": md.Topology.from_openmm(complex_struct.topology),
+        "cmp_ctx": _reusable_context(cmp_sys, resource_owner, platform_name, ncpu, platform_properties),
+        "rec_ctx": _reusable_context(rec_sys, resource_owner, platform_name, ncpu, platform_properties),
+        "lig_ctx": _reusable_context(lig_sys, resource_owner, platform_name, ncpu, platform_properties),
+        "minimise": bool(minimise_ligand),
+    }
+    # The receptor never moves (pocket minimise relaxes only the ligand), so its EEL/VDW/EGB are
+    # constant across every pose — compute once here and reuse, saving one whole-protein energy
+    # eval per pose. Bit-identical: rec positions are always entry["prot_ref_nm"].
+    entry["rec_energy"] = _mm_group_energies(entry["rec_ctx"], entry["prot_ref_nm"])
+    if minimise_ligand:
+        entry["complex_struct"] = complex_struct
+        entry["cutoff_A"] = float(cutoff_A)
+        entry["pocket_precomp"] = _pocket_precompute(complex_struct, rec_idx,
+                                                     complex_pos_nm[rec_idx] * 10.0)
+        entry["pocket_cache"] = {}
+        entry["ctx_args"] = (resource_owner, platform_name, ncpu, platform_properties)
+    return entry
+
+
+def _mm_group_energies(ctx, positions_nm):
+    """EEL/VDW/EGB (kcal/mol) for a cached Context (setPositions, no rebuild)."""
+    ctx.setPositions(positions_nm * unit.nanometer)
+    conv = unit.kilocalories_per_mole
+    eel = ctx.getState(getEnergy=True, groups={1}).getPotentialEnergy().value_in_unit(conv)
+    vdw = ctx.getState(getEnergy=True, groups={2}).getPotentialEnergy().value_in_unit(conv)
+    egb = ctx.getState(getEnergy=True, groups={3}).getPotentialEnergy().value_in_unit(conv)
+    return eel, vdw, egb
+
+
+def _score_with_entry(entry, pose_A, gamma, beta, minimise_ligand, minimise_iters):
+    """One pose through the cached systems/Contexts. Mirrors frame_mmgbsa exactly:
+    the SASA of the COMPLEX frame is used for all three ECAV terms, so
+    dECAV = ecav_c - (ecav_r + ecav_l) = -ecav."""
+    rec_idx, lig_idx = entry["rec_idx"], entry["lig_idx"]
+    complex_pos_nm = np.empty((entry["n_total"], 3), dtype=float)
+    complex_pos_nm[rec_idx] = entry["prot_ref_nm"]
+    lig_pre_nm = np.asarray(pose_A, dtype=float) / 10.0
+    complex_pos_nm[lig_idx] = lig_pre_nm
+
+    min_shift = None
+    if minimise_ligand and entry.get("minimise"):
+        ro, pn, ncpu, pp = entry["ctx_args"]
+        complex_pos_nm, min_shift = _pocket_minimise(
+            entry["complex_struct"], rec_idx, lig_idx, complex_pos_nm,
+            entry["cutoff_A"], minimise_iters, ro, pn, ncpu, pp,
+            precomp=entry["pocket_precomp"], pocket_cache=entry["pocket_cache"])
+
+    lig_pos = complex_pos_nm[lig_idx]
+    eel_c, vdw_c, egb_c = _mm_group_energies(entry["cmp_ctx"], complex_pos_nm)
+    eel_r, vdw_r, egb_r = entry["rec_energy"]            # constant receptor (see _build_mmgbsa_entry)
+    eel_l, vdw_l, egb_l = _mm_group_energies(entry["lig_ctx"], lig_pos)
+    frame = md.Trajectory(xyz=complex_pos_nm[None, :, :], topology=entry["cmp_top"])
+    ecav = gamma * (md.shrake_rupley(frame)[0].sum() * 100.0) + beta
+    comps = {
+        "EEL": eel_c - (eel_r + eel_l),
+        "VDW": vdw_c - (vdw_r + vdw_l),
+        "EGB": egb_c - (egb_r + egb_l),
+        "ECAV": ecav - (ecav + ecav),
+    }
+    return comps, float(sum(comps.values())), min_shift
+
+
+def _score_single_pose_cached(positions, ligand, protein, pose_idx, resource_owner,
+                              platform_name, ncpu, platform_properties,
+                              minimise_ligand, minimise_iters, minimise_cutoff_A=12.0):
+    cache = getattr(resource_owner, "_mmgbsa_cache", None)
+    if cache is None:
+        cache = {}
+        resource_owner._mmgbsa_cache = cache
+    key = (_mmgbsa_cache_key(ligand), bool(minimise_ligand),
+           round(float(minimise_cutoff_A), 3) if minimise_ligand else None)
+    entry = cache.get(key)
+    if entry is None:
+        entry = _build_mmgbsa_entry(protein, ligand, positions, resource_owner,
+                                    platform_name, ncpu, platform_properties, minimise_ligand,
+                                    cutoff_A=minimise_cutoff_A)
+        cache[key] = entry
+    comps, deltaG, min_shift = _score_with_entry(entry, positions, GAMMA, BETA,
+                                                 minimise_ligand, minimise_iters)
+    return PoseScore(ligand_name=ligand.ligand_int, pose_idx=pose_idx,
+                     deltaG=deltaG, components=comps, min_shift_A=min_shift)
+
+
 def score_single_pose(positions,
                       ligand,
                       protein,
@@ -120,17 +365,40 @@ def score_single_pose(positions,
                       resource_owner=None,
                       platform_name=None,
                       ncpu=None,
-                      platform_properties=None):
-    
-    
+                      platform_properties=None,
+                      minimise_ligand=False,
+                      minimise_iters=300,
+                      minimise_cutoff_A=12.0,
+                      reuse_cache=False):
+
+
     if pose_idx is None:
         pose_idx = 0
 
+    if reuse_cache and resource_owner is not None:
+        return _score_single_pose_cached(
+            positions, ligand, protein, pose_idx, resource_owner,
+            platform_name, ncpu, platform_properties, minimise_ligand, minimise_iters,
+            minimise_cutoff_A=minimise_cutoff_A,
+        )
+
+    if minimise_ligand:
+        # Non-cached minimise path: build a throwaway entry and score through the SAME code as
+        # the cached case, so it is bit-identical to reuse_cache=True (and avoids the separate
+        # mmgbsa_from_traj coordinate path). The entry is not stored, so every pose rebuilds.
+        entry = _build_mmgbsa_entry(protein, ligand, positions, resource_owner,
+                                    platform_name, ncpu, platform_properties,
+                                    minimise_ligand=True, cutoff_A=minimise_cutoff_A)
+        comps, deltaG, min_shift = _score_with_entry(entry, positions, GAMMA, BETA,
+                                                     True, minimise_iters)
+        return PoseScore(ligand_name=ligand.ligand_int, pose_idx=pose_idx,
+                         deltaG=deltaG, components=comps, min_shift_A=min_shift)
+
     complex_struct = build_complex(protein.complex_structure,
-                                   ligand, 
+                                   ligand,
                                    positions)
-    
-    traj = parmed_structure_to_single_frame_traj(complex_struct) 
+
+    traj = parmed_structure_to_single_frame_traj(complex_struct)
     comps, deltaG = mmgbsa_from_traj(
         complex_struct,
         traj,
@@ -139,11 +407,12 @@ def score_single_pose(positions,
         ncpu=ncpu,
         platform_properties=platform_properties,
     )
-    
+
     return PoseScore(ligand_name = ligand.ligand_int,
                      pose_idx    = pose_idx,
                      deltaG      = deltaG,
-                     components  = comps)
+                     components  = comps,
+                     min_shift_A = None)
     
     
 def parmed_structure_to_single_frame_traj(struct):
