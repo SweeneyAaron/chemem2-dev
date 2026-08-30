@@ -10,7 +10,7 @@
 SYSTEM_ATTRS = ['centroid', 'segment_centroid', 'exclude', 'segment_dimensions', 'output', 'auto_split_radius',
                 'ligand_id','difference_map_id', 'full_map_id','protein_id',
                 'mi_weight', 'global_k', 'docking_radius', 'multiligand','platform', 'cutoff',
-                'flexible_side_chains', 'solvent', 'n_cpu', 'label_threshold_sigma', 'label_threshold',
+                'flexible_side_chains', 'solvent', 'ncpu', 'n_cpu', 'n_cpus', 'label_threshold_sigma', 'label_threshold',
                 'n_ants', 'theta',  'rho', 'sigma' , 'max_iterations',
                 'post_process_num_solutions', 'post_process_solution', 'refine_side_chains',
                 'cycles', 'start_temp', 'norm_temp', 'top_temp', 'temperature_step',
@@ -107,6 +107,18 @@ PROTEIN_DONOR_ATOM_IDS = {
     'LYS': {'N', 'NZ'},
 }
 
+# Structural waters retained in the receptor. Without these entries get_role_int() returns 0
+# for a water oxygen, so a water kept in the input PDB contributes vdW/electrostatics through
+# the force field but is invisible to the donor/acceptor grids -- i.e. a bridging water could
+# not be scored as a bridge. A water oxygen is both donor and acceptor (role 3). Residue names
+# mirror ComponentScanner._WATER (ChemEM/parsers/components.py); atom names cover the deposited
+# convention ('O') and the tip3p/CHARMM ones ('OW', 'OH2').
+WATER_HBOND_RESNAMES = ('HOH', 'WAT', 'H2O', 'SOL', 'TIP', 'TIP3', 'T3P')
+WATER_HBOND_ATOM_IDS = {'O', 'OW', 'OH2'}
+
+PROTEIN_DONOR_ATOM_IDS.update(
+    {name: set(WATER_HBOND_ATOM_IDS) for name in WATER_HBOND_RESNAMES})
+
 PROTEIN_ACCEPTOR_ATOM_IDS = {
     # Non-polar, aliphatic
     'GLY': {'O'},
@@ -140,6 +152,9 @@ PROTEIN_ACCEPTOR_ATOM_IDS = {
     'HIS': {'O', 'NE2'},  # Depending on protonation state
     'LYS': {'O'},
 }
+
+PROTEIN_ACCEPTOR_ATOM_IDS.update(
+    {name: set(WATER_HBOND_ATOM_IDS) for name in WATER_HBOND_RESNAMES})
 
 def is_protein_atom_donor(residue_code, atom_id):
     return atom_id in PROTEIN_DONOR_ATOM_IDS.get(residue_code, set())

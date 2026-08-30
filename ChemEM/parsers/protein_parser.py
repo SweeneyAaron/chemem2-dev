@@ -25,12 +25,14 @@ class ProteinParser:
     # Main entry point
     # -------------------------
     @staticmethod
-    def load_protein_structure(protein_file: str, 
-                               forcefield: List[str], 
+    def load_protein_structure(protein_file: str,
+                               forcefield: List[str],
                                request_implicit:bool = True,
                                force_ff: bool = False,
                                to_parmed : bool = True,
-                               map_tol : float = 1e-3) -> Protein:
+                               map_tol : float = 1e-5,
+                               prep = None,
+                               cache = None) -> Protein:
         '''
         Factory for returning a Protein model from a .pdb | .mmcif file
         Parameters
@@ -73,9 +75,29 @@ class ProteinParser:
                                                force_ff = force_ff,
                                                request_implicit=request_implicit)
         
-        modeller = remodel_from_fixer(protein_file, ff, split_chains = True)
-        
-        
+        # ---- prepare (repair + protonate), reusing a cached result when possible.
+        # This is the only expensive, previously non-deterministic step; everything
+        # after it is a pure function of the prepared coordinates.
+        cache_key = None
+        modeller = None
+        if cache is not None:
+            cache_key = cache.key(
+                protein_file,
+                forcefield_files=getattr(ff, "_chemem_ff_files", None) or list(forcefield or []),
+                request_implicit=request_implicit,
+                force_ff=force_ff,
+                prep=prep,
+            )
+            modeller = cache.load(cache_key)
+
+        cache_hit = modeller is not None
+        if not cache_hit:
+            modeller = remodel_from_fixer(protein_file, ff, split_chains=True, prep=prep)
+
+        # `modeller` is rebound to a ParmEd Structure below; keep the prepared
+        # topology/positions so the cache stores the thing it can reload.
+        prepared = modeller
+
         #------conversions
         if to_parmed:
             modeller, system = modeller_to_parmed(modeller, ff)
@@ -97,7 +119,31 @@ class ProteinParser:
             tol_ang=map_tol,
         )
 
-        
+        # The residue map matches original<->prepared backbone atoms to 1e-5 A, so
+        # it is the canary for any coordinate corruption: a cache that perturbed
+        # coordinates would return an EMPTY map with no error, silently breaking
+        # get_residue_mapping, --manual-site and covalent specs. Refuse to trust a
+        # cache entry that maps fewer residues than the cold path did.
+        n_mapped = len(residue_map)
+        if cache is not None:
+            if cache_hit:
+                expected = cache.expected_mapped(cache_key)
+                if expected is not None and n_mapped != expected:
+                    print(f"[prep] WARNING: cached protein mapped {n_mapped} residues, "
+                          f"expected {expected}; discarding cache entry and re-preparing.")
+                    cache.invalidate(cache_key)
+                    return ProteinParser.load_protein_structure(
+                        protein_file, forcefield,
+                        request_implicit=request_implicit, force_ff=force_ff,
+                        to_parmed=to_parmed, map_tol=map_tol, prep=prep, cache=None,
+                    )
+            else:
+                cache.store(cache_key, prepared, n_mapped=n_mapped)
+
+        if n_mapped == 0 and len(list(original_topology.residues())):
+            print("[prep] WARNING: residue map is empty -- get_residue_mapping, "
+                  "--manual-site and covalent atom specs will not resolve.")
+
         return Protein(
             protein_file,
             system,

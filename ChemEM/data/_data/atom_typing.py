@@ -139,7 +139,19 @@ class AtomType(Enum):
     FE = (44, 'Fe', [],0)
     CU = (44, 'Cu', [],0)
     ZN = (44, 'Zn', [],0)
-    
+    # All metals share the generic ion type 44, whose Buckingham row already exists in
+    # TableA/B/C (45x45). Without these, AtomType.from_id() returns None for an ion in the
+    # binding-site lining and precomputed_data.py:440 raises
+    # AttributeError: 'NoneType' object has no attribute 'idx'.
+    # Each member needs a DISTINCT value tuple -- two members sharing (idx, symbol, bonds, H)
+    # become silent Enum aliases (this is why Fe(II) is handled in ion_atom_data below rather
+    # than as an 'FE2' member, which would alias FE).
+    NA = (44, 'Na', [],0)
+    K  = (44, 'K',  [],0)
+    NI = (44, 'Ni', [],0)
+    CO = (44, 'Co', [],0)
+    CD = (44, 'Cd', [],0)
+
     @staticmethod
     def has_single_bonded_carbon(atom, skip_atom=None):
         for nbr in atom.GetNeighbors():
@@ -780,12 +792,25 @@ protein_atom_data = {
         'CD':AtomType.CARBON_BONDED_1}
 }
 
+# Residue name -> atom name -> AtomType, for monatomic ion residues. Keys are CCD comp ids,
+# which are not always the element symbol (FE2 is Fe(II), 3CO is Co(III), CU1 is Cu(I)).
+# NOTE: an Fe-containing receptor still fails earlier, in OpenMM: a lone Fe matches both the
+# FE and FE2 templates in amber14/tip3pfb.xml, so remodel/protonation.py:25 raises
+# "Multiple non-identical matching templates found". Typing it here does not fix that.
 ion_atom_data = {'MG': {'MG' : AtomType.MG},
                 'CA': {'CA' : AtomType.CA},
                 'ZN': {'ZN' : AtomType.ZN},
                 'MN': {'MN' : AtomType.MN},
                 'FE': {'FE' : AtomType.FE},
-                'CU': {'CU' : AtomType.CU}
+                'FE2': {'FE2' : AtomType.FE, 'FE' : AtomType.FE},
+                'CU': {'CU' : AtomType.CU},
+                'CU1': {'CU' : AtomType.CU},
+                'NA': {'NA' : AtomType.NA},
+                'K': {'K' : AtomType.K},
+                'NI': {'NI' : AtomType.NI},
+                'CO': {'CO' : AtomType.CO},
+                '3CO': {'CO' : AtomType.CO},
+                'CD': {'CD' : AtomType.CD},
                 }
                 
                 

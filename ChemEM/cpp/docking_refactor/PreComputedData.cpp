@@ -519,8 +519,27 @@ PreComputedData::PreComputedData(py::object py_pc){
          m_config.iterations = py_pc.attr("iterations").cast<unsigned int>();
          m_config.bias_radius = py_pc.attr("bias_radius").cast<double>(); 
          m_config.binding_site_centroid = py_pc.attr("binding_site_centroid").cast<Eigen::RowVector3d>();
-         m_config.nb_cell = py_pc.attr("nb_cell").cast<double>(); 
-         
+         m_config.nb_cell = py_pc.attr("nb_cell").cast<double>();
+
+         // Which map score the search uses: 0 = mutual information, 1 = SCI.
+         // inner  -> ant sampling + inner Nelder-Mead refine
+         // outer  -> final polish, i.e. the score the returned poses are ranked by
+         // hasattr-guarded so an older precompute object keeps the header defaults.
+         if (py::hasattr(py_pc, "inner_map_score")) {
+             m_config.inner_map_score = py_pc.attr("inner_map_score").cast<int>();
+         }
+         if (py::hasattr(py_pc, "outer_map_score")) {
+             m_config.outer_map_score = py_pc.attr("outer_map_score").cast<int>();
+         }
+         if (py::hasattr(py_pc, "dock_seed")) {
+             m_config.dock_seed = py_pc.attr("dock_seed").cast<uint64_t>();
+         }
+         // 0 = staged Nelder-Mead (default), 1 = joint projected L-BFGS.
+         // Governs the inner per-iteration refine and the final polish alike.
+         if (py::hasattr(py_pc, "local_minimiser")) {
+             m_config.local_minimiser = py_pc.attr("local_minimiser").cast<int>();
+         }
+
          auto py_all = py_pc.attr("all_arrays").cast<py::list>();
          m_config.translation_points.clear();
          m_config.all_arrays.clear();
@@ -631,15 +650,72 @@ PreComputedData::PreComputedData(py::object py_pc){
              } catch (const std::exception &e) {
                  throw std::runtime_error("[Error] PreComputedData mi_data failed to initilise" + std::string(e.what()));
              }
-             
-             
-           
-            
-            
+
+
+
+
+
         }
-        
-        
+
+        //-----optional covalent anchor (gated; absent => disabled => no-op)-----
+        // Mirrors the reference_heavy_coords / py::hasattr idiom used in
+        // docking_v2 so non-covalent precompute objects are completely
+        // unaffected (existing docking stays byte-for-byte identical).
+        try {
+            if (py::hasattr(py_pc, "covalent_warhead_idx")
+                    && !py_pc.attr("covalent_warhead_idx").is_none()) {
+
+                // The Python side sends one list entry per covalent bond. A bare
+                // scalar is still accepted so an older Python side keeps working.
+                auto as_list = [](const py::object &o) {
+                    py::list out;
+                    if (py::isinstance<py::list>(o) || py::isinstance<py::tuple>(o)) {
+                        for (auto item : o) out.append(item);
+                    } else {
+                        out.append(o);
+                    }
+                    return out;
+                };
+                auto attr_or_none = [&](const char *name) -> py::object {
+                    if (py::hasattr(py_pc, name)) return py_pc.attr(name);
+                    return py::none();
+                };
+
+                py::list warheads = as_list(py_pc.attr("covalent_warhead_idx"));
+                py::list prot_idx = as_list(attr_or_none("covalent_anchor_prot_idx"));
+                py::list xyz      = as_list(attr_or_none("covalent_anchor_xyz"));
+                py::list r0s      = as_list(py_pc.attr("covalent_r0"));
+                py::list ks       = as_list(attr_or_none("covalent_k"));
+
+                const std::size_t n = warheads.size();
+                m_covalent.anchors.clear();
+                m_covalent.anchors.reserve(n);
+                for (std::size_t i = 0; i < n; ++i) {
+                    CovalentAnchor a;
+                    a.warhead_idx = warheads[i].cast<int>();
+                    if (i < prot_idx.size() && !prot_idx[i].is_none()) {
+                        a.anchor_prot_idx = prot_idx[i].cast<int>();
+                    }
+                    if (i < xyz.size() && !xyz[i].is_none()) {
+                        a.anchor_xyz = xyz[i].cast<Eigen::RowVector3d>();
+                    }
+                    if (i < r0s.size() && !r0s[i].is_none()) {
+                        a.r0 = r0s[i].cast<double>();
+                    }
+                    if (i < ks.size() && !ks[i].is_none()) {
+                        a.k = ks[i].cast<double>();
+                    }
+                    m_covalent.anchors.push_back(a);
+                }
+                m_covalent.enabled = !m_covalent.anchors.empty();
+            }
+        } catch (const std::exception &e) {
+            throw std::runtime_error(
+                "[Error] PreComputedData covalent anchor failed to initilise: "
+                + std::string(e.what()));
+        }
+
 };
-//TODO! skip mask 
+//TODO! skip mask
 //TODO! Densmap
 

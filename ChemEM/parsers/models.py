@@ -43,11 +43,11 @@ class CovalentLinkSpec:
 
     Fields populated later by the covalent fragment pipeline:
         resolved_ligand_atom_name, resolved_protein_atom  (after auto-detection)
-        fragment_structure (parmed.Structure for the capped junction fragment)
-        junction_bond_params : (k, req)
-        junction_angles      : list of (atom_names_tuple, k, theta0)
-        junction_dihedrals   : list of (atom_names_tuple, k, phase, periodicity)
-        fragment_ligand_charges : dict mapping ligand atom name -> new partial charge
+        junction_bond_params : (k, req) for THIS bond
+
+    Terms that span the whole ligand (angles, dihedrals, charges) live on
+    `Ligand.covalent_fragment` instead, because one capped fragment covering every
+    junction is parameterized per ligand, not per bond.
     """
     ligand_atom_spec: str
     protein_atom_spec: str
@@ -64,8 +64,23 @@ class CovalentLinkSpec:
     auto_deleted_ligand_atoms: List[str] = field(default_factory=list)
     auto_deleted_protein_atoms: List[str] = field(default_factory=list)
 
-    fragment_structure: Any = None
     junction_bond_params: Optional[tuple] = None
+
+
+@dataclass
+class CovalentFragment:
+    """Per-ligand results of parameterizing the capped junction fragment.
+
+    One fragment is built per ligand spanning ALL of its covalent junctions, so a
+    term that bridges two junctions (possible on a short crosslinker) is collected
+    once, and the ligand's charges are redistributed once.
+
+        fragment_structure      : parmed.Structure for the capped fragment
+        junction_angles         : list of (atom_names_tuple, k, theta0)
+        junction_dihedrals      : list of (atom_names_tuple, k, phase, periodicity)
+        fragment_ligand_charges : ligand atom name -> new partial charge
+    """
+    fragment_structure: Any = None
     junction_angles: List[tuple] = field(default_factory=list)
     junction_dihedrals: List[tuple] = field(default_factory=list)
     fragment_ligand_charges: Dict[str, float] = field(default_factory=dict)
@@ -123,21 +138,50 @@ class Protein:
         if residue_idx is None:
             raise ValueError(f"[ERROR] IonFixer Can't convert {spec[1]} to type int()")
         
-        chain, res_name, _ , atom_name = spec 
-        
+        chain, res_name, _ , atom_name = spec
+        spec_str = ":".join(spec)
+
+        # Collect near-misses while scanning so an unresolved spec can say WHY it missed.
+        # Receptors are frequently re-chained (cropping, PDBFixer chain splitting), so the
+        # deposited chain id is the single most common thing to be wrong.
+        matched = None
+        wrong_chain = []      # same resname + resnum, different chain
+        wrong_resname = []    # same chain + resnum, different resname
+
         for res in self.complex_structure.topology.residues():
-            if not all([res.chain.id == chain,  res.name == res_name, int(res.id) == residue_idx]):
+            res_num = _safe_cast(res.id, int)
+            if res_num != residue_idx:
                 continue
-            
-            atoms = [atom for atom in res.atoms() if atom.name == spec[3]]
-            
-            if len(atoms) != 1:
-                raise RuntimeError(f"[Error] Protein multiple atoms with same spec {spec}")
-            
-            return AtomSpec(structure=self, atom_idx=atoms[0].index)
-            
-            
-        return None
+            if res.name == res_name:
+                if res.chain.id == chain:
+                    matched = res
+                    break
+                wrong_chain.append(f"{res.chain.id}:{res.name}:{res.id}")
+            elif res.chain.id == chain:
+                wrong_resname.append(f"{res.chain.id}:{res.name}:{res.id}")
+
+        if matched is None:
+            hint = ""
+            if wrong_chain:
+                hint = (f" {res_name} {residue_idx} exists in chain(s) "
+                        f"{', '.join(sorted({c.split(':')[0] for c in wrong_chain}))}, not {chain!r}"
+                        f" -- did the receptor get re-chained?")
+            elif wrong_resname:
+                hint = (f" chain {chain} residue {residue_idx} is "
+                        f"{', '.join(sorted({r.split(':')[1] for r in wrong_resname}))}, not {res_name!r}")
+            raise RuntimeError(f"[ERROR] no residue matches atom spec {spec_str!r}.{hint}")
+
+        atoms = [atom for atom in matched.atoms() if atom.name == atom_name]
+        if not atoms:
+            available = sorted(a.name for a in matched.atoms())
+            shown = ", ".join(available[:12]) + (" ..." if len(available) > 12 else "")
+            raise RuntimeError(
+                f"[ERROR] residue {chain}:{res_name}:{residue_idx} has no atom named "
+                f"{atom_name!r} (atom spec {spec_str!r}). Available: {shown}")
+        if len(atoms) > 1:
+            raise RuntimeError(f"[ERROR] Protein multiple atoms with same spec {spec_str!r}")
+
+        return AtomSpec(structure=self, atom_idx=atoms[0].index)
 
 
 class Ligand:
@@ -168,12 +212,30 @@ class Ligand:
             self.ligand_charge_idx.append(idx)
             self.ligand_charge.append(charge)
 
-        # Optional covalent link to a protein atom. None for non-covalent ligands.
-        self.covalent_link: Optional[CovalentLinkSpec] = None
+        # Optional covalent links to protein atoms. Empty for non-covalent ligands;
+        # one entry per bond, so a crosslinker bridging two residues has two.
+        self.covalent_links: List[CovalentLinkSpec] = []
+        # Fragment-derived data shared by ALL of this ligand's links: one capped
+        # fragment spanning every junction is parameterized, so its angle/dihedral
+        # terms and ligand charges belong to the ligand, not to any single bond.
+        self.covalent_fragment: Optional["CovalentFragment"] = None
 
         self.get_atom_names()
-    
-    @property 
+
+    @property
+    def covalent_link(self) -> Optional[CovalentLinkSpec]:
+        """First covalent link, or None.
+
+        Back-compat shim for the many call sites that only ask 'is this ligand
+        covalent?'. New code should use `covalent_links`.
+        """
+        return self.covalent_links[0] if self.covalent_links else None
+
+    @covalent_link.setter
+    def covalent_link(self, spec: Optional[CovalentLinkSpec]) -> None:
+        self.covalent_links = [] if spec is None else [spec]
+
+    @property
     def ligand_id(self):
         return self.complex_structure.residues[0].name 
     @property 

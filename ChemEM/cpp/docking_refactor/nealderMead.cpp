@@ -26,12 +26,20 @@ NelderMeadOptimizer::optimize(const std::function<double(const Point&)>& func,
     assert(simplex.size() == dim + 1);
     for (auto &p : simplex) assert(p.size() == dim);
 
-    for (size_t i = 0; i < simplex.size(); ++i)
-        fvals[i] = func(simplex[i]);
-
     Result res;
     res.iterations = 0;
     res.converged = false;
+    res.nfev = 0;
+
+    // Counting wrapper so the caller can compare NM's evaluation cost against
+    // L-BFGS's under CHEMEM_DOCK_PROFILE=1. Everything below calls feval, not func.
+    auto feval = [&](const Point &p) -> double {
+        ++res.nfev;
+        return func(p);
+    };
+
+    for (size_t i = 0; i < simplex.size(); ++i)
+        fvals[i] = feval(simplex[i]);
 
     double xtol_sq = xtol * xtol;
     size_t best_idx, worst_idx, second_worst_idx;
@@ -84,7 +92,7 @@ NelderMeadOptimizer::optimize(const std::function<double(const Point&)>& func,
             if (reflect_point[j] < 0.0) reflect_point[j] = 0.0;
             if (reflect_point[j] > 1.0) reflect_point[j] = 1.0;
         }
-        double f_r = func(reflect_point);
+        double f_r = feval(reflect_point);
 
         if (f_r < fvals[best_idx]) {
             // Expansion
@@ -93,7 +101,7 @@ NelderMeadOptimizer::optimize(const std::function<double(const Point&)>& func,
                 if (expand_point[j] < 0.0) expand_point[j] = 0.0;
                 if (expand_point[j] > 1.0) expand_point[j] = 1.0;
             }
-            double f_e = func(expand_point);
+            double f_e = feval(expand_point);
             if (f_e < f_r) {
                 simplex[worst_idx] = expand_point;
                 fvals[worst_idx]   = f_e;
@@ -117,7 +125,7 @@ NelderMeadOptimizer::optimize(const std::function<double(const Point&)>& func,
                 if (contract_point[j] < 0.0) contract_point[j] = 0.0;
                 if (contract_point[j] > 1.0) contract_point[j] = 1.0;
             }
-            double f_c = func(contract_point);
+            double f_c = feval(contract_point);
             if (f_c < (outside ? f_r : fvals[worst_idx])) {
                 simplex[worst_idx] = contract_point;
                 fvals[worst_idx]   = f_c;
@@ -131,7 +139,7 @@ NelderMeadOptimizer::optimize(const std::function<double(const Point&)>& func,
                         if (simplex[i][j] < 0.0) simplex[i][j] = 0.0;
                         if (simplex[i][j] > 1.0) simplex[i][j] = 1.0;
                     }
-                    fvals[i] = func(simplex[i]);
+                    fvals[i] = feval(simplex[i]);
                 }
             }
         }

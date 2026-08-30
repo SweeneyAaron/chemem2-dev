@@ -20,11 +20,11 @@ from openmm import (
     Continuous3DFunction,
     unit,
     LangevinIntegrator,
-    app, 
-    Platform
+    app,
 )
 from scipy.spatial import cKDTree
 from .biomolecule import find_atoms_outside_ligand
+from ChemEM.tools.resources import make_openmm_simulation, resolve_cpu_budget, thread_limit_env
 
 
 def add_sse_rmsd_forces(
@@ -32,7 +32,7 @@ def add_sse_rmsd_forces(
     complex_structure,
     ref_nm,
     sse_groups,
-    ligand_set,
+    all_ligand_indices,
     ligand_heavy_indices,
     sse_k: float,
     localise: bool = False
@@ -45,7 +45,7 @@ def add_sse_rmsd_forces(
         
     for grp in sse_groups:
         # Filter out ligand atoms
-        valid_grp = [i for i in grp if i not in ligand_set]
+        valid_grp = [i for i in grp if i not in all_ligand_indices]
         
         # Filter out atoms too far from the ligand (if localise is True)
         if localise:
@@ -194,8 +194,38 @@ class ForceBuilder:
         for i in atom_indices:
             x0, y0, z0 = map(float, ref_positions_nm[int(i)])
             f.addParticle(int(i), [x0 * unit.nanometer, y0 * unit.nanometer, z0 * unit.nanometer])
-        
+
         return f
+
+    @staticmethod
+    def create_weighted_positional_pin(atom_indices, ref_positions_nm, k_name="k_wpin"):
+        """Positional pin with a per-particle on/off weight ``w``.
+
+        Energy = k * w * ((x-x0)^2 + (y-y0)^2 + (z-z0)^2). All ``atom_indices`` are
+        added with ``w=0`` (inert); the caller toggles which atoms are pinned by
+        setting ``w=1`` (and refreshing ``x0,y0,z0``) via ``setParticleParameters``
+        + ``updateParametersInContext``, then raising the global ``k`` parameter.
+        This lets a single force pin an arbitrary, changing subset without
+        add/remove churn. Returns ``(force, {atom_index: particle_slot})`` so the
+        caller can address particles by atom index."""
+        expr = f"{k_name}*w*((x-x0)^2 + (y-y0)^2 + (z-z0)^2)"
+        f = CustomExternalForce(expr)
+        f.addGlobalParameter(k_name, 0.0 * unit.kilojoule_per_mole / unit.nanometer**2)
+        f.addPerParticleParameter("x0")
+        f.addPerParticleParameter("y0")
+        f.addPerParticleParameter("z0")
+        f.addPerParticleParameter("w")
+
+        slot_by_atom = {}
+        for i in atom_indices:
+            x0, y0, z0 = map(float, ref_positions_nm[int(i)])
+            slot = f.addParticle(
+                int(i),
+                [x0 * unit.nanometer, y0 * unit.nanometer, z0 * unit.nanometer, 0.0],
+            )
+            slot_by_atom[int(i)] = int(slot)
+
+        return f, slot_by_atom
 
     @staticmethod
     def create_distance_restraint(restraints, k_name="k_dist"):
@@ -468,17 +498,25 @@ def export_torsion_profile(ligand,
                            platform = 'OpenCL',
                            output = './',
                            normalise = True,
-                           write = False
+                           write = False,
+                           resource_owner=None,
+                           ncpu=None,
                            ):
     
     integrator = LangevinIntegrator(300*unit.kelvin, 1/unit.picoseconds, 2*unit.femtoseconds)
-    _platform = Platform.getPlatformByName(platform)
     system = ligand.complex_structure.createSystem()
     
     
     
-    simulation = app.Simulation(ligand.complex_structure.topology, 
-                            system, integrator, _platform)
+    with thread_limit_env(resolve_cpu_budget(ncpu if ncpu is not None else resource_owner)):
+        simulation = make_openmm_simulation(
+            ligand.complex_structure.topology,
+            system,
+            integrator,
+            platform_name=platform,
+            source=resource_owner,
+            ncpu=ncpu,
+        )
     
     simulation.context.setPositions(ligand.complex_structure.positions)
     force_group = 0

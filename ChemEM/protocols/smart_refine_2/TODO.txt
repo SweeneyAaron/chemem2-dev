@@ -1,0 +1,34 @@
+TODO 
+patience and end when done.
+make a cache to hold best solutions 
+propergate multiple solutions through iteractions.
+Make Hydrogens be optimised too.
+Make optional end and per iteration openMM minisation .
+---
+More speed.
+Need to benchmark that the fit in map actually works.
+undo old smart refine protocols.
+refactor new one.
+introduce other scoring functions and multiple scoring functions.
+
+--
+Rings and macrocycles KIC style 
+Exo torsions?
+--
+
+1.Benchmark that fit_in_map actually improves map fit. DONE! 
+    -- Now it seems to imporve fits with the soft option for clashes. 
+2. Lightly refactor smart_refine_2 around configs, candidate state, and clean debug handling.
+3. Add a best-solution cache.
+4. Add patience / early stopping. DONE!
+5. Propagate multiple solutions through iterations.
+6. Add richer and multiple scoring functions DONE.
+7. Make hydrogen handling configurable and hydrogen-ready Done.
+8. Add optional OpenMM minimisation Done.
+9. Optimise speed after the algorithm shape is stable.
+10. Deprecate or remove old smart-refine protocols once SR2 is benchmarked.
+
+--sr2-optimisation-score CCC,MI
+--sr2-optimisation-weights 0.2, 0.8
+--sr2-acceptance-score qscore
+--sr2-acceptance-weights 1.0

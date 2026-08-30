@@ -13,19 +13,16 @@ from openmm.app import (Modeller,
                         PME, 
                         OBC2, 
                         GBn2, 
-                        Simulation, 
                         StateDataReporter,
                         PDBReporter,
                         PDBFile)
 from openmm import( unit,
                    LangevinIntegrator,
-                   Platform, 
                    CustomCompoundBondForce,
                    CustomNonbondedForce,
                    MonteCarloBarostat, 
                    NonbondedForce, 
                    CustomGBForce, 
-                   Context, 
                    VerletIntegrator, 
                    CustomExternalForce, 
                    GBSAOBCForce,
@@ -41,6 +38,7 @@ import json
 import os
 from rdkit import Chem
 from rdkit.Geometry import Point3D
+from ChemEM.tools.resources import make_openmm_context, make_openmm_simulation
 
 
 def mkdir(path):
@@ -380,9 +378,14 @@ class MMGBSAScore:
         # ---------------------------------------------------------------------
         #  Simulation object
         # ---------------------------------------------------------------------
-        platform   = Platform.getPlatformByName(self.platform)
         integrator = LangevinIntegrator(self._md_temp, 1.0 / unit.picosecond, self._md_dt)
-        sim        = Simulation(complex_struct.topology, system, integrator, platform)
+        sim        = make_openmm_simulation(
+            complex_struct.topology,
+            system,
+            integrator,
+            platform_name=self.platform,
+            source=self,
+        )
     
         start_pos = np.array([[a.xx, a.xy, a.xz] for a in complex_struct.atoms]) * 0.1  # Å→nm
         sim.context.setPositions(start_pos * unit.nanometer)
@@ -499,9 +502,10 @@ class MMGBSAScore:
     def _frame_mmgbsa(self, cmp_sys, rec_sys, lig_sys,
                   pos, rec_pos, lig_pos, frame):
 
-        eel_c, vdw_c, egb_c, ecav_c = compute_frame_energies(cmp_sys, pos,      frame, self.gamma, self.beta)
-        eel_r, vdw_r, egb_r, ecav_r = compute_frame_energies(rec_sys, rec_pos, frame, self.gamma, self.beta)
-        eel_l, vdw_l, egb_l, ecav_l = compute_frame_energies(lig_sys, lig_pos, frame, self.gamma, self.beta)
+        kwargs = dict(platform_name=self.platform, resource_owner=self)
+        eel_c, vdw_c, egb_c, ecav_c = compute_frame_energies(cmp_sys, pos,      frame, self.gamma, self.beta, **kwargs)
+        eel_r, vdw_r, egb_r, ecav_r = compute_frame_energies(rec_sys, rec_pos, frame, self.gamma, self.beta, **kwargs)
+        eel_l, vdw_l, egb_l, ecav_l = compute_frame_energies(lig_sys, lig_pos, frame, self.gamma, self.beta, **kwargs)
     
         return (eel_c - (eel_r + eel_l),
                 vdw_c - (vdw_r + vdw_l),
@@ -594,9 +598,26 @@ class MMGBSAScore:
 # ---------------------------------------------------------------------
 
 
-def compute_frame_energies(system, positions, frame, gamma, beta):
+def compute_frame_energies(
+    system,
+    positions,
+    frame,
+    gamma,
+    beta,
+    platform_name=None,
+    resource_owner=None,
+    ncpu=None,
+    platform_properties=None,
+):
     intg   = VerletIntegrator(0.002*unit.picoseconds)
-    ctx    = Context(system, intg)
+    ctx    = make_openmm_context(
+        system,
+        intg,
+        platform_name=platform_name,
+        source=resource_owner,
+        ncpu=ncpu,
+        platform_properties=platform_properties,
+    )
     ctx.setPositions(positions)
 
     EEL   = ctx.getState(getEnergy=True, groups={1}).getPotentialEnergy()

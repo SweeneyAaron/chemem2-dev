@@ -18,6 +18,11 @@ import traceback
 import ChemEM
 from ChemEM.protocol_spec import REGISTRY, SHORT_ALIASES
 from ChemEM.messages import Messages
+from ChemEM.tools.resources import (
+    apply_cpu_budget,
+    apply_cpus_per_site,
+    default_cpu_budget,
+)
 
 
 
@@ -83,11 +88,31 @@ def generate_custom_usage() -> str:
 
     return "\n".join(lines)
 
-def load_system(conf_file: str):
+# CLI flags that must reach Config BEFORE create_system() builds the protein.
+# Everything else reaches protocols afterwards via system.options; these cannot,
+# because protein preparation happens inside create_system().
+PRE_PROTEIN_OVERRIDES = (
+    "prep_platform",
+    "prep_threads",
+    "prep_seed",
+    "deterministic_prep",
+    "prep_clash_relief_steps",
+    "prep_h_implicit",
+    "cache_protein",
+    "protein_cache_dir",
+    "refresh_protein_cache",
+)
+
+
+def load_system(conf_file: str, args=None):
     from ChemEM.config import Config
 
+    overrides = None
+    if args is not None:
+        overrides = {name: getattr(args, name, None) for name in PRE_PROTEIN_OVERRIDES}
+
     cfg = Config()
-    return cfg.load_config(conf_file)
+    return cfg.load_config(conf_file, overrides=overrides)
 
 def _flag_name(proto_key: str) -> str:
     # binding_site -> --binding-site
@@ -120,10 +145,95 @@ def build_parser() -> argparse.ArgumentParser:
     shared.add_argument("--output", type=str, default=None,
                         help="Output directory")
     
-    shared.add_argument("--ncpu", type=int, default=int(max(1, os.cpu_count() - 2)))
-    
+    shared.add_argument("--ncpu", type=int, default=default_cpu_budget())
+
+    shared.add_argument(
+        "--cpus-per-site",
+        type=int,
+        default=None,
+        help=(
+            "CPUs allocated per split-site docking job. Defaults to "
+            "max(2, ncpu // 4) to keep multi-job parallelism alive on small "
+            "machines; raise it to give each site more cores at the cost of "
+            "fewer parallel sites."
+        ),
+    )
+
     shared.add_argument("--no-map", action="store_true",
                         help="Disable density map usage")
+
+    # --- protein preparation determinism ---
+    # Applied before the protein is built, unlike every other option here, so they
+    # are read by load_system() rather than apply_overrides().
+    shared.add_argument("--prep-platform", type=str, default=None,
+                        choices=["CPU", "Reference", "OpenCL", "CUDA", "inherit"],
+                        help="OpenMM platform for the two minimisations in protein "
+                             "preparation (PDBFixer's rebuilt-atom relaxation and "
+                             "hydrogen placement). Default CPU, which is reproducible "
+                             "and ~10x faster than Reference. Reference additionally "
+                             "gives cross-machine identity. 'inherit' restores the old "
+                             "auto-selection, which is NOT reproducible.")
+    shared.add_argument("--prep-threads", type=int, default=None,
+                        help="Thread count for the prep platform. 1 (default) removes "
+                             "thread-count dependence from the result.")
+    shared.add_argument("--prep-seed", type=int, default=None,
+                        help="Seed for the Langevin dynamics PDBFixer runs on rebuilt "
+                             "atoms. Must be non-zero: OpenMM reads 0 as 'pick a fresh "
+                             "seed', which is what made preparation irreproducible.")
+    shared.add_argument("--no-deterministic-prep", dest="deterministic_prep",
+                        action="store_false", default=None,
+                        help="Restore the previous, non-reproducible protein "
+                             "preparation (auto-selected platform, unseeded dynamics).")
+    shared.add_argument("--prep-clash-relief-steps", type=int, default=None,
+                        help="EXPERT/UNSAFE. Cap the Langevin step budget for "
+                             "PDBFixer's clash relief on rebuilt side-chain atoms. "
+                             "That loop is 74%% of preparation time and never reaches "
+                             "its 1.3 A target on a heavily-repaired receptor, so "
+                             "capping it is a big win -- but the useful snapshot lands "
+                             "at a structure-dependent iteration. Measured: a 600-step "
+                             "cap reproduces the uncapped structure exactly on 9e26 "
+                             "yet leaves a 0.655 A worst contact on 7bxu against 1.052 "
+                             "A uncapped. Unset (default) keeps PDBFixer's behaviour. "
+                             "If you set this, CHECK THE RESULTING CONTACTS. 0 skips "
+                             "the dynamics; the minimisation after it always runs.")
+    shared.add_argument("--no-prep-h-implicit", dest="prep_h_implicit",
+                        action="store_false", default=None,
+                        help="Drop implicit solvent from the force field used for "
+                             "hydrogen placement. Cuts ~105 s of a 236 s preparation "
+                             "(GBn2 is a CustomGBForce over every atom, minimised 50 "
+                             "times), but it is NOT score-neutral: the ECHO "
+                             "electrostatic grid is built from per-atom charges "
+                             "INCLUDING hydrogens, so moving them shifts echo_total "
+                             "by up to 0.6 units and would need the ECHO weights "
+                             "refitting. On by default for that reason.")
+    shared.add_argument("--no-cache-protein", dest="cache_protein",
+                        action="store_false", default=None,
+                        help="Re-prepare the protein every run instead of reusing a "
+                             "cached result. The cache is on by default and is keyed "
+                             "on the input file, force field, prep settings and "
+                             "library versions.")
+    shared.add_argument("--protein-cache-dir", type=str, default=None,
+                        help="Where prepared proteins are cached. Defaults to "
+                             "$CHEMEM_CACHE_DIR, else $XDG_CACHE_HOME/chemem, else "
+                             "~/.cache/chemem.")
+    shared.add_argument("--refresh-protein-cache", action="store_true", default=None,
+                        help="Ignore any cached prepared protein and rewrite the entry.")
+
+    shared.add_argument("--global-k", type=float, default=None,
+                        help="Density-map restraint weight for every minimiser "
+                             "(refine, smart_ligand_refine2, ion_fixer, dock, "
+                             "lining_refine). Unset keeps each protocol's built-in "
+                             "default of 150.0. For ion_fixer this sets the base "
+                             "weight; its per-stage scale factors still apply.")
+
+    shared.add_argument("--implicit-solvent", type=str, default=None,
+                        choices=["none", "hct", "obc1", "obc2", "gbn", "gbn2"],
+                        help="Implicit-solvent model for every minimiser. Unset keeps "
+                             "current behaviour: gbn2 for refine/smart_ligand_refine2/"
+                             "dock/lining_refine, vacuum for ion_fixer and export. Note "
+                             "ion_fixer adds explicit dummy waters to complete the "
+                             "coordination shell, so enabling GB there double-counts "
+                             "solvation at those sites.")
     #now sure we will use this any more but leave it here untill the correct time.
     shared.add_argument("--dock-setup", type=str, default="sf",
                         help="Optional: controls docking dependency mode (e.g., sf/alpha)")
@@ -173,8 +283,16 @@ def resolve_protocol_order(selected: list[str], args: argparse.Namespace) -> lis
 
 def apply_overrides(system, args: argparse.Namespace) -> None:
     # Keep this as the only place you mutate the System from CLI
+    if getattr(args, "ncpu", None) is not None:
+        budget = apply_cpu_budget(system, args.ncpu)
+        print(f"[CONFIG] using CPU budget: {budget}")
+
+    if getattr(args, "cpus_per_site", None) is not None:
+        per_site = apply_cpus_per_site(system, args.cpus_per_site)
+        print(f"[CONFIG] using cpus_per_site: {per_site}")
+
     if args.platform is not None:
-        print(f"[COFIG] overriding platform {system.platform } with {args.platform}")
+        print(f"[CONFIG] overriding platform {system.platform } with {args.platform}")
         system.platform = args.platform
         
     if getattr(args, "no_map", False):
@@ -200,7 +318,7 @@ def main() -> None:
 
     #try:
     if True:
-        system = load_system(args.config)
+        system = load_system(args.config, args)
 
         # Make args visible, TODO! migrate to typed config
         system.options = args
@@ -223,6 +341,4 @@ def main() -> None:
     #    sys.exit(1)
 if __name__ == "__main__":
     main()
-
-
 

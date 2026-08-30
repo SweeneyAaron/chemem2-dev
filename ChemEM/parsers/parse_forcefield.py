@@ -77,7 +77,7 @@ class AMBER_FF:
         "implicit/gbn.xml",
         "implicit/gbn2.xml"
         )
-    
+
     @classmethod
     def get_forcefield(cls, rep, forcefeild = None, request_implicit = True):
         ff = []
@@ -120,9 +120,25 @@ class AMBER_FF:
         
         elif len(requested) == 1:
             return requested[0]
-        else: 
+        else:
             return default
-    
+
+
+# CLI name -> ParmEd/OpenMM implicit-solvent constant.
+#
+# Two different APIs express implicit solvent: app.ForceField selects it by loading an
+# extra XML (AMBER_FF.supported_implicit above), while parmed Structure.createSystem
+# takes one of these app constants as implicitSolvent=. Keep the two lists in step --
+# every entry here must have its counterpart in supported_implicit. None means vacuum.
+IMPLICIT_SOLVENT_MODELS = {
+    "none": None,
+    "hct":  app.HCT,
+    "obc1": app.OBC1,
+    "obc2": app.OBC2,
+    "gbn":  app.GBn,
+    "gbn2": app.GBn2,
+}
+
 
 @dataclass
 class CHARMM_FF:
@@ -168,8 +184,48 @@ def build_forcefeilds_from_components(rep,
         raise RuntimeError(Messages.fatal_exception(__file__, f"[ERROR] failed to compile forcefields : {ff}"))
     
     print(f'-- Sucessfully Built Forcefeild from {ff}')
-    
+
+    # OpenMM's ForceField does not record which files it was built from, but the
+    # prepared-protein cache has to key on the RESOLVED list (component scanning
+    # can add files the caller never named). Attach it rather than change the
+    # return type, which every caller would have to follow.
+    try:
+        force._chemem_ff_files = list(ff)
+    except Exception:
+        pass
+
     return force
+
+
+def forcefield_without_implicit(forcefield):
+    """The same force field with any implicit-solvent XML dropped.
+
+    `Modeller.addHydrogens` builds a full System from whatever force field it is
+    handed and minimises it up to 50 times. With `implicit/gbn2.xml` in the list
+    that System carries a CustomGBForce over *every* atom with no interaction
+    group -- 116 s of a 492 s preparation on 9e26, single-threaded. Hydrogen
+    placement is driven by templates and pH; implicit solvent only slows the
+    relaxation down.
+
+    Returns the original object unchanged if the file list is unknown or nothing
+    would be dropped, so callers can use it unconditionally.
+    """
+    files = getattr(forcefield, "_chemem_ff_files", None)
+    if not files:
+        return forcefield
+
+    implicit = set(AMBER_FF.supported_implicit)
+    kept = [f for f in files if f not in implicit]
+    if len(kept) == len(files):
+        return forcefield
+
+    try:
+        trimmed = app.ForceField(*kept)
+    except Exception:
+        return forcefield
+
+    trimmed._chemem_ff_files = kept
+    return trimmed
     
     
 def get_force_family(forcefields):

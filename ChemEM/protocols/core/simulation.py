@@ -5,9 +5,11 @@
 #
 # This module was developed by:
 #   Aaron Sweeney    <aaron.sweeney AT cssb-hamburg.de>
-from openmm.app import NoCutoff, HBonds 
+from openmm.app import NoCutoff, HBonds
 from openmm import unit
 import numpy as np
+
+from ChemEM.parsers.parse_forcefield import IMPLICIT_SOLVENT_MODELS
 
 
 
@@ -45,6 +47,38 @@ def merge_structures(protein, ligand_structures):
     for lig in ligand_structures:
         complex_struc += lig
     return complex_struc
+
+
+def resolve_global_k(options, default):
+    """Return the density-map restraint weight for a minimiser.
+
+    `--global-k` is a shared flag with a None default, so an unset flag leaves the
+    caller's own long-standing default in force and only an explicit value overrides
+    it. Pass the value the call site used before this flag existed as `default`.
+    """
+    value = getattr(options, "global_k", None)
+    return float(default) if value is None else float(value)
+
+
+def resolve_implicit_solvent(options, default):
+    """Return the implicit-solvent model for a minimiser.
+
+    Same sentinel contract as resolve_global_k: `--implicit-solvent` defaults to None,
+    which keeps whatever the call site did before (GBn2 for the ChemEMSimulationSetup
+    protocols, vacuum for ion_fixer and export). Returns an openmm.app GB constant, or
+    None for vacuum.
+    """
+    name = getattr(options, "implicit_solvent", None)
+    if name is None:
+        return default
+
+    key = str(name).lower()
+    if key not in IMPLICIT_SOLVENT_MODELS:
+        known = ", ".join(sorted(IMPLICIT_SOLVENT_MODELS))
+        raise ValueError(
+            f"[ERROR] Unknown implicit solvent model {name!r}. Choose one of: {known}"
+        )
+    return IMPLICIT_SOLVENT_MODELS[key]
 
 
 def finalize_system_from_structure(complex_struc, solvent):
@@ -198,30 +232,30 @@ def run_biased_md_burst(
         simulation.step(nsteps)
         
 def get_atom_mapping(full_structure, local_structure):
-    
+    """Map local-structure atoms to full-structure atoms by (chain, resnum, name).
+
+    Uses the parmed atom list (atom.idx) — NOT structure.topology — because a
+    parmed Structure's cached OpenMM topology can go stale after atoms are removed
+    (e.g. a covalent leaving-atom .strip() in apply_protein_deletions), leaving
+    structure.topology.getNumAtoms() one larger than len(structure.positions).
+    atom.idx is always consistent with structure.positions (both ordered by atom
+    index), so the returned indices are safe to use in update_global_positions.
+    """
+    # Key: (Chain_ID, Res_Num, Atom_Name)
     full_atom_map = {}
-    #Key: (Chain_ID, Res_ID, Atom_Name)
-    for residue in full_structure.topology.residues():
-        chain_id = residue.chain.id 
-        res_id = residue.id 
-        for atom in residue.atoms():
-            key = (chain_id, res_id, atom.name)
-            
-            full_atom_map[key] = atom.index
-    
+    for atom in full_structure.atoms:
+        res = atom.residue
+        full_atom_map[(str(res.chain), res.number, atom.name)] = atom.idx
+
     mapping = []
-    for residue in local_structure.topology.residues():
-        chain_id = residue.chain.id 
-        res_id = residue.id 
-        for atom in residue.atoms():
-            key = (chain_id, res_id, atom.name)
-            atom_idx = atom.index
-    
-            if key in full_atom_map:
-                mapping.append((atom_idx, full_atom_map[key]))
-            else:
-                
-                print(f"Warning: Atom {key} in local structure not found in full structure.")
+    for atom in local_structure.atoms:
+        res = atom.residue
+        key = (str(res.chain), res.number, atom.name)
+        full_idx = full_atom_map.get(key)
+        if full_idx is not None:
+            mapping.append((atom.idx, full_idx))
+        else:
+            print(f"Warning: Atom {key} in local structure not found in full structure.")
     return mapping
     
     

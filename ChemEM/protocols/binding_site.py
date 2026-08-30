@@ -37,6 +37,7 @@ from ChemEM.tools.binding_site import (calculate_ses_grid_zyx,
                                   compute_distance_map,
                                   compute_alpha_shape_pockets,
                                   ses_ray_trace_binding_site,
+                                  manual_binding_site,
                                   compute_site_spheres,
                                   contact_atom_indices,
                                   residues_from_atom_indices,
@@ -113,8 +114,13 @@ class BindingSite:
                 
                 ligand_binding_clusters[centroid_key] = centroid_to_clusters
             else:
-                
+
                 # Fall back to SES extraction via helper function
+                self.system.log(
+                    f"-- Centroid {centroid_key} {np.round(centroid, 3).tolist()} matched no "
+                    f"alpha-shape pocket cluster; falling back to SES ray-tracing within "
+                    f"{self.fall_back_radius} A."
+                )
                 fallback_site = ses_ray_trace_binding_site(
                     centroid=centroid,
                     centroid_key=centroid_key,
@@ -124,14 +130,119 @@ class BindingSite:
                     protein_openff_structure=self.protein_openff_structure,
                     system_output_dir=self.system.output,
                     grid_spacing=self.grid_spacing,
-                    fall_back_radius=self.fall_back_radius
+                    fall_back_radius=self.fall_back_radius,
+                    write_files=getattr(self.system.options, "write_site_files", True),
                 )
-               
-                
+
+
                 if fallback_site:
                     self.binding_sites[centroid_key] = fallback_site
+                else:
+                    self.system.log(
+                        f"-- SES fallback found no pocket at centroid {centroid_key}; "
+                        "no binding site created."
+                    )
         
         self.ligand_binding_clusters = ligand_binding_clusters
+
+    def get_manual_binding_sites(self):
+        """Build one user-defined site per config centroid, skipping pocket detection.
+
+        The auto path can only ever hand docking a site that alpha-shape clustering and
+        density segmentation agree on; when they disagree the pocket gets split, a box
+        ends up clipping part of the ligand, and a decoy site can outscore the real one.
+        Here the user states where and how big, and the only thing removed is space the
+        ligand cannot physically occupy.
+        """
+        opts = self.system.options
+
+        if not self.system.centroid:
+            raise ValueError(
+                "--manual-site needs at least one 'centroid = [x, y, z]' in the config; "
+                "there is nothing to build a site around.")
+
+        # Both of these wipe system.binding_sites during AlphaMask, which would silently
+        # discard everything built here. Fail loudly rather than produce a confusing run.
+        for flag, attr in (("--alpha-feature-sites", "alpha_feature_sites"),
+                           ("--force-new-site", "force_new_site")):
+            if getattr(opts, attr, False):
+                raise ValueError(
+                    f"--manual-site cannot be combined with {flag}: {flag} discards the "
+                    "binding sites the manual builder creates.")
+
+        box = getattr(opts, "manual_site_box", None)
+        radius = getattr(opts, "manual_site_radius", None)
+
+        for num, centroid in enumerate(self.system.centroid):
+            centroid = np.asarray(centroid, dtype=float).reshape(3)
+
+            # Keyed by centroid index: PreCompDataProtein resolves the ACO bias sphere
+            # from system.centroid[key], so the key must stay the centroid's position.
+            site = manual_binding_site(
+                centroid=centroid,
+                centroid_key=num,
+                atoms=self.atoms,
+                positions=self.positions,
+                atom_radii=self.atom_radii,
+                protein_openff_structure=self.protein_openff_structure,
+                system_output_dir=self.system.output,
+                grid_spacing=self.grid_spacing,
+                radius=radius,
+                box=box,
+                lining_distance=opts.lining_residue_distance,
+                padding=self.padding,
+                extra_lining_atom_indices=self._covalent_lining_atom_indices(
+                    centroid.reshape(1, 3)),
+                write_files=getattr(opts, "write_site_files", True),
+                log=self.system.log,
+            )
+
+            if site is not None:
+                self.binding_sites[num] = site
+
+        if not self.binding_sites:
+            raise ValueError(
+                "--manual-site produced no sites: every requested volume was fully "
+                "occupied by protein. Check the centroid, or enlarge "
+                "--manual-site-box / --manual-site-radius.")
+
+        # get_binding_sites() runs unconditionally after this and iterates
+        # ligand_binding_clusters; an empty dict makes it a no-op.
+        self.ligand_binding_clusters = {}
+
+    def _covalent_lining_atom_indices(self, site_centers):
+        """Heavy-atom indices (into ``self.atoms``) of covalent-ligand target
+        residues lying near this site, so the covalent anchor atom is guaranteed to
+        be in the docking lining set (which enables the C++ warhead-anchor
+        clash-exclusion). Returns an empty list for systems with no covalent
+        ligands, so non-covalent binding-site construction is unchanged.
+        """
+        # Flatten every ligand's link list: a crosslinker anchors to more than one
+        # residue and all of them must make the lining set.
+        ligands = getattr(self.system, "ligand", []) or []
+        specs = [s for l in ligands for s in (getattr(l, "covalent_links", None) or [])]
+        specs = [s for s in specs if s is not None and s.resolved_protein_resname]
+        if not specs:
+            return []
+
+        centers = np.asarray(site_centers, dtype=float)
+        if centers.size == 0:
+            return []
+        near_cut = float(self.system.options.lining_residue_distance) + 5.0
+
+        extra = []
+        for i, atom in enumerate(self.atoms):
+            res = atom.residue
+            for s in specs:
+                if (res.name == s.resolved_protein_resname
+                        and int(res.number) == int(s.resolved_protein_resnum)
+                        and (s.resolved_protein_chain is None
+                             or str(res.chain) == str(s.resolved_protein_chain))):
+                    p = np.array([atom.xx, atom.xy, atom.xz], dtype=float)
+                    if np.min(np.linalg.norm(centers - p, axis=1)) <= near_cut:
+                        extra.append(i)
+                    break
+        return extra
 
     def get_binding_sites(self):
         """
@@ -163,27 +274,41 @@ class BindingSite:
                 atom_radii=self.atom_radii,
                 extra_distance=self.system.options.lining_residue_distance,
             )
+            # Covalent docking: make sure the covalent target residue is part of the
+            # lining set (no-op for non-covalent systems). Injected before
+            # lining_residues / rdkit_lining_mol are built so both stay consistent.
+            cov_extra = self._covalent_lining_atom_indices(site_centers)
+            if cov_extra:
+                lining_atom_indices = np.unique(np.concatenate([
+                    np.asarray(lining_atom_indices, dtype=int),
+                    np.asarray(cov_extra, dtype=int),
+                ]))
+
             lining_residues = residues_from_atom_indices(lining_atom_indices, self.atoms)
-    
+
             # 4) Simple geometric stats
             binding_site_centroid, min_coords, max_coords, bounding_box_size = box_stats(site_centers)
     
             # 5) Maps + volume
+            # `write_site_files` (default True) lets a caller (e.g. the echo_terms rescorer)
+            # suppress all binding-site disk output — no site .mrc / distance .mrc / lining .pdb.
+            write_sites = getattr(self.system.options, "write_site_files", True)
             denmap_path = os.path.join(self.system.output, f"site_{site_label}.mrc")
             distmap_path = os.path.join(self.system.output, f"site_{site_label}_distance.mrc")
             pdb_path = os.path.join(self.system.output, f"site_{site_label}.pdb")
-    
+
             origin, box_size, densmap, distance_map, apix, site_volume = density_and_distance_maps(
                 site_centers=site_centers,
                 site_radii=site_radii,
                 grid_spacing=self.grid_spacing,
-                denmap_path=denmap_path,
+                denmap_path=(denmap_path if write_sites else None),
                 density_cutoff=0.1,
             )
-    
+
             # Optional debug output (kept explicit + separate path)
-            dmap = EMMap(origin, apix, distance_map, 3.0)
-            dmap.write_mrc(distmap_path)
+            if write_sites:
+                dmap = EMMap(origin, apix, distance_map, 3.0)
+                dmap.write_mrc(distmap_path)
     
             data = {
                 "key": site_label,
@@ -214,11 +339,12 @@ class BindingSite:
                 write=False,
             )
             
-            data["rdkit_lining_mol"] = write_residues_to_pdb(
+            data["rdkit_lining_mol"], data["lining_hydrogens"] = write_residues_to_pdb(
                 lining_residues,
                 self.protein_openff_structure.positions,
                 pdb_path.replace(".pdb", "_lining.pdb"),
-                write=True
+                write=write_sites,
+                return_hydrogens=True,
             )
     
             self.binding_sites[site_label] = BindingSiteModel.from_dict(data)
@@ -232,19 +358,29 @@ class BindingSite:
         """
         opts = self.system.options
         num_sites = len(self.binding_sites)
-        
+        manual = getattr(opts, "manual_site", False)
+
         # --- Build Header and Parameters ---
         log_lines = []
         log_lines.append("\n" + "="*60)
-        log_lines.append(f"BINDING SITE DETECTION SUMMARY")
+        log_lines.append("BINDING SITE %s SUMMARY" % ("DEFINITION" if manual else "DETECTION"))
         log_lines.append("="*60)
         log_lines.append(f"Total Sites Identified: {num_sites}")
         log_lines.append("-" * 60)
         log_lines.append(f"Parameters Used:")
         log_lines.append(f"  Grid Spacing:       {self.grid_spacing:.2f} Å")
-        log_lines.append(f"  Probe Radius:       {opts.probe_sphere_min:.1f} - {opts.probe_sphere_max:.1f} Å")
-        log_lines.append(f"  Clustering Thr:     Pass 1: {opts.first_pass_thr:.2f}, Pass 2: {opts.second_pass_thr:.2f}")
-        log_lines.append(f"  Merge Overlaps:     {opts.n_overlaps} links (Thr: {opts.third_pass_thr:.2f} Å)")
+        if manual:
+            # The alpha-shape thresholds below are not used on this path, so printing
+            # them would just be misleading.
+            log_lines.append(f"  Mode:               manual (--manual-site)")
+            if getattr(opts, "manual_site_box", None) is not None:
+                log_lines.append(f"  Requested extent:   box {opts.manual_site_box} Å")
+            else:
+                log_lines.append(f"  Requested extent:   radius {opts.manual_site_radius} Å")
+        else:
+            log_lines.append(f"  Probe Radius:       {opts.probe_sphere_min:.1f} - {opts.probe_sphere_max:.1f} Å")
+            log_lines.append(f"  Clustering Thr:     Pass 1: {opts.first_pass_thr:.2f}, Pass 2: {opts.second_pass_thr:.2f}")
+            log_lines.append(f"  Merge Overlaps:     {opts.n_overlaps} links (Thr: {opts.third_pass_thr:.2f} Å)")
         log_lines.append("-" * 60)
 
         # --- Log Details for Each Site ---
@@ -286,13 +422,12 @@ class BindingSite:
         self.set_grid_spacing()
         self.get_position_input()
         
-        if False:#self.system.options.force_new_site:
-            #TODO!
-            
-            pass
-        
+        if getattr(self.system.options, "manual_site", False):
+
+            self.get_manual_binding_sites()
+
         else:
-            
+
             # Automated binding site segmentation
             self.pockets, delaunay = compute_alpha_shape_pockets(
                 positions=self.positions,

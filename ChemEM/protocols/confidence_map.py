@@ -102,6 +102,8 @@ class ConfidenceMap:
         out_file = os.path.join(outpath, 'masked_map.mrc')
         masked_map.write_mrc(out_file)
         self.system.confidence_map = masked_map
+        self.system.bg_mean = float(self.bg_mean)
+        self.system.bg_std = float(self.bg_std)
         #return ppvs, thresholded_map
     
     def run(self):

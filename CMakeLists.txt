@@ -42,6 +42,7 @@ endif()
 # ---- Source layout (real paths) ----
 set(PROJ_SRC_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/ChemEM/cpp)
 set(PROJ_DOCK_DIR ${PROJ_SRC_DIR}/docking_refactor)
+set(PROJ_DOCK_V2_DIR ${PROJ_SRC_DIR}/docking_v2)   # experimental engine, built alongside the baseline
 if(NOT EXISTS ${PROJ_SRC_DIR})
   message(FATAL_ERROR "C++ source directory not found: ${PROJ_SRC_DIR}")
 endif()
@@ -243,6 +244,49 @@ install(TARGETS docking
   ARCHIVE DESTINATION ChemEM
 )
 
+# ---- docking_v2 (experimental, sampling-efficient engine; fully isolated) ----
+# Separate .so with its own PYBIND11_MODULE(docking_v2). Building this NEVER
+# recompiles the baseline `docking` target above. Optional: skipped cleanly if
+# the source tree is absent, so the baseline build is unaffected either way.
+if(EXISTS ${PROJ_DOCK_V2_DIR})
+  pybind11_add_module(docking_v2
+    ${PROJ_DOCK_V2_DIR}/bindings.cpp
+    ${PROJ_DOCK_V2_DIR}/PreComputedData.cpp
+    ${PROJ_DOCK_V2_DIR}/Scorers.cpp
+    ${PROJ_DOCK_V2_DIR}/ScoringFunctions.cpp
+    ${PROJ_DOCK_V2_DIR}/SearchFunctions.cpp
+    ${PROJ_DOCK_V2_DIR}/nealderMead.cpp
+  )
+  target_include_directories(docking_v2 PRIVATE
+    ${PROJ_SRC_DIR}
+    ${PROJ_DOCK_V2_DIR}
+    ${PROJ_DOCK_V2_DIR}/LBFGSpp/include
+    ${EIGEN3_INCLUDE_DIRS}
+    ${Python_INCLUDE_DIRS}
+    ${Python_NumPy_INCLUDE_DIRS}
+    ${RDKIT_INCLUDE_DIRS}
+  )
+  target_link_libraries(docking_v2 PRIVATE
+    ${RDKIT_LIBRARIES}
+    Eigen3::Eigen
+    $<$<BOOL:${Boost_FOUND}>:Boost::boost>
+    $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
+  )
+  set_target_properties(docking_v2 PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CHEMEM_PACKAGE_DIR}
+    RUNTIME_OUTPUT_DIRECTORY ${CHEMEM_PACKAGE_DIR}
+    OUTPUT_NAME "docking_v2"
+  )
+  install(TARGETS docking_v2
+    LIBRARY DESTINATION ChemEM
+    RUNTIME DESTINATION ChemEM
+    ARCHIVE DESTINATION ChemEM
+  )
+  message(STATUS "docking_v2 experimental engine: ENABLED")
+else()
+  message(STATUS "docking_v2 experimental engine: source tree absent, skipping")
+endif()
+
 # ---- grid_maps ----
 pybind11_add_module(grid_maps
   ${PROJ_SRC_DIR}/grid_maps.cpp
@@ -301,8 +345,12 @@ install(
 )
 
 # ---- convenience target ----
+set(CHEMEM_MODULE_TARGETS docking grid_maps ligand_fitting)
+if(TARGET docking_v2)
+  list(APPEND CHEMEM_MODULE_TARGETS docking_v2)
+endif()
 add_custom_target(chemem_modules ALL
-  DEPENDS docking grid_maps ligand_fitting
+  DEPENDS ${CHEMEM_MODULE_TARGETS}
   COMMENT "Building all ChemEM modules"
 )
 

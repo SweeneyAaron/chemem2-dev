@@ -59,14 +59,26 @@ def residues_match_by_backbone(rA, rB, posA, posB, tol_ang: float = 1e-5) -> boo
 
 def build_residue_map_by_positions(orig_topology, orig_positions,
                                    final_topology, final_positions,
-                                   tol_ang: float = 1e-3) -> Dict[Tuple[str, str], Tuple[str, str]]:
+                                   tol_ang: float = 1e-5) -> Dict[Tuple[str, str], Tuple[str, str]]:
     """
     Build a residue label map by comparing backbone atom coordinates (Å).
+
+    `tol_ang` used to be accepted and then ignored -- the call below hard-coded
+    1e-5 -- so callers passing a looser tolerance silently got the tight one. The
+    parameter is now honoured, and the default lowered from 1e-3 to the 1e-5 that
+    was actually in force, so behaviour is unchanged.
+
+    The tolerance is this tight because untouched atoms round-trip through PDB
+    '%.3f' formatting exactly, making their coordinates bit-recoverable. Anything
+    that re-quantises coordinates between the original and prepared structures
+    (a float32 cache, say) drops every match and returns an EMPTY map, with no
+    error -- see the `n_mapped` guard in protein_parser.
 
     Returns:
       res_map: {(orig_chain, orig_resid) -> (final_chain, final_resid)}
     """
-    
+
+
     posA = to_angstrom_positions(orig_positions)
     posB = to_angstrom_positions(final_positions)
 
@@ -86,7 +98,7 @@ def build_residue_map_by_positions(orig_topology, orig_positions,
 
         hit = None
         for rB in candidates:
-            if residues_match_by_backbone(rA, rB, posA, posB, tol_ang=1e-5):
+            if residues_match_by_backbone(rA, rB, posA, posB, tol_ang=tol_ang):
                 hit = rB
                 break
 

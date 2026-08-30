@@ -39,7 +39,8 @@ class AntColonyOptimizer {
 public:
 
     AntColonyOptimizer(const PreComputedData &precomputed_data,
-                       const RDKit::ROMol &original_mol);
+                       const RDKit::ROMol &original_mol,
+                       ECHOWeights weights = ECHOWeights::default_v1());
     
     const std::vector< std::array<unsigned int, 4> > dihedral_indices() const { return m_dihedral_indices ; }
     const uint64_t baseseed() const { return m_baseseed ; }

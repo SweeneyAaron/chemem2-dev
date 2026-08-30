@@ -1,0 +1,130 @@
+Plan: ChemEM MCP Server (chemem-mcp)
+Context
+ChemEM exposes a class-based protocol API (alpha-mask, docking, refinement, scoring, smart_refine, orchestrator) for cryo-EM ligand fitting. The goal is to wrap that API as an MCP server so a local LLM (Ollama, 24GB GPU class) can act as a "structural biologist agent":
+
+Run a standard starting workflow on input data (map + protein + candidate ligands).
+Inspect analysis tool output (segmentation results, dock scores, Q-scores, CCC/SCI/MI).
+Decide what to do next — try more stoichiometries, re-segment, refine, swap ligands.
+Loop until converged, then hand the result back to the user.
+Stage 1 focus: ligand density segmentation + stoichiometry assignment (alpha-mask → dock → score → pick best stoichiometry). Stage 2 (refinement) comes after Stage 1 works end-to-end.
+
+Key architectural decisions (with reasoning)
+1. Separate package, not in-tree
+Create a new repo/package chemem-mcp that depends on ChemEM. Reasoning:
+
+ChemEM's core install is light (numpy only at top level). Bundling FastMCP/pydantic into ChemEM forces every science user to take an LLM-stack dependency.
+MCP server and LLM client will iterate faster than the science code.
+Lets the LLM backend swap (Ollama → vLLM → API model) without touching ChemEM.
+Inside ChemEM, the only change needed is making sure the protocol registry (protocol_spec.py:741-845) stays callable from Python without going through the CLI — there's a small amount of CLI-coupling in __main__.py:resolve_protocol_order() that should be lifted into a reusable function.
+
+2. LLM choice: Qwen2.5-32B-Instruct via Ollama (not DeepSeek-R1)
+Reasoning:
+
+DeepSeek-R1 (and distilled variants) are reasoning models that emit <think> blocks and have inconsistent structured-tool-call output. MCP needs reliable function calling.
+Qwen2.5-32B-Instruct (or Qwen2.5-Coder-32B) fits comfortably in 24GB VRAM (Q4_K_M ~19GB) and has well-tested tool-calling.
+Optionally invoke DeepSeek-R1 as a sub-tool for hard reasoning steps later (Phase 3+).
+Phase 0 (recommended): 30-minute bench — same 5 ChemEM prompts against Qwen2.5-32B, Qwen3-32B, Llama-3.3-70B-Q4. Pick the one with cleanest tool-call output. Don't skip this.
+
+3. LLM as dispatcher + decider, not in-loop micromanager
+The agent loop is:
+
+[deterministic protocol] → [analysis tool returns text summary] → [LLM decides next call] → ...
+LLM never runs inner loops (e.g. "try 1 copy vs 2 vs 3 dock-and-score") — those are deterministic Python sweeps. LLM picks which sweep to run, reads the summary, and decides whether to refine, re-segment, or stop.
+
+4. Tool surface granularity
+Two tool tiers, all stateless from MCP's perspective (state lives on disk in a session dir):
+
+Action tools (heavy, long-running) — each wraps a protocol class:
+
+run_alpha_mask — segment density, returns paths to mask files + summary stats
+run_docking — dock N copies of M ligands into K sites; returns ranked pose list
+run_minimisation — OpenMM refine of selected poses
+run_smart_refine — smart_refine_2 over selected poses
+run_orchestrator — full 3-gate pipeline (existing SmartOrchestrator) as a single call for the "default starting procedure"
+Inspection tools (cheap, return LLM-readable text):
+
+inspect_map — resolution, voxel size, dimensions, density histogram summary
+inspect_protein — chains, residue count, predicted binding sites
+inspect_ligand — SMILES, heavy atom count, rotatable bonds, flexibility class
+summarize_segmentation — for an alpha-mask output: # segments, volumes, suggested stoichiometry range
+summarize_docking — top-K poses with scores + which site
+score_pose — run a single scorer (CCC/SCI/MI/QScore) on a pose; returns scalar + interpretation
+compare_poses — diff scores between two pose sets (useful for stoichiometry comparison)
+list_session_artifacts — what files are in the session dir
+get_session_state — JSON: poses tried, scores, decisions, current best
+5. Long-running protocols: async + polling
+Docking and refinement can take minutes to hours. MCP tool calls should not block that long. Pattern:
+
+run_* tools return a job_id immediately and spawn the protocol in a subprocess.
+check_job(job_id) returns status (pending/running/done/failed) + progress hints.
+get_job_result(job_id) returns the structured summary once done.
+This is critical — get it right early or retrofitting hurts.
+
+6. Session state on disk
+Each MCP session gets a session dir under e.g. ~/.chemem-mcp/sessions/<uuid>/. Inside:
+
+session.json — manifest of all jobs run, summaries, decisions
+inputs/ — symlinks/copies of map, protein, ligands
+jobs/<job_id>/ — protocol output dirs (ChemEM's normal output structure)
+log.jsonl — append-only log of every MCP tool call (for replay/debugging/reproducibility)
+This way get_session_state is just reading session.json.
+
+Implementation phases
+Phase 0 — LLM benchmark (~½ day)
+Stand up Ollama with Qwen2.5-32B, Qwen3-32B, Llama-3.3-70B-Q4. Run 5 representative prompts ("inspect this map", "segment and dock", "compare these two stoichiometries", "the dock failed, what next", "summarize the session"). Score on (a) tool-call validity rate, (b) reasoning quality. Pick winner.
+
+Phase 1 — Package skeleton + first action tools (~3 days)
+New repo chemem-mcp with pyproject.toml depending on chemem, fastmcp, pydantic.
+FastMCP server with stdio transport (local-only for now).
+Implement session manager: create session, write manifest, manage job subprocess pool.
+Wrap 3 action tools end-to-end: run_alpha_mask, run_docking, run_orchestrator.
+Wrap 3 inspection tools: inspect_map, inspect_ligand, summarize_docking.
+Each run_* returns job_id; add check_job + get_job_result.
+Smoke test: launch server, call tools by hand (no LLM yet) using an MCP CLI client.
+Critical files to touch in ChemEM:
+
+protocol_spec.py — confirm all needed ProtocolSpec entries expose enough kwargs without CLI parsing.
+main.py:resolve_protocol_order — extract dependency resolution into a reusable function importable from the MCP package.
+data/system.py — confirm System can be constructed programmatically (without parsing a config file). Add a kwarg-based constructor if not.
+protocols/orchestrator/state.py — already has to_dict(); reuse for MCP serialization.
+Phase 2 — Stoichiometry sweep + LLM-in-loop (~5 days)
+Add new stoichiometry_sweep protocol in ChemEM (not in MCP) — deterministic Python: for N in 1..K, dock N copies, score with Q+CCC, return ranked dict. This is not an LLM decision — it's a Python sweep wrapped as a single MCP tool run_stoichiometry_sweep.
+Add summarize_segmentation, summarize_stoichiometry_sweep, compare_poses inspection tools.
+Wire up Qwen2.5 (from Phase 0) via a small driver script (chemem-mcp-agent) that:
+Connects to the MCP server
+Loads a system prompt describing the "structural biologist" role
+Runs the conversation loop, surfacing tool calls and results
+End-to-end test on a known case (find one in tests/ or recent commits): give the agent only the map + protein + candidate ligands, see if it converges to the right assignment.
+Phase 3 — Refinement loop (~3 days)
+Add run_minimisation, run_smart_refine_2 action tools.
+Add score_pose, score_session inspection tools.
+Extend system prompt: after Stage 1 produces top assignment, agent can request refinement, then re-evaluate.
+Test loop: "agent picked assignment → refined → score improved/regressed → decided next step."
+Phase 4 — Robustness + UX (~2 days)
+Error messages from protocols → LLM-readable text (not Python tracebacks).
+Token budget management — get_session_state truncates intelligently when pose list is huge.
+Replay tool: re-run a session deterministically from log.jsonl.
+README + example transcripts.
+What this plan deliberately does NOT include
+No HTTP / multi-user MCP transport — stdio is fine for a single researcher. Add later if needed.
+No fine-tuning — Qwen2.5 with good system prompt + tool descriptions should be enough. Revisit only if Phase 2 evaluation shows the model misroutes.
+No GUI — terminal-only agent driver. ChemEM may already have a viewer; integration is post-MVP.
+No DeepSeek-R1 in the main path — revisit as a sub-tool in Phase 3 only if a clear reasoning bottleneck appears.
+Verification
+After each phase:
+
+Phase 1: From a Python REPL, instantiate the MCP server in-process and call each tool; verify the session dir is created and a job runs. No LLM in the loop yet.
+
+Phase 2 (end-to-end):
+
+Start Ollama with chosen model: ollama run qwen2.5:32b
+Start MCP server: chemem-mcp serve --session-dir ~/.chemem-mcp/sessions
+Run agent driver: chemem-mcp-agent --map test.mrc --protein test.pdb --ligands ligs.sdf
+Confirm the agent (a) inspects inputs, (b) runs segmentation, (c) runs stoichiometry sweep, (d) reports a final assignment with scores.
+Compare the LLM-driven result to running chemem orchestrate (SmartOrchestrator) directly on the same inputs — they should land in the same neighbourhood for a known case.
+Phase 3: Add a refinement step to the same test case; confirm scores improve and the agent reports the improvement correctly.
+
+Open questions to resolve during Phase 1
+Does System support being constructed from kwargs, or only from a config-file path? If only config, we'll need a thin builder helper.
+Are protocol outputs idempotent enough to re-run safely if a job is killed and retried? (Affects check_job design.)
+Does mmgbsa_score.py (29k lines) have an importable scoring function, or only a CLI entry point? Affects whether score_pose can be cheap.

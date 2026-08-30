@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import itertools
+import json
 import os
+import secrets
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -18,7 +20,11 @@ from typing import Dict, List
 import numpy as np
 from rdkit import Chem
 
-from ChemEM import docking
+# NOTE: the compiled `docking` extension is imported lazily via Docking._echo_ext()
+# (not at module load) so the isolated experimental engine `docking_v2` — which
+# subclasses Docking — can be imported in the same process without a pybind11
+# double-registration clash on shared type names (e.g. ECHOWeights). --dock behaviour
+# is unchanged: the same module still backs every call, just loaded on first use.
 from ChemEM.messages import Messages
 from ChemEM.parsers.models import Ligand #stay
 from ChemEM.tools.mmgbsa_score import MMGBSAScore #move
@@ -27,9 +33,16 @@ from ChemEM.tools.precomputed_data import PreCompDataLigand, PreCompDataProtein 
 from ChemEM.tools.docking import energy_cutoff, write_results, dock_worker#move
 from ChemEM.tools.ligand import  mol_with_positions #stay
 from ChemEM.tools.geometry import rmsd_cluster #stay
+from ChemEM.tools.resources import (
+    resolve_cpu_budget,
+    resolve_cpus_per_site,
+    thread_limit_env,
+)
 #refactored
 from .mmgbsa_score import mmgbsa_score_docked_poses, write_mmgbsa_scores
 from ChemEM.protocols.refine.pose_minimiser import BatchPoseMinimizer, ChemEMSimulationSetup
+from ChemEM.protocols.core.simulation import resolve_global_k, resolve_implicit_solvent
+from openmm import app
 
 #----refactor notes
 #going to move mmgbsa rescoreing out of this file 
@@ -53,6 +66,11 @@ class SiteResult:
 
 
 class Docking:
+    # Which compiled engine this protocol drives. Surfaced in the docking summary so a
+    # log.out can be attributed to --dock or --dock2 after the fact; without it the two
+    # produce byte-identical headers and an A/B comparison cannot be reconstructed.
+    ENGINE_NAME = "docking"
+
     def __init__(self, system):
         self.system = system
         self._site_results: List[SiteResult] = []
@@ -63,6 +81,7 @@ class Docking:
         self._run_runtime_s = None
         self._site_runtimes_s: Dict[str, float] = {}
         self._poses_count: Dict[tuple[str, int], int] = {}
+        self._dock_seed = None
     
     def log(self) -> str:
         """
@@ -91,6 +110,9 @@ class Docking:
 
         lines = []
         lines.append("=== ChemEM Docking Summary ===\n")
+        lines.append(f"Engine: {self.ENGINE_NAME}\n")
+        if self._dock_seed is not None:
+            lines.append(f"Search seed: {self._dock_seed}  (reproduce with --dock-seed {self._dock_seed})\n")
         lines.append(f"Output dir: {getattr(self.system, 'output', None)}\n")
         lines.append(f"Sites docked: {n_sites}\n")
         lines.append(f"Ligands provided: {n_ligs}\n")
@@ -147,18 +169,28 @@ class Docking:
         self._run_started = time.time()
         
         self.system.log(Messages.create_centered_box("Molecular Docking"))
-        
+        self.system.log(f"[dock] engine: {self.ENGINE_NAME}")
+        # Resolve the search seed BEFORE any PreCompDataProtein is built, and log it
+        # immediately -- a run that crashes later must still record how to repeat it.
+        self._resolve_seed()
+        self._warn_unsupported_engine_features()
+
         ligands = self._precomupt_ligand_objects()
         
         
         for site_id, binding_site in self._iter_sites():
-            
-            #import pdb 
-            #pdb.set_trace()
+
+            # Alpha-feature sites override bias_radius with --feature-site-radius so the
+            # ACO translation-point sphere and the bias penalty match the per-site mask.
+            if getattr(binding_site, "is_alpha_feature_site", False):
+                effective_bias_radius = float(self.system.options.feature_site_radius)
+            else:
+                effective_bias_radius = float(self.system.options.bias_radius)
+
             precomp_site = PreCompDataProtein(
                 binding_site,
                 self.system,
-                bias_radius=self.system.options.bias_radius,
+                bias_radius=effective_bias_radius,
                 split_site=self.system.options.split_site,
             )
             
@@ -193,6 +225,41 @@ class Docking:
     
     
     
+    def _resolve_seed(self):
+        """Fix the ACO search seed for this run and write it back onto options.
+
+        The seed is drawn ONCE here and stored on `system.options.dock_seed`, which
+        is where `PreCompDataProtein` reads it, so every site and every ligand in the
+        run shares one seed and the run reproduces as a whole.
+
+        Unset means random. The search is stochastic, and a fixed seed hides that:
+        rerunning replays the identical trajectory, so a lucky pose looks converged.
+        Reproducibility is preserved by logging the seed rather than by freezing it.
+        """
+        seed = getattr(self.system.options, "dock_seed", None)
+        if seed is None:
+            # 63-bit: stays positive through the int64 -> uint64 cast into C++.
+            seed = secrets.randbits(63)
+            source = "random"
+        else:
+            seed = int(seed)
+            source = "--dock-seed"
+        if seed == 0:
+            # 0 is a legal mt19937 seed, but reserving it keeps "unset" unambiguous
+            # everywhere the value is passed around as a falsy-checked int.
+            seed = 1
+        self.system.options.dock_seed = seed
+        self._dock_seed = seed
+        self.system.log(
+            f"[dock] seed: {seed} ({source}) -- reproduce this run with --dock-seed {seed}"
+        )
+        minimiser = str(getattr(self.system.options, "local_minimiser", "nelder-mead"))
+        if minimiser != "nelder-mead":
+            self.system.log(
+                f"[dock] local minimiser: {minimiser} (inner refine + final polish)"
+            )
+        return seed
+
     def score_mmgbsa(self):
         all_scores = []
         
@@ -203,8 +270,8 @@ class Docking:
 
     def score_echo(self, precompute_data, mol):
         block = self._molblock_with_fallback(mol, precompute_data)
-        score = docking.run_echo_score(precompute_data, block)
-        
+        score = self._echo_ext().run_echo_score(precompute_data, block, weights=self._weights())
+
         return score
 
     def _get_output_objects(self):
@@ -246,14 +313,28 @@ class Docking:
         
         
         return [
-            (mol, PreCompDataLigand(mol,self.system.platform, flexible_rings=self.system.options.flexible_rings))
+            (mol, PreCompDataLigand(
+                mol,
+                self.system.platform,
+                flexible_rings=self.system.options.flexible_rings,
+                resource_owner=self.system,
+            ))
             for mol in self.system.ligand
         ]
 
     def _iter_sites(self):
         if not self.system.options.no_map  and (self.system.density_map is not None):
-            
-            
+
+            # --dock-full-map scores against the cropped confidence map, which is built
+            # on demand from the BindingSite geometry, so a site that segmentation
+            # dropped is still dockable and must not be filtered out here. --manual-site
+            # is the same situation: the user defined the volume, so it gets docked
+            # whether or not a density blob happened to land in it.
+            if (getattr(self.system.options, "dock_full_map", False)
+                    or getattr(self.system.options, "manual_site", False)):
+                return [(key, binding_site)
+                        for key, binding_site in self.system.binding_sites.items()]
+
             sites = [
                 (key, binding_site)
                 for key, binding_site in self.system.binding_sites.items()
@@ -270,7 +351,14 @@ class Docking:
         for lig_idx, (ligand, precomp_lig) in enumerate(ligands):
             print(f'dock ligand {lig_idx}')
             combined = precomp_site + precomp_lig
-            
+
+            # Covalent docking: tether the warhead to the protein anchor. Gated on
+            # ligand.covalent_link, so non-covalent ligands are completely unaffected.
+            if getattr(ligand, "covalent_link", None) is not None:
+                self._apply_covalent_anchor(ligand, precomp_site, combined)
+
+            self._attach_reference_ligand(ligand, combined)
+
             block = self._molblock_with_fallback(ligand, combined)
             
             if self.system.options.split_site:
@@ -306,18 +394,73 @@ class Docking:
             print(f'finish dock ligand {lig_idx}')
 
     
+    def _apply_covalent_anchor(self, ligand, precomp_site, combined):
+        """Attach the covalent-anchor restraints (ligand warhead -> fixed protein
+        atom, one per covalent bond) to the merged precompute object so the C++
+        search tethers every warhead to its covalent residue. Only called for
+        ligands carrying a covalent link; for every other ligand the object has no
+        covalent_* attributes and the C++ scorer's covalent term stays disabled
+        (existing docking unchanged).
+
+        The attributes are lists — a crosslinker bonded to two residues is held at
+        both ends. Convergence relies on the covalent penalties together with the
+        binding site being centred on the covalent residues (see BindingSite
+        covalent handling); the protein is rigid during the search so the anchors
+        are fixed points.
+        """
+        from ChemEM.tools.precomputed_data import resolve_covalent_anchors
+        resolved = resolve_covalent_anchors(
+            ligand, precomp_site, self.system.protein.complex_structure
+        )
+        if not resolved:
+            return
+
+        combined.covalent_warhead_idx = [int(r[0]) for r in resolved]
+        combined.covalent_anchor_prot_idx = [
+            (None if r[1] is None else int(r[1])) for r in resolved
+        ]
+        combined.covalent_anchor_xyz = [np.asarray(r[2], dtype=float) for r in resolved]
+        combined.covalent_r0 = [float(r[3]) for r in resolved]
+        combined.covalent_k = [float(r[4]) for r in resolved]
+
+        for warhead_idx, anchor_prot_idx, _xyz, r0, k in resolved:
+            self.system.log(
+                f"[covalent] docking anchor: warhead heavy#{warhead_idx} -> "
+                + (f"prot#{anchor_prot_idx}" if anchor_prot_idx is not None else "xyz")
+                + f" r0={r0:.3f} A k={k:.1f}"
+            )
+
     def _minimize_and_rescore(self, site_id, precomp_site, mol, poses):
         if not self.system.options.minimize_docking:
             return poses
-        
+
+        if getattr(mol, "covalent_link", None) is not None:
+            # Covalent ligands: the docked poses already have the warhead tethered
+            # to the residue by the search. The OpenMM covalent bond is formed and
+            # enforced in the dedicated refine / smart-refine step (which is
+            # covalent-aware). Doing it here would require reconciling the full
+            # docked pose with the leaving-group-stripped covalent topology, so we
+            # skip the docking-internal minimise for covalent ligands.
+            self.system.log(
+                "[covalent] skipping docking-internal minimise; covalent bond is "
+                "formed/enforced in refine/smart-refine."
+            )
+            return poses
+
         binding_site = self.system.binding_sites[site_id]
         binding_site_map = self.system.binding_sites[site_id]
         conf_map = getattr(self.system, "confidence_map", None)
         densmap = None
-        if conf_map is not None:
-            
-            if self.system.options.refine_to_diff_map:
-            
+        if conf_map is not None and precomp_site.binding_site_density_map_grid is not None:
+
+            # Under --dock-full-map the docking grid IS the cropped confidence map, so
+            # reuse it here rather than re-cropping: the minimiser then provably sees the
+            # same density the score used. (This makes --refine-to-diff-map a no-op.)
+            use_dock_grid = (self.system.options.refine_to_diff_map
+                             or getattr(self.system.options, "dock_full_map", False))
+
+            if use_dock_grid:
+
                 from ChemEM.parsers.EMMap import EMMap
                 densmap = EMMap(precomp_site.binding_site_density_map_origin,
                                 precomp_site.binding_site_density_map_apix,
@@ -337,10 +480,13 @@ class Docking:
             platform_name=getattr(self.system, 'platform', 'CPU'),
             protein_restraint='protein',
             pin_k=5000.0,
-            localise=False
+            localise=False,
+            global_k=resolve_global_k(self.system.options, 150.0),
+            solvent=resolve_implicit_solvent(self.system.options, app.GBn2),
+            resource_owner=self.system,
         )
-        
-        
+
+
         minimizer = BatchPoseMinimizer(env)
         all_pos = np.array([i[1] for i in poses])
         min_pos = minimizer.run(
@@ -374,7 +520,7 @@ class Docking:
             
             new_mol = mol_with_positions(mol.mol, pos)
             block = Chem.MolToMolBlock(new_mol, includeStereo=True, confId=0)
-            score = docking.run_echo_score(precomp_site, block, rep_max=15.0)
+            score = self._echo_ext().run_echo_score(precomp_site, block, rep_max=15.0)
             min_pos_scored.append((score, pos))
         
         #min_pos_scored = sorted(min_pos_scored, key=lambda x: x[0])
@@ -384,6 +530,12 @@ class Docking:
    
     def _molblock_with_fallback(self, ligand, combined):
         try:
+            # Covalent ligands: never ring-fragment. The ring-opened mol
+            # (combined.break_bonds) can reorder atoms, which would invalidate the
+            # covalent warhead heavy-atom index resolved against ligand.mol, and the
+            # warhead-bearing ring must stay rigid at the junction anyway.
+            if getattr(ligand, "covalent_link", None) is not None:
+                return Chem.MolToMolBlock(ligand.mol, includeStereo=True)
             if combined.break_bonds:
                 self.system.log("Using flexible heterocyclic rings.")
                 return Chem.MolToMolBlock(combined.break_bonds, includeStereo=True, confId=0)
@@ -407,11 +559,16 @@ class Docking:
         jobs = list(enumerate(combined.split_site_translation_centroid_raidus))
         n_jobs = len(jobs)
 
-        max_jobs = max(1, (os.cpu_count() or 1) // self.system.CPUS_PER_SITE)
+        total_cpus = resolve_cpu_budget(self.system)
+        cpus_per_site = resolve_cpus_per_site(self.system, total_cpus=total_cpus)
+        max_jobs = max(1, total_cpus // cpus_per_site)
         max_jobs = min(max_jobs, n_jobs)
 
         if max_jobs > 1 and not self.system.options.no_para:
-            self.system.log(f"Running {max_jobs} split-site jobs in parallel.")
+            self.system.log(
+                f"Running {max_jobs} split-site jobs in parallel "
+                f"({cpus_per_site} CPU(s) per job, {total_cpus} total)."
+            )
             with ProcessPoolExecutor(max_workers=max_jobs) as pool:
                 futs = [
                     pool.submit(
@@ -420,7 +577,7 @@ class Docking:
                         combined,
                         centroid,
                         radius,
-                        self.system.CPUS_PER_SITE,
+                        cpus_per_site,
                     )
                     for _, (centroid, radius) in jobs
                 ]
@@ -433,12 +590,127 @@ class Docking:
                 self.system.log(f"Docking split-site {idx} serially.")
                 local = combined.copy()
                 local.add_multi_site_bias(centroid, radius)
-                results.extend(self.dock(block, local))
+                results.extend(self.dock(block, local, ncpu=cpus_per_site))
 
         return sorted(results, key=lambda r: r[0])
 
-    def dock(self, block, precomp_echo):
-        docked_solutions = docking.run_aco_docking(precomp_echo, block)
+    def _echo_ext(self):
+        """The compiled ECHO docking/scoring extension backing this engine.
+
+        Baseline `Docking` returns the `docking` module (imported lazily — see the
+        module-header note). The experimental `DockingV2` overrides this to return the
+        isolated `docking_v2` module, so every ext call (search, rescore, weights) is
+        routed to the selected engine without touching the other.
+        """
+        from ChemEM import docking
+        return docking
+
+    def _weights(self):
+        """Cached ECHOWeights from the --echo-weights JSON (falls back to default_v1).
+
+        The JSON is {ECHOWeights-field: value}; unknown keys are ignored. Loaded once per
+        Docking run and reused for the ACO search and any run_echo_score rescoring so the
+        search objective and the ranking objective stay identical.
+        """
+        w = getattr(self, "_echo_weights", None)
+        if w is None:
+            w = self._echo_ext().ECHOWeights.default_v1()
+            path = getattr(self.system.options, "echo_weights", None)
+            if path:
+                with open(path) as fh:
+                    for k, v in json.load(fh).items():
+                        if hasattr(w, k):
+                            setattr(w, k, float(v))
+                self.system.log(f"[dock] loaded ECHO weights from {path}")
+
+            # Density lookup for the --fast-sample objective. Applied after the JSON so an
+            # explicit --map-lookup-weight always wins. 0.0 (the default_v1 value) leaves the
+            # fast score bit-identical; the field only exists on the docking_v2 extension.
+            mlf = float(getattr(self.system.options, "map_lookup_full_weight", 0.0) or 0.0)
+            if mlf and hasattr(w, "map_lookup_full"):
+                w.map_lookup_full = mlf
+                self.system.log(f"[dock] full-score density lookup enabled, weight {mlf}")
+
+            mlw = float(getattr(self.system.options, "map_lookup_weight", 0.0) or 0.0)
+            if mlw:
+                if not hasattr(w, "map_lookup"):
+                    self.system.log(
+                        "[dock] --map-lookup-weight ignored: this engine has no map_lookup "
+                        "channel (it is a docking_v2 addition; use --dock2).")
+                else:
+                    w.map_lookup = mlw
+                    self.system.log(
+                        f"[dock] fast-sample density lookup enabled, weight {mlw}"
+                        + ("" if getattr(self.system.options, "fast_sample", False)
+                           else "  -- NOTE: only the --fast-sample path uses it"))
+
+            self._echo_weights = w
+        return w
+
+    def _warn_unsupported_engine_features(self):
+        """Say so when the selected engine ignores something the run asked for.
+
+        Baseline `docking` supports everything, so this is a no-op here; DockingV2
+        overrides it. Silence is the dangerous case -- a covalent run that quietly
+        docks non-covalently still produces plausible-looking poses.
+        """
+        return
+
+    def _attach_reference_ligand(self, ligand, combined):
+        """Hand the engine the native heavy-atom coords **in the docked atom order**.
+
+        The engine's recall diagnostic (`rmsd_to_ref`) compares by atom INDEX -- no
+        superposition, no symmetry correction, no atom mapping. A reference SDF is
+        written in whatever order the depositor used (element-sorted, typically), while
+        the docked ligand is built from SMILES. Handing the raw SDF coordinates over
+        therefore reports a large RMSD for a perfect pose: on 9DMU/GAD, a pose identical
+        to the native measures **7.70 A**, which is inside the range of real answers and
+        reads as a plausible result. So the coordinates are permuted here first.
+
+        Raises rather than logging-and-continuing: a diagnostic that is silently wrong
+        is worse than one that is absent.
+        """
+        ref = getattr(self.system.options, "reference_ligand", None)
+        if not ref:
+            return
+
+        refmol = Chem.SDMolSupplier(ref, removeHs=True)[0]
+        if refmol is None:
+            raise ValueError(f"--reference-ligand: no readable molecule in {ref}")
+        refmol = Chem.RemoveHs(refmol)
+
+        # AddHs appends hydrogens, so heavy atoms keep indices 0..n_heavy-1 in
+        # ligand.mol -- the same range rmsd_to_ref walks.
+        probe = Chem.RemoveHs(Chem.Mol(ligand.mol))
+        matches = probe.GetSubstructMatches(refmol, uniquify=False, maxMatches=50000)
+        if not matches:
+            raise ValueError(
+                f"--reference-ligand: {ref} is not a substructure of the docked ligand, "
+                "so its atoms cannot be mapped onto the docked order. The recall "
+                "diagnostic would be meaningless; fix the reference or drop the flag.")
+
+        ref_xyz = np.asarray(refmol.GetConformer().GetPositions(), dtype=float)
+        mapped = np.zeros((probe.GetNumAtoms(), 3), dtype=float)
+        for ref_idx, probe_idx in enumerate(matches[0]):
+            mapped[probe_idx] = ref_xyz[ref_idx]
+
+        combined.reference_heavy_coords = mapped
+
+        note = ""
+        if len(matches) > 1:
+            # Automorphic mappings (phosphate oxygens, ring flips, ...). The engine gets
+            # one fixed array and cannot take a min over them, so the reported RMSD is an
+            # UPPER BOUND -- fine for localising where recall is lost, not a final number.
+            note = (f" ({len(matches)} symmetry-equivalent mappings; reported RMSD is an "
+                    "upper bound)")
+        self.system.log(
+            f"[dock] recall diagnostic on: {os.path.basename(ref)} mapped onto "
+            f"{probe.GetNumAtoms()} docked heavy atoms{note}")
+
+    def dock(self, block, precomp_echo, ncpu=None):
+        budget = ncpu if ncpu is not None else resolve_cpu_budget(getattr(self, "system", None))
+        with thread_limit_env(budget):
+            docked_solutions = self._echo_ext().run_aco_docking(precomp_echo, block, weights=self._weights())
         return sorted(docked_solutions, key=lambda x: x[0])
 
     def _post_process(self, ligand, poses):
@@ -629,5 +901,3 @@ def multi_conf_to_sdf_string(mol):
     
     # Join them with the standard SDF separator
     return "\n$$$$\n".join(sdf_blocks) + "\n$$$$\n"
-
-

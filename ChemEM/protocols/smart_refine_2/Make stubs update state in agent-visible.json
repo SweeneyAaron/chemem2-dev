@@ -1,0 +1,7 @@
+Make stubs update state in agent-visible ways. Add binding_sites: dict and ligand_library: dict to CaseState, populate from the relevant stubs, expose counts in _evidence. This is the most invasive but the cleanest long-term.
+pip install -e ".[dev]"
+python -m chemem_mcp.orchestrator \
+  --run-id toy_009 \
+  --controller-model qwen3:14b \
+  --prepare --protein-pdb /tmp/p.pdb --map-mrc /tmp/m.mrc --ligand-library /tmp/l.sdf \
+  --max-steps 25

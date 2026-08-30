@@ -11,9 +11,10 @@
 from .pose_minimiser import ChemEMSimulationSetup, MinimiseInPlace, SimulatedAnnealingInPlace, AnnealingConfig
 from .refine_utils import get_residue_positions, get_residue_subset_from_points
 from ChemEM.protocols.core.density import submap_from_structure
-from ChemEM.protocols.core.simulation import update_global_positions, update_ligand_positions
+from ChemEM.protocols.core.simulation import (update_global_positions, update_ligand_positions,
+                                              resolve_global_k, resolve_implicit_solvent)
 from ChemEM.parsers.writers import save_structure_parmed
-from openmm import unit
+from openmm import app, unit
 import numpy as np
 from openmm.app import PDBFile
 import os 
@@ -159,14 +160,25 @@ class Refine:
                 localise=False,
                 pin_specs=getattr(self.system.options, 'pin_specs', []),
                 distance_specs=getattr(self.system.options, 'distance_specs', []),
+                global_k=resolve_global_k(self.system.options, 150.0),
+                solvent=resolve_implicit_solvent(self.system.options, app.GBn2),
+                resource_owner=self.system,
             )
-    
+
             final_energy = self._minimiser(env)
-    
+
             if final_energy is None:
                 print("Skipping structure update due to bad pose/forces.")
                 continue
-    
+
+            # Covalent ligands: env.complex_structure is the merged protein+ligand
+            # structure AFTER inject_covalent_bonds (leaving group stripped, junction
+            # bond formed) at the refined positions. Capture it so write_output can
+            # emit the covalent product (complex PDB + product SDF); ligand.mol still
+            # carries the leaving group and would give a pre-reaction SDF.
+            if any(getattr(l, "covalent_link", None) for l in ligand_structures):
+                self._covalent_refined_structure = env.complex_structure
+
             # ------------------------------------------------------------
             # DEBUG 1: inspect ligand directly in the OpenMM-refined env
             # ------------------------------------------------------------
@@ -231,10 +243,33 @@ class Refine:
     def write_output(self):
         pdb_out = os.path.join(self.output, 'minimised_receptor.pdb')
         save_structure_parmed(self.complex_structure, pdb_out)
-        
+
+        # Covalent complex (protein + F-removed bonded ligand) from the merged,
+        # reacted structure captured during refine(). None for non-covalent runs.
+        covalent_struct = getattr(self, "_covalent_refined_structure", None)
+        if covalent_struct is not None and any(
+            getattr(l, "covalent_link", None) for l in self.system.ligand
+        ):
+            from ChemEM.parsers.covalent_output import write_covalent_complex_pdb
+            write_covalent_complex_pdb(
+                covalent_struct, os.path.join(self.output, 'covalent_complex.pdb')
+            )
+
         for num, ligand in enumerate(self.system.ligand):
             sdf_out = os.path.join(self.output, f'Ligand_{num}.sdf')
-            ligand.write_sdf(sdf_out)
+            if getattr(ligand, "covalent_link", None) is not None and covalent_struct is not None:
+                # Full ligand SDF (leaving group retained) at the refined pose. The
+                # covalent bond is represented only in covalent_complex.pdb; the SDF
+                # stays a complete, valid molecule. Refined coords come from the
+                # covalent merged structure (by atom name); the leaving atom follows.
+                from ChemEM.parsers.covalent_output import (
+                    write_full_ligand_sdf_at_refined_pose,
+                    ligand_residue_coords_by_name,
+                )
+                coords = ligand_residue_coords_by_name(covalent_struct, ligand.ligand_id)
+                write_full_ligand_sdf_at_refined_pose(ligand, sdf_out, coords)
+            else:
+                ligand.write_sdf(sdf_out)
         
         
         
@@ -248,6 +283,5 @@ class Refine:
         self.refine()   
         
         self.write_output()
-
 
 

@@ -18,7 +18,7 @@ from typing import List, Optional, Union
 
 from openmm import (
     unit, app, 
-    LangevinIntegrator, Platform, 
+    LangevinIntegrator,
     MonteCarloBarostat,
     Vec3
 )
@@ -38,6 +38,7 @@ from ChemEM.protocols.core.forces import (add_density_map_force,
 from ChemEM.protocols.core.biomolecule import (find_atoms_outside_ligand,
                                                select_atoms,
                                                create_structure_subset)
+from ChemEM.tools.resources import make_openmm_simulation
 
 from openmm import CustomExternalForce, CustomCompoundBondForce, CustomCentroidBondForce
 
@@ -77,7 +78,10 @@ class ChemEMSimulationSetup:
                  smooth_sigma_A : float = 0.0,
                  smooth_sigma_vox: float = 0.0,
                  pin_specs: Optional[List[str]] = None,
-                 distance_specs: Optional[List[str]] = None):
+                 distance_specs: Optional[List[str]] = None,
+                 resource_owner=None,
+                 ncpu: Optional[int] = None,
+                 platform_properties: Optional[dict] = None):
         
         self.density_map = density_map
         self.global_k = global_k
@@ -110,16 +114,16 @@ class ChemEMSimulationSetup:
             1.0 / unit.picoseconds, 
             1.0 * unit.femtoseconds
         )
-        self.platform = Platform.getPlatformByName(platform_name)
-        props = {"Precision": "single"} if platform_name != 'CPU' else {}
-        
-        self.simulation = app.Simulation(
+        self.simulation = make_openmm_simulation(
             self.complex_structure.topology,
             self.complex_system,
             self.integrator,
-            self.platform,
-            platformProperties=props
+            platform_name=platform_name,
+            source=resource_owner,
+            ncpu=ncpu,
+            platform_properties=platform_properties,
         )
+        self.platform = self.simulation.context.getPlatform()
         
         self.simulation.context.setPositions(self.complex_structure.positions)
         

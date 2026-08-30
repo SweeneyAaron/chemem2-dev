@@ -44,6 +44,9 @@ from scipy.spatial import cKDTree, distance
 #from skimage.morphology import binary_dilation
 from skimage import morphology
 from skimage.filters import threshold_otsu
+from skimage.segmentation import random_walker
+
+from ChemEM.tools.resources import resolve_cpu_budget
 
 # -----------------------
 # Small shared utilities
@@ -1582,9 +1585,238 @@ def extract_ligand_density(
     return ligand_densities, ligand_features
 
 
+def extract_ligand_density_hysteresis(
+    density_map,
+    binding_mask,
+    apix,
+    high_threshold_sigma=2.0,
+    low_threshold=0.0,
+):
+    """
+    Hysteresis-thresholding variant of extract_ligand_density.
+
+    Seeds are voxels above (std(non-zero binding_density) * high_threshold_sigma).
+    Growth region = voxels above absolute `low_threshold`. Seeds are propagated
+    via connectivity into the growth region; voxels above `low_threshold` that
+    are not connected to any seed are discarded. No gradient gate.
+    """
+    binding_density = density_map * (binding_mask > 0.0)
+
+    non_zero_values = binding_density[binding_density > 0.0]
+    if non_zero_values.size == 0:
+        return [], []
+
+    high_threshold = float(np.std(non_zero_values)) * float(high_threshold_sigma)
+
+    seed_mask = (binding_density > high_threshold)
+    growable = (binding_density > float(low_threshold))
+
+    struct = generate_binary_structure(3, 1)
+
+    seed_labels, num_features = label(seed_mask, structure=struct)
+    if num_features == 0:
+        return [], []
+
+    seed_slices = find_objects(seed_labels)
+
+    grown_all = binary_propagation(seed_mask, struct, mask=(growable | seed_mask))
+    grown_labels, _num_grown = label(grown_all, structure=struct)
+    grown_slices = find_objects(grown_labels)
+
+    mean_masked = float(binding_density.mean())
+    pos = density_map[density_map > 0.0]
+    amp_no_mask = float(pos.mean()) if pos.size else 0.0
+    voxel_vol = float(np.prod(apix))
+
+    ligand_features = []
+    ligand_densities = []
+
+    for i in range(1, num_features + 1):
+        sl_seed = seed_slices[i - 1]
+        if sl_seed is None:
+            continue
+
+        seed_local = (seed_labels[sl_seed] == i)
+
+        vals = binding_density[sl_seed][seed_local]
+        if vals.size == 0:
+            continue
+
+        dist_vals = binding_mask[sl_seed][seed_local]
+        centroid = float(dist_vals.mean())
+
+        map_features = {
+            "centroid": centroid,
+            "volume": float(seed_local.sum()) * voxel_vol,
+            "mean_non_zero_density_value": float(vals.mean()),
+            "map_amplitude_thr_no_mask": amp_no_mask,
+            "map_amplitude_thr_masked": mean_masked,
+            "feature_id": i,
+        }
+
+        seed_dil = binary_dilation(seed_local, structure=struct, iterations=1)
+        comp_ids = np.unique(grown_labels[sl_seed][seed_dil])
+        comp_ids = comp_ids[comp_ids != 0]
+
+        grown_mask = np.zeros_like(seed_mask, dtype=bool)
+        grown_mask[sl_seed] |= seed_local
+
+        for cid in comp_ids:
+            slc = grown_slices[cid - 1]
+            if slc is None:
+                continue
+            grown_mask[slc] |= (grown_labels[slc] == cid)
+
+        full_ligand_density = np.zeros_like(binding_density)
+        full_ligand_density[grown_mask] = binding_density[grown_mask]
+
+        ligand_features.append(map_features)
+        ligand_densities.append(full_ligand_density)
+
+    return ligand_densities, ligand_features
 
 
-def extract_ligand_densit_y(density_map, 
+def extract_ligand_density_random_walker(
+    density_map,
+    binding_mask,
+    apix,
+    high_threshold_sigma=2.0,
+    bg_threshold=0.0,
+    beta=130.0,
+    prob_threshold=0.5,
+    mode="cg_j",
+    tol=1.0e-3,
+):
+    """
+    Random-walker segmentation of ligand density.
+
+    Seeds:
+      label 1 (ligand)     = voxels above std(non_zero binding_density) * high_threshold_sigma
+      label 2 (background) = voxels where binding_density <= bg_threshold
+    The walker returns a per-voxel posterior; voxels with P(ligand) >= prob_threshold
+    are kept. Per-feature stats are computed from the (high-threshold) seed regions,
+    matching the contract of extract_ligand_density / *_hysteresis.
+    """
+    binding_density = density_map * (binding_mask > 0.0)
+
+    non_zero_values = binding_density[binding_density > 0.0]
+    if non_zero_values.size == 0:
+        return [], []
+
+    high_threshold = float(np.std(non_zero_values)) * float(high_threshold_sigma)
+    seed_mask_full = (binding_density > high_threshold)
+    if not seed_mask_full.any():
+        return [], []
+
+    bbox = extract_min_bounding_box(binding_density, thr=0.0, pad=2)
+    if bbox is None:
+        return [], []
+    sub_density, (z0, y0, x0), (z1, y1, x1) = bbox
+    crop_slice = (slice(z0, z1 + 1), slice(y0, y1 + 1), slice(x0, x1 + 1))
+
+    sub_min = float(sub_density.min())
+    sub_max = float(sub_density.max())
+    if sub_max > sub_min:
+        sub_norm = (sub_density - sub_min) / (sub_max - sub_min)
+    else:
+        sub_norm = np.zeros_like(sub_density)
+
+    sub_labels = np.zeros(sub_density.shape, dtype=np.int32)
+    sub_labels[sub_density > high_threshold] = 1
+    sub_labels[sub_density <= float(bg_threshold)] = 2
+
+    if not (sub_labels == 1).any():
+        return [], []
+    if not (sub_labels == 2).any():
+        sub_labels[0, :, :] = 2
+        sub_labels[-1, :, :] = 2
+        sub_labels[:, 0, :] = 2
+        sub_labels[:, -1, :] = 2
+        sub_labels[:, :, 0] = 2
+        sub_labels[:, :, -1] = 2
+        sub_labels[sub_density > high_threshold] = 1
+
+    spacing = tuple(float(a) for a in np.asarray(apix).reshape(-1)[:3])
+    prob = random_walker(
+        sub_norm,
+        sub_labels,
+        beta=float(beta),
+        mode=mode,
+        tol=float(tol),
+        return_full_prob=True,
+        spacing=spacing,
+    )
+    ligand_prob_sub = prob[0]
+    ligand_mask_sub = ligand_prob_sub >= float(prob_threshold)
+
+    grown_all = np.zeros_like(binding_density, dtype=bool)
+    grown_all[crop_slice] = ligand_mask_sub
+
+    struct = generate_binary_structure(3, 1)
+    seed_labels, num_features = label(seed_mask_full, structure=struct)
+    if num_features == 0:
+        return [], []
+    seed_slices = find_objects(seed_labels)
+
+    grown_labels, _num_grown = label(grown_all, structure=struct)
+    grown_slices = find_objects(grown_labels)
+
+    mean_masked = float(binding_density.mean())
+    pos = density_map[density_map > 0.0]
+    amp_no_mask = float(pos.mean()) if pos.size else 0.0
+    voxel_vol = float(np.prod(apix))
+
+    ligand_features = []
+    ligand_densities = []
+
+    for i in range(1, num_features + 1):
+        sl_seed = seed_slices[i - 1]
+        if sl_seed is None:
+            continue
+
+        seed_local = (seed_labels[sl_seed] == i)
+
+        vals = binding_density[sl_seed][seed_local]
+        if vals.size == 0:
+            continue
+
+        dist_vals = binding_mask[sl_seed][seed_local]
+        centroid = float(dist_vals.mean())
+
+        map_features = {
+            "centroid": centroid,
+            "volume": float(seed_local.sum()) * voxel_vol,
+            "mean_non_zero_density_value": float(vals.mean()),
+            "map_amplitude_thr_no_mask": amp_no_mask,
+            "map_amplitude_thr_masked": mean_masked,
+            "feature_id": i,
+        }
+
+        seed_dil = binary_dilation(seed_local, structure=struct, iterations=1)
+        comp_ids = np.unique(grown_labels[sl_seed][seed_dil])
+        comp_ids = comp_ids[comp_ids != 0]
+
+        grown_mask = np.zeros_like(seed_mask_full, dtype=bool)
+        grown_mask[sl_seed] |= seed_local
+
+        for cid in comp_ids:
+            slc = grown_slices[cid - 1]
+            if slc is None:
+                continue
+            grown_mask[slc] |= (grown_labels[slc] == cid)
+
+        full_ligand_density = np.zeros_like(binding_density)
+        full_ligand_density[grown_mask] = binding_density[grown_mask]
+
+        ligand_features.append(map_features)
+        ligand_densities.append(full_ligand_density)
+
+    return ligand_densities, ligand_features
+
+
+
+
+def extract_ligand_densit_y(density_map,
                            binding_mask,
                            apix,
                            high_threshold_sigma=2.0,
@@ -2207,19 +2439,26 @@ def _feature_distance_com(mp_a: "EMMap", mp_b: "EMMap", thr: float = 0.0) -> flo
     return float(np.linalg.norm(ca - cb))
 
 
-def _feature_distance_voxels(mp_a: "EMMap", mp_b: "EMMap", thr: float = 0.0) -> float:
+def _feature_distance_voxels(
+    mp_a: "EMMap",
+    mp_b: "EMMap",
+    thr: float = 0.0,
+    ncpu: Optional[int] = None,
+) -> float:
     A = _map_nonzero_xyz(mp_a, thr=thr)
     B = _map_nonzero_xyz(mp_b, thr=thr)
     if A.shape[0] == 0 or B.shape[0] == 0:
         return float("inf")
 
+    workers = int(ncpu) if ncpu is not None else 1
+
     # Build tree on the larger set, query the smaller set (usually a bit faster)
     if A.shape[0] <= B.shape[0]:
         tree = cKDTree(B)
-        d, _ = tree.query(A, k=1, workers=-1)
+        d, _ = tree.query(A, k=1, workers=workers)
     else:
         tree = cKDTree(A)
-        d, _ = tree.query(B, k=1, workers=-1)
+        d, _ = tree.query(B, k=1, workers=workers)
 
     return float(np.min(d))
 
@@ -2230,18 +2469,24 @@ def get_feature_distance(
     max_dist: float,
     mode: str = "com", #opts "voxels" and "com"
     thr: float = 0.0,
+    source: object = None,
 ) -> bool:
     """
     existing_maps is your system_sites[site_key] list: [(EMMap, feat_dict), ...]
+
+    ``source`` may be a System/options object; its ``ncpu`` budget is honoured
+    by the cKDTree query in voxel mode. Defaults to 1 worker when absent.
     """
     if not existing_maps:
         return True  # first feature always goes into the site
+
+    ncpu = resolve_cpu_budget(source) if source is not None else 1
 
     for (mp, _) in existing_maps:
         if mode == "com":
             d = _feature_distance_com(new_map, mp, thr=thr)
         elif mode == "voxels":
-            d = _feature_distance_voxels(new_map, mp, thr=thr)
+            d = _feature_distance_voxels(new_map, mp, thr=thr, ncpu=ncpu)
         else:
             raise ValueError(f"Unknown mode={mode!r}")
 

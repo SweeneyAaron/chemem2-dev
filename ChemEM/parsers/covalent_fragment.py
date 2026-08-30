@@ -161,6 +161,64 @@ def _auto_h_to_remove_rdkit(rd_mol: Chem.Mol, attach_idx: int, new_bond_order: i
     return None  # No explicit H; caller will log a warning.
 
 
+# ---------------------------------------------------------------------------
+# Addition-warhead saturation (nitrile / Michael acceptor)
+# ---------------------------------------------------------------------------
+# An "addition" warhead reacts by ADDING across an existing multiple bond rather
+# than displacing a leaving group: a nitrile C#N becomes a thioimidate C=N, or a
+# Michael-acceptor C=C becomes a saturated C-C, with the freed valences taking up
+# H. ChemEM's covalent path is deletion/auto-H based and would over-valence such a
+# warhead. We fix it BEFORE parameterization by "saturating" the warhead: drop its
+# highest-order incident pi bond by one and let RDKit fill the freed valences with
+# H. That yields exactly the already-supported "bound-form" case — the standard
+# auto-H path then removes one warhead H to make room for the protein bond.
+
+def warhead_needs_saturation(rd_mol: Chem.Mol, warhead_name: str,
+                             new_bond_order: int) -> bool:
+    """True iff forming the covalent bond would over-valence the warhead, there is
+    no removable H (so auto-H can't handle it), but it has a reducible pi bond."""
+    try:
+        idx = _rdkit_find_atom_by_name(rd_mol, warhead_name)
+    except ValueError:
+        return False
+    atom = rd_mol.GetAtomWithIdx(idx)
+    std = _STD_VALENCE.get(atom.GetSymbol())
+    if std is None:
+        return False
+    if atom.GetTotalValence() + new_bond_order <= std:
+        return False  # fits without any change
+    if _auto_h_to_remove_rdkit(rd_mol, idx, new_bond_order) is not None:
+        return False  # a removable H exists → the normal auto-H path handles it
+    return any(b.GetBondTypeAsDouble() >= 2.0 for b in atom.GetBonds())
+
+
+def saturate_addition_warhead(rd_mol: Chem.Mol, warhead_name: str) -> Chem.Mol:
+    """Return a NEW mol with the warhead's highest-order incident pi bond reduced by
+    one and the freed valences filled with H (heavy-atom order/coords preserved, so
+    the warhead's ChemEM name is unchanged)."""
+    heavy = Chem.RemoveHs(rd_mol)  # keeps heavy-atom conformer coords
+    idx = _rdkit_find_atom_by_name(heavy, warhead_name)
+    atom = heavy.GetAtomWithIdx(idx)
+    target = None
+    for b in atom.GetBonds():
+        if b.GetBondTypeAsDouble() >= 2.0 and (
+            target is None or b.GetBondTypeAsDouble() > target.GetBondTypeAsDouble()
+        ):
+            target = b
+    if target is None:
+        return rd_mol
+    lower = {Chem.BondType.TRIPLE: Chem.BondType.DOUBLE,
+             Chem.BondType.DOUBLE: Chem.BondType.SINGLE}.get(target.GetBondType())
+    if lower is None:
+        return rd_mol
+    rw = Chem.RWMol(heavy)
+    rw.GetBondBetweenAtoms(target.GetBeginAtomIdx(),
+                           target.GetEndAtomIdx()).SetBondType(lower)
+    new = rw.GetMol()
+    Chem.SanitizeMol(new)                 # fills the freed valences with implicit H
+    return Chem.AddHs(new, addCoords=True) # make them explicit with 3D coords
+
+
 def resolve_ligand_deletions(
     rd_mol: Chem.Mol, spec: CovalentLinkSpec
 ) -> Tuple[List[int], List[str]]:
@@ -207,12 +265,12 @@ def _tag_atoms_with_ligand_names(rd_mol: Chem.Mol) -> None:
 
 
 def _truncate_ligand_for_fragment(
-    rd_mol: Chem.Mol, spec: CovalentLinkSpec
+    rd_mol: Chem.Mol, specs: List[CovalentLinkSpec]
 ) -> Chem.Mol:
-    """Return a truncated copy of the ligand with leaving atoms removed and
-    the attachment atom marked as non-implicit-H (so that Chem.SanitizeMol
-    doesn't re-grow the H). Populates spec.resolved_ligand_atom_name and
-    spec.auto_deleted_ligand_atoms.
+    """Return a truncated copy of the ligand with the leaving atoms of EVERY
+    covalent bond removed, and each attachment atom marked non-implicit-H (so
+    Chem.SanitizeMol doesn't re-grow the H). Populates each spec's
+    resolved_ligand_atom_name and auto_deleted_ligand_atoms.
 
     Atoms in the returned mol carry a 'chemem_name' property equal to the
     name that atom has on the original Ligand (and in the merged parmed
@@ -221,21 +279,29 @@ def _truncate_ligand_for_fragment(
 
     The real Ligand's mol is not mutated.
     """
-    _, lig_atom_name = parse_ligand_atom_spec(spec.ligand_atom_spec)
-    attach_idx = _rdkit_find_atom_by_name(rd_mol, lig_atom_name)
+    if isinstance(specs, CovalentLinkSpec):        # tolerate a bare spec
+        specs = [specs]
 
-    indices_to_delete, auto_log = resolve_ligand_deletions(rd_mol, spec)
-    spec.auto_deleted_ligand_atoms = list(auto_log)
-    spec.resolved_ligand_atom_name = lig_atom_name
+    attach_indices = []
+    all_to_delete: set = set()
+    for spec in specs:
+        _, lig_atom_name = parse_ligand_atom_spec(spec.ligand_atom_spec)
+        attach_indices.append(_rdkit_find_atom_by_name(rd_mol, lig_atom_name))
+        spec.resolved_ligand_atom_name = lig_atom_name
+
+        indices_to_delete, auto_log = resolve_ligand_deletions(rd_mol, spec)
+        spec.auto_deleted_ligand_atoms = list(auto_log)
+        all_to_delete.update(indices_to_delete)
 
     # Work on a copy so tagging doesn't mutate the caller's mol.
     work = Chem.RWMol(rd_mol)
     _tag_atoms_with_ligand_names(work)
 
-    if indices_to_delete:
-        # Prevent RDKit from re-adding an implicit H on the attachment atom.
-        work.GetAtomWithIdx(attach_idx).SetNoImplicit(True)
-        for idx in sorted(set(indices_to_delete), reverse=True):
+    if all_to_delete:
+        # Prevent RDKit from re-adding implicit H's on any attachment atom.
+        for attach_idx in attach_indices:
+            work.GetAtomWithIdx(attach_idx).SetNoImplicit(True)
+        for idx in sorted(all_to_delete, reverse=True):
             work.RemoveAtom(idx)
 
     new_mol = work.GetMol()
@@ -257,25 +323,79 @@ def _find_parmed_residue(structure, chain: str, resname: str, resnum: int):
 
 
 def _auto_h_to_remove_parmed(residue, attach_atom_name: str,
-                             new_bond_order: int) -> Optional[str]:
-    """Return the atom name of an H to remove from attach_atom, or None."""
+                             new_bond_order: int) -> List[str]:
+    """Return the names of the H's to remove from attach_atom so the new bond
+    fits its standard valence, or [].
+
+    Removes as many H's as the new bond needs (a DOUBLE Schiff base to a charged
+    Lys Nζ needs all 3 ammonium H's gone; a SINGLE bond to Ser Oγ needs 1). The
+    count is valence-based (current bonds + new order − standard valence), so it
+    is correct for both charged and neutral attachment atoms — unlike a fixed
+    one-H removal, which left DOUBLE-bond nitrogens over-valent.
+    """
     attach = next((a for a in residue.atoms if a.name == attach_atom_name), None)
     if attach is None:
-        return None
+        return []
     # Count current heavy+H bond orders
     current_val = 0
     for b in attach.bonds:
         current_val += int(getattr(b, "order", 1) or 1)
     std_val = _STD_VALENCE.get(attach.element_name.capitalize(), None)
     if std_val is None:
-        return None
-    if current_val + new_bond_order <= std_val:
-        return None
+        return []
+    n_remove = current_val + new_bond_order - std_val
+    if n_remove <= 0:
+        return []
+    h_names: List[str] = []
     for b in attach.bonds:
         other = b.atom2 if b.atom1 is attach else b.atom1
         if other.element == 1:  # hydrogen
-            return other.name
-    return None
+            h_names.append(other.name)
+            if len(h_names) >= n_remove:
+                break
+    if len(h_names) < n_remove:
+        print(
+            f"[covalent] WARNING: attachment atom '{attach_atom_name}' needs "
+            f"{n_remove} bond(s) freed for the new covalent bond but only "
+            f"{len(h_names)} hydrogen(s) are available to remove. Specify "
+            "covalent_delete_protein_atoms explicitly, or the atom will be "
+            "over-valent."
+        )
+    return h_names
+
+
+def _warn_if_acyl_attachment(residue, attach_atom_name: str,
+                             user_specified: bool) -> None:
+    """Warn when bonding to a carboxyl/carbonyl carbon with nothing set to leave.
+
+    A force-field-built structure carries no bond orders, so a backbone carbonyl
+    carbon looks trivalent to the valence check above and no leaving atom is
+    detected — yet forming an amide there really does displace the hydroxyl/OXT.
+    Detected by the attachment carbon carrying two terminal oxygens (a carboxylate
+    or C-terminus). Advisory only; the user decides what leaves.
+    """
+    if user_specified:
+        return
+    attach = next((a for a in residue.atoms if a.name == attach_atom_name), None)
+    if attach is None or attach.element_name.capitalize() != "C":
+        return
+
+    terminal_oxygens = []
+    for b in attach.bonds:
+        other = b.atom2 if b.atom1 is attach else b.atom1
+        if other.element == 8 and len(other.bonds) == 1:
+            terminal_oxygens.append(other.name)
+
+    if len(terminal_oxygens) >= 2:
+        print(
+            f"[covalent] WARNING: bonding to carboxyl carbon "
+            f"{residue.name}:{residue.number}:{attach_atom_name}, which carries "
+            f"terminal oxygens {terminal_oxygens}. Forming an amide/ester here "
+            "normally displaces one of them, but force-field structures carry no "
+            "bond orders so this cannot be detected automatically. Set "
+            f"covalent_delete_protein_atoms = ['{terminal_oxygens[-1]}'] if that "
+            "is the intended chemistry."
+        )
 
 
 def apply_protein_deletions(protein_structure, spec: CovalentLinkSpec) -> None:
@@ -296,14 +416,15 @@ def apply_protein_deletions(protein_structure, spec: CovalentLinkSpec) -> None:
         )
 
     # Resolve which atom names to delete
+    _warn_if_acyl_attachment(residue, atom_name, bool(spec.delete_protein_atoms))
+
     if spec.delete_protein_atoms:
         to_delete_names = list(spec.delete_protein_atoms)
         auto_log: List[str] = []
     else:
         order_map = {"SINGLE": 1, "DOUBLE": 2, "TRIPLE": 3}
         bond_order = order_map.get(spec.bond_order.upper(), 1)
-        auto_h = _auto_h_to_remove_parmed(residue, atom_name, bond_order)
-        to_delete_names = [auto_h] if auto_h else []
+        to_delete_names = _auto_h_to_remove_parmed(residue, atom_name, bond_order)
         auto_log = list(to_delete_names)
 
     spec.auto_deleted_protein_atoms = auto_log
@@ -368,7 +489,12 @@ def _build_capped_sidechain(resname: str, attachment_atom_symbol: str) -> Tuple[
     Falls back to a generic methyl-X-H fragment if the residue is unknown.
     """
     tmpl = _SIDECHAIN_TEMPLATES.get(resname.upper())
-    if tmpl is not None:
+    # Only use the residue template when the requested attachment atom is the one
+    # the template is built around (its designated sidechain atom). When the user
+    # points at a different atom — a backbone N (N-terminal Schiff base), a Cβ, etc.
+    # — the sidechain template would attach at the WRONG atom, so fall back to a
+    # generic methyl-X cap built on the requested element instead.
+    if tmpl is not None and tmpl["attach_atom"] == attachment_atom_symbol:
         mol = Chem.MolFromSmiles(tmpl["smiles"])
         if mol is None:
             raise RuntimeError(f"[covalent] bad sidechain template for {resname}")
@@ -401,33 +527,41 @@ def _build_capped_sidechain(resname: str, attachment_atom_symbol: str) -> Tuple[
 
 def _form_junction_mol(
     truncated_ligand: Chem.Mol,
-    ligand_attach_idx: int,
-    capped_sidechain: Chem.Mol,
-    sidechain_attach_idx: int,
-    bond_order_str: str,
-) -> Tuple[Chem.Mol, int, int]:
-    """Combine the two RDKit mols into one, form the covalent bond, return
-    (combined_mol, ligand_attach_idx_in_combined, sidechain_attach_idx_in_combined).
+    junctions: List[Tuple[int, Chem.Mol, int, str]],
+) -> Tuple[Chem.Mol, List[int], List[int]]:
+    """Combine the ligand with one capped sidechain per covalent bond, form all
+    the bonds, and return
+    (combined_mol, [ligand_attach_idx_in_combined], [cap_attach_idx_in_combined]).
 
-    Uses atom map numbers on copies so indices can be recovered after atoms
-    are removed (we peel one H off the sidechain attachment atom to make room
-    for the new bond). Inputs are not mutated.
+    ``junctions`` is one (ligand_attach_idx, capped_sidechain, cap_attach_idx,
+    bond_order_str) per bond, in spec order; the returned index lists are parallel
+    to it.
+
+    Atom map numbers on copies let indices survive the H-peeling and the repeated
+    CombineMols: the k-th ligand attachment is tagged 101+k and its cap attachment
+    202+k. Inputs are not mutated.
     """
     # Work on copies so we don't mutate the caller's mols. Drop any existing
     # conformers — the combined fragment will be re-embedded from scratch so
     # it has coherent 3D coords for OpenFF / PDB export.
     lig_copy = Chem.Mol(truncated_ligand)
-    cap_copy = Chem.Mol(capped_sidechain)
     lig_copy.RemoveAllConformers()
-    cap_copy.RemoveAllConformers()
     for atom in lig_copy.GetAtoms():
         atom.SetAtomMapNum(0)
-    for atom in cap_copy.GetAtoms():
-        atom.SetAtomMapNum(0)
-    lig_copy.GetAtomWithIdx(ligand_attach_idx).SetAtomMapNum(101)
-    cap_copy.GetAtomWithIdx(sidechain_attach_idx).SetAtomMapNum(202)
+    # Tag EVERY ligand attachment before the first CombineMols: that call copies
+    # the mol as it stands, so later edits to lig_copy would not be reflected.
+    for k, (lig_attach_idx, _cap_mol, _cap_attach_idx, _order) in enumerate(junctions):
+        lig_copy.GetAtomWithIdx(lig_attach_idx).SetAtomMapNum(101 + k)
 
-    combined = Chem.CombineMols(lig_copy, cap_copy)
+    combined = lig_copy
+    for k, (lig_attach_idx, cap_mol, cap_attach_idx, _order) in enumerate(junctions):
+        cap_copy = Chem.Mol(cap_mol)
+        cap_copy.RemoveAllConformers()
+        for atom in cap_copy.GetAtoms():
+            atom.SetAtomMapNum(0)
+        cap_copy.GetAtomWithIdx(cap_attach_idx).SetAtomMapNum(202 + k)
+        combined = Chem.CombineMols(combined, cap_copy)
+
     rw = Chem.RWMol(combined)
 
     def _find_mapped(mol: Chem.RWMol, map_num: int) -> int:
@@ -436,23 +570,32 @@ def _form_junction_mol(
                 return a.GetIdx()
         raise RuntimeError(f"[covalent] lost attachment atom map {map_num}")
 
-    # Peel one H off sidechain attachment (valence room for the new bond)
-    side_idx = _find_mapped(rw, 202)
-    side_atom = rw.GetAtomWithIdx(side_idx)
-    for nb in list(side_atom.GetNeighbors()):
-        if nb.GetSymbol() == "H":
-            rw.RemoveAtom(nb.GetIdx())
-            break
-
-    lig_idx = _find_mapped(rw, 101)
-    side_idx = _find_mapped(rw, 202)
+    # Peel H's off each cap attachment to make valence room for its new bond.
+    # A SINGLE bond needs one H removed; a DOUBLE/TRIPLE bond to a multi-H cap atom
+    # (e.g. a LYS/backbone amine forming a Schiff base) needs bond-order H's removed,
+    # or the cap atom ends up over-valent. Done in one pass, collecting indices
+    # first, because every removal shifts the indices after it.
+    h_to_remove: List[int] = []
+    for k, (_lig_attach_idx, _cap_mol, _cap_attach_idx, order) in enumerate(junctions):
+        n_h = {"SINGLE": 1, "DOUBLE": 2, "TRIPLE": 3}.get(order.upper(), 1)
+        side_atom = rw.GetAtomWithIdx(_find_mapped(rw, 202 + k))
+        hs = [nb.GetIdx() for nb in side_atom.GetNeighbors() if nb.GetSymbol() == "H"]
+        h_to_remove.extend(hs[:n_h])
+    for h_idx in sorted(set(h_to_remove), reverse=True):
+        rw.RemoveAtom(h_idx)
 
     order_map = {
         "SINGLE": Chem.BondType.SINGLE,
         "DOUBLE": Chem.BondType.DOUBLE,
         "TRIPLE": Chem.BondType.TRIPLE,
     }
-    rw.AddBond(lig_idx, side_idx, order_map.get(bond_order_str.upper(), Chem.BondType.SINGLE))
+    lig_idxs, cap_idxs = [], []
+    for k, (_lig_attach_idx, _cap_mol, _cap_attach_idx, order) in enumerate(junctions):
+        lig_idx = _find_mapped(rw, 101 + k)
+        cap_idx = _find_mapped(rw, 202 + k)
+        rw.AddBond(lig_idx, cap_idx, order_map.get(order.upper(), Chem.BondType.SINGLE))
+        lig_idxs.append(lig_idx)
+        cap_idxs.append(cap_idx)
 
     # Clear map numbers to keep OpenFF happy
     for a in rw.GetAtoms():
@@ -471,45 +614,54 @@ def _form_junction_mol(
             AllChem.MMFFOptimizeMolecule(final)
         except Exception:
             pass
-    return final, lig_idx, side_idx
+    return final, lig_idxs, cap_idxs
 
 
 def build_and_parameterize_fragment(
     ligand_mol: Chem.Mol,
-    spec: CovalentLinkSpec,
+    specs,
 ) -> Dict:
-    """Build a capped junction fragment from the FULL ligand mol + a capped
-    residue sidechain, parameterize the fragment with OpenFF, and return a
+    """Build ONE capped junction fragment from the FULL ligand mol plus a capped
+    residue sidechain per covalent bond, parameterize it with OpenFF, and return a
     dict of extracted junction terms + a ligand-side charge map.
+
+    ``specs`` is the ligand's list of CovalentLinkSpec (a bare spec is accepted for
+    back-compat). Per-bond results are written onto each spec
+    (``junction_bond_params``); the angle/dihedral/charge sets, which are properties
+    of the whole fragment, are returned and stored by the caller on the Ligand — a
+    term bridging two junctions is then collected once, not once per bond.
 
     Internally builds a truncated copy of the ligand (leaving-group atoms
     removed) only for the fragment — the caller's ligand_mol is not mutated.
     """
     from .openff_ligand import load_ligand_structure
 
-    assert spec.resolved_protein_resname is not None
+    if isinstance(specs, CovalentLinkSpec):
+        specs = [specs]
+    if not specs:
+        return {"bond_params": None, "angles": [], "dihedrals": [], "ligand_charges": {}}
+    for spec in specs:
+        assert spec.resolved_protein_resname is not None
 
-    truncated_ligand_mol = _truncate_ligand_for_fragment(ligand_mol, spec)
-    _, lig_atom_name = parse_ligand_atom_spec(spec.ligand_atom_spec)
-    ligand_attach_idx = _rdkit_find_atom_by_name(truncated_ligand_mol, lig_atom_name)
+    truncated_ligand_mol = _truncate_ligand_for_fragment(ligand_mol, specs)
 
-    # Determine attachment element of the protein side from the atom name
-    # (e.g. 'SG' -> 'S'). First char is element in standard PDB naming.
-    attach_elem = spec.resolved_protein_atom_name[0]
-    cap_mol, cap_attach_idx = _build_capped_sidechain(
-        spec.resolved_protein_resname, attach_elem
-    )
+    junctions = []
+    for spec in specs:
+        _, lig_atom_name = parse_ligand_atom_spec(spec.ligand_atom_spec)
+        ligand_attach_idx = _rdkit_find_atom_by_name(truncated_ligand_mol, lig_atom_name)
+        # Determine attachment element of the protein side from the atom name
+        # (e.g. 'SG' -> 'S'). First char is element in standard PDB naming.
+        attach_elem = spec.resolved_protein_atom_name[0]
+        cap_mol, cap_attach_idx = _build_capped_sidechain(
+            spec.resolved_protein_resname, attach_elem
+        )
+        junctions.append((ligand_attach_idx, cap_mol, cap_attach_idx, spec.bond_order))
 
-    fragment_mol, lig_idx_frag, prot_idx_frag = _form_junction_mol(
-        truncated_ligand_mol,
-        ligand_attach_idx,
-        cap_mol,
-        cap_attach_idx,
-        spec.bond_order,
+    fragment_mol, lig_idxs_frag, prot_idxs_frag = _form_junction_mol(
+        truncated_ligand_mol, junctions
     )
 
     fragment_structure, _ = load_ligand_structure(fragment_mol)
-    spec.fragment_structure = fragment_structure
 
     # Map each ligand-side fragment atom (indices 0..n_lig-1) to its name on
     # the ORIGINAL Ligand / merged parmed structure. `_truncate_ligand_for_fragment`
@@ -539,18 +691,17 @@ def build_and_parameterize_fragment(
         atom = fragment_structure.atoms[i]
         frag_ligand_charges[name] = float(atom.charge)
 
-    # Extract junction bonded terms
-    lig_attach_name = lig_frag_names[lig_idx_frag]  # ligand-side name
-    # Protein-side atom in the merged complex will be identified later
-    # via (chain, resname, resnum, atom_name) — we only need the fragment
-    # atom here.
+    # Extract junction bonded terms.
+    # Protein-side atoms in the merged complex are identified later via
+    # (chain, resname, resnum, atom_name) — here we only need fragment indices.
+    prot_idx_to_spec = {int(idx): spec for idx, spec in zip(prot_idxs_frag, specs)}
 
     def _fragment_atom_role(atom_idx: int) -> str:
         """'ligand', 'protein_attach', or 'cap' (cap-only fragment atoms
         that have no real counterpart)."""
         if atom_idx < n_lig:
             return "ligand"
-        if atom_idx == prot_idx_frag:
+        if atom_idx in prot_idx_to_spec:
             return "protein_attach"
         return "cap"
 
@@ -559,18 +710,23 @@ def build_and_parameterize_fragment(
         if role == "ligand":
             return lig_frag_names[atom_idx]
         if role == "protein_attach":
-            return spec.resolved_protein_atom_name
+            return prot_idx_to_spec[atom_idx].resolved_protein_atom_name
         return None  # cap atom
 
-    # Bond across the junction
-    junction_bond_params = None
+    # Bond across each junction, stored on that bond's own spec.
+    junction_pairs = {
+        frozenset({int(l), int(p)}) for l, p in zip(lig_idxs_frag, prot_idxs_frag)
+    }
+    bond_params_by_pair = {}
     for b in fragment_structure.bonds:
-        pair = {b.atom1.idx, b.atom2.idx}
-        if pair == {lig_idx_frag, prot_idx_frag}:
-            if b.type is not None:
-                junction_bond_params = (float(b.type.k), float(b.type.req))
-            break
-    spec.junction_bond_params = junction_bond_params
+        pair = frozenset({b.atom1.idx, b.atom2.idx})
+        if pair in junction_pairs and b.type is not None:
+            bond_params_by_pair[pair] = (float(b.type.k), float(b.type.req))
+    for lig_i, prot_i, spec in zip(lig_idxs_frag, prot_idxs_frag, specs):
+        spec.junction_bond_params = bond_params_by_pair.get(
+            frozenset({int(lig_i), int(prot_i)})
+        )
+    junction_bond_params = specs[0].junction_bond_params
 
     # Helper: does a term contain the new covalent bond as one of its
     # consecutive edges? For angles a1-a2-a3 the edges are (a1,a2) and
@@ -578,7 +734,6 @@ def build_and_parameterize_fragment(
     # We also enforce that EVERY consecutive edge is a real bond in the
     # fragment — this filters out any parmed-expanded impropers / 1-4 pair
     # interactions that aren't true chain terms.
-    junction_pair = frozenset({lig_idx_frag, prot_idx_frag})
     fragment_bond_set = {
         frozenset({b.atom1.idx, b.atom2.idx}) for b in fragment_structure.bonds
     }
@@ -590,8 +745,13 @@ def build_and_parameterize_fragment(
         return True
 
     def _contains_junction_edge(ids: List[int]) -> bool:
+        """True if any consecutive edge is one of the new covalent bonds.
+
+        With several bonds a short bridge can produce a term spanning two
+        junctions; it is collected once here rather than once per bond.
+        """
         for i in range(len(ids) - 1):
-            if frozenset({ids[i], ids[i + 1]}) == junction_pair:
+            if frozenset({ids[i], ids[i + 1]}) in junction_pairs:
                 return True
         return False
 
@@ -610,7 +770,6 @@ def build_and_parameterize_fragment(
         junction_angles.append(
             (names, float(ang.type.k), float(ang.type.theteq))  # type: ignore[arg-type]
         )
-    spec.junction_angles = junction_angles
 
     junction_dihedrals: List[Tuple[Tuple[str, str, str, str], float, float, int]] = []
     for d in fragment_structure.dihedrals:
@@ -640,16 +799,19 @@ def build_and_parameterize_fragment(
                 int(d.type.per),
             )
         )
-    spec.junction_dihedrals = junction_dihedrals
-    spec.fragment_ligand_charges = frag_ligand_charges
-
+    n_bonds_ok = sum(1 for s in specs if s.junction_bond_params is not None)
+    bond_state = (
+        "ok" if n_bonds_ok == len(specs)
+        else f"{n_bonds_ok}/{len(specs)}"
+    )
     print(
         f"[covalent] fragment parameterized: "
-        f"bond={'ok' if junction_bond_params else 'missing'}, "
+        f"bonds={bond_state}, "
         f"angles={len(junction_angles)}, "
         f"dihedrals={len(junction_dihedrals)}"
     )
     return {
+        "fragment_structure": fragment_structure,
         "bond_params": junction_bond_params,
         "angles": junction_angles,
         "dihedrals": junction_dihedrals,
@@ -744,65 +906,90 @@ def inject_covalent_bonds(complex_structure, ligand_objects) -> None:
         Dihedral, DihedralType,
     )
 
-    covalent_ligands = [lig for lig in ligand_objects if getattr(lig, "covalent_link", None)]
+    covalent_ligands = [lig for lig in ligand_objects if getattr(lig, "covalent_links", None)]
     if not covalent_ligands:
         return
 
     for lig_obj in covalent_ligands:
-        spec: CovalentLinkSpec = lig_obj.covalent_link
-        if spec.junction_bond_params is None:
-            print(f"[covalent] WARNING: no junction bond params for {lig_obj.ligand_id}; skipping")
-            continue
+        specs: List[CovalentLinkSpec] = list(lig_obj.covalent_links)
+        fragment = getattr(lig_obj, "covalent_fragment", None)
 
         lig_res_name = lig_obj.ligand_id  # e.g. 'LIG_0' (set by create_system)
 
-        # Strip leaving ligand atoms from the merged parmed structure. This
-        # mirrors the truncation that the fragment parameterization saw, so
-        # that junction atom-name mappings still resolve correctly.
-        leaving_names = list(spec.delete_ligand_atoms or []) + list(spec.auto_deleted_ligand_atoms or [])
+        # Strip the leaving atoms of EVERY bond from the merged parmed structure,
+        # in one pass. This mirrors the truncation that the fragment
+        # parameterization saw, so junction atom-name mappings still resolve.
+        leaving_names = []
+        for spec in specs:
+            leaving_names += list(spec.delete_ligand_atoms or [])
+            leaving_names += list(spec.auto_deleted_ligand_atoms or [])
         if leaving_names:
-            _strip_ligand_atoms_by_name(complex_structure, lig_res_name, leaving_names)
-
-        # Resolve ligand attachment atom in the (now truncated) merged structure.
-        lig_atom_name = spec.resolved_ligand_atom_name
-        lig_atom = _find_complex_atom(complex_structure, lig_res_name, lig_atom_name)
-        if lig_atom is None:
-            raise RuntimeError(
-                f"[covalent] merged structure missing ligand atom {lig_res_name}:{lig_atom_name}"
+            _strip_ligand_atoms_by_name(
+                complex_structure, lig_res_name, sorted(set(leaving_names))
             )
 
-        # Resolve protein attachment atom
-        prot_atom = _find_complex_atom(
-            complex_structure,
-            spec.resolved_protein_resname,
-            spec.resolved_protein_atom_name,
-            resnum=spec.resolved_protein_resnum,
-            chain=spec.resolved_protein_chain,
-        )
-        if prot_atom is None:
-            raise RuntimeError(
-                f"[covalent] merged structure missing protein atom "
-                f"{spec.resolved_protein_chain}:{spec.resolved_protein_resname}:"
-                f"{spec.resolved_protein_resnum}:{spec.resolved_protein_atom_name}"
+        # Resolve both ends of every bond up front, so a name lookup below can
+        # tell a protein attachment atom from a ligand atom.
+        resolved = []          # (spec, lig_atom, prot_atom)
+        prot_atom_by_name = {}
+        for spec in specs:
+            lig_atom_name = spec.resolved_ligand_atom_name
+            lig_atom = _find_complex_atom(complex_structure, lig_res_name, lig_atom_name)
+            if lig_atom is None:
+                raise RuntimeError(
+                    f"[covalent] merged structure missing ligand atom {lig_res_name}:{lig_atom_name}"
+                )
+            prot_atom = _find_complex_atom(
+                complex_structure,
+                spec.resolved_protein_resname,
+                spec.resolved_protein_atom_name,
+                resnum=spec.resolved_protein_resnum,
+                chain=spec.resolved_protein_chain,
             )
+            if prot_atom is None:
+                raise RuntimeError(
+                    f"[covalent] merged structure missing protein atom "
+                    f"{spec.resolved_protein_chain}:{spec.resolved_protein_resname}:"
+                    f"{spec.resolved_protein_resnum}:{spec.resolved_protein_atom_name}"
+                )
+            resolved.append((spec, lig_atom, prot_atom))
+            prot_atom_by_name[spec.resolved_protein_atom_name] = prot_atom
 
         def _resolve_lig(atom_name: str):
             return _find_complex_atom(complex_structure, lig_res_name, atom_name)
 
         def _resolve_any(name: str):
-            if name == spec.resolved_protein_atom_name:
-                return prot_atom
+            # Protein attachment atoms are matched by name across all bonds; any
+            # other name belongs to the ligand residue.
+            if name in prot_atom_by_name:
+                return prot_atom_by_name[name]
             return _resolve_lig(name)
 
-        # --- Inject the junction bond ---
-        k_bond, r0 = spec.junction_bond_params
-        if not _bond_exists(complex_structure, lig_atom.idx, prot_atom.idx):
-            bt = BondType(k=k_bond, req=r0, list=complex_structure.bond_types)
-            complex_structure.bond_types.append(bt)
-            complex_structure.bonds.append(Bond(lig_atom, prot_atom, type=bt))
+        # --- Inject one junction bond per covalent link ---
+        for spec, lig_atom, prot_atom in resolved:
+            if spec.junction_bond_params is None:
+                print(
+                    f"[covalent] WARNING: no junction bond params for {lig_res_name}:"
+                    f"{spec.resolved_ligand_atom_name}; skipping this bond"
+                )
+                continue
+            k_bond, r0 = spec.junction_bond_params
+            if not _bond_exists(complex_structure, lig_atom.idx, prot_atom.idx):
+                bt = BondType(k=k_bond, req=r0, list=complex_structure.bond_types)
+                complex_structure.bond_types.append(bt)
+                complex_structure.bonds.append(Bond(lig_atom, prot_atom, type=bt))
+            print(
+                f"[covalent] injected bond {spec.resolved_protein_chain}:"
+                f"{spec.resolved_protein_resname}:{spec.resolved_protein_resnum}:"
+                f"{spec.resolved_protein_atom_name} — {lig_res_name}:"
+                f"{spec.resolved_ligand_atom_name} (k={k_bond:.1f}, r0={r0:.3f})"
+            )
 
-        # --- Inject junction angles ---
-        for names, k_ang, theta0 in spec.junction_angles:
+        if fragment is None:
+            continue
+
+        # --- Inject junction angles (one fragment per ligand, so injected once) ---
+        for names, k_ang, theta0 in fragment.junction_angles:
             a1 = _resolve_any(names[0])
             a2 = _resolve_any(names[1])
             a3 = _resolve_any(names[2])
@@ -815,7 +1002,7 @@ def inject_covalent_bonds(complex_structure, ligand_objects) -> None:
             complex_structure.angles.append(Angle(a1, a2, a3, type=at))
 
         # --- Inject junction dihedrals ---
-        for names, phi_k, phase, per in spec.junction_dihedrals:
+        for names, phi_k, phase, per in fragment.junction_dihedrals:
             a1 = _resolve_any(names[0])
             a2 = _resolve_any(names[1])
             a3 = _resolve_any(names[2])
@@ -834,15 +1021,21 @@ def inject_covalent_bonds(complex_structure, ligand_objects) -> None:
             )
 
         # --- Junction polarization: copy fragment ligand charges & renormalize ---
-        _redistribute_ligand_charges(
-            complex_structure, lig_res_name, spec.fragment_ligand_charges
-        )
+        # Once per ligand: the charges come from the single fragment spanning all
+        # of its junctions, and renormalizing twice would drift the net charge.
+        # The ligand's formal charge is unchanged by the reaction, so use it as the
+        # renormalization target rather than rounding the drifted partial sum.
+        formal_charge = None
+        lig_mol = getattr(lig_obj, "mol", None)
+        if lig_mol is not None:
+            try:
+                formal_charge = float(Chem.GetFormalCharge(lig_mol))
+            except Exception:
+                formal_charge = None
 
-        print(
-            f"[covalent] injected bond {spec.resolved_protein_chain}:"
-            f"{spec.resolved_protein_resname}:{spec.resolved_protein_resnum}:"
-            f"{spec.resolved_protein_atom_name} — {lig_res_name}:{lig_atom_name} "
-            f"(k={k_bond:.1f}, r0={r0:.3f})"
+        _redistribute_ligand_charges(
+            complex_structure, lig_res_name, fragment.fragment_ligand_charges,
+            target_charge=formal_charge,
         )
 
 
@@ -850,10 +1043,20 @@ def _redistribute_ligand_charges(
     complex_structure,
     lig_res_name: str,
     fragment_charges: Dict[str, float],
+    target_charge: Optional[float] = None,
 ) -> None:
     """Copy fragment-derived charges onto the ligand atoms in the merged
-    structure (by atom name), then renormalize ligand total charge to the
-    nearest integer by spreading the residual evenly across all ligand atoms.
+    structure (by atom name), then renormalize the ligand's total charge by
+    spreading the residual evenly across all ligand atoms.
+
+    ``target_charge`` is the ligand's FORMAL charge, which the reaction does not
+    change: each covalent bond swaps a bond-to-leaving-atom for a bond-to-protein,
+    and the leaving atoms depart as neutral species (the halide as HCl, taking the
+    protein H). Falling back on ``round(after_total)`` guesses that formal charge
+    from a partial-charge sum that the stripped leaving atoms have already pulled
+    away from it: each halide leaves roughly +0.29 behind, so a ligand with three
+    of them (9I93's tris(chloromethyl)triazine) drifts past 0.5 and snaps to +1,
+    silently adding a unit of charge to the whole system.
     """
     ligand_atoms = [
         a for a in complex_structure.atoms if a.residue.name == lig_res_name
@@ -868,7 +1071,17 @@ def _redistribute_ligand_charges(
             atom.charge = float(fragment_charges[atom.name])
 
     after_total = float(sum(a.charge for a in ligand_atoms))
-    target = float(round(after_total))
+    if target_charge is None:
+        target = float(round(after_total))
+    else:
+        target = float(target_charge)
+        if abs(target - round(after_total)) > 0.5:
+            print(
+                f"[covalent] {lig_res_name}: renormalizing to formal charge "
+                f"{target:+.0f}; the polarized partial-charge sum was "
+                f"{after_total:+.4f}, which would have rounded to "
+                f"{round(after_total):+.0f}."
+            )
     residual = target - after_total
     if abs(residual) > 1e-9 and len(ligand_atoms) > 0:
         per_atom = residual / len(ligand_atoms)

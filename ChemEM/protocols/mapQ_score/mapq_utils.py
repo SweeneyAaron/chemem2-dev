@@ -70,8 +70,18 @@ class MapGrid:
         return MapGrid(data=data, origin_xyz=origin, apix_xyz=apix)
 
     def stats(self) -> Tuple[float, float]:
-        """Global mean and std (used for A,B in the reference Gaussian)."""
-        return float(np.mean(self.data)), float(np.std(self.data))
+        """Global mean and std (used for A,B in the reference Gaussian).
+
+        Result is memoised on the instance — the map is treated as read-only
+        for Q-score purposes, so mutating ``self.data`` in place will produce
+        stale stats.
+        """
+        cached = getattr(self, "_stats_cache", None)
+        if cached is not None:
+            return cached
+        stats = (float(np.mean(self.data)), float(np.std(self.data)))
+        self._stats_cache = stats
+        return stats
 
     def sample_trilinear(self, xyz: np.ndarray) -> np.ndarray:
         """
@@ -136,6 +146,24 @@ class MapGrid:
             val[oob] = np.nan
 
         return val
+
+
+def _cached_mapgrid(emmap) -> "MapGrid":
+    """Return a MapGrid wrapping ``emmap``, reusing the prior instance when
+    available. The cache is attached as ``_qscore_mapgrid_cache`` on the
+    emmap object so Q-score callers don't rebuild the wrapper (and don't
+    re-run the expensive ``np.std`` on the full map) per evaluation.
+    """
+    cached = getattr(emmap, "_qscore_mapgrid_cache", None)
+    if cached is not None:
+        return cached
+    mg = MapGrid.from_emmap(emmap)
+    try:
+        emmap._qscore_mapgrid_cache = mg
+    except AttributeError:
+        # emmap is frozen / __slots__-locked; fall back to no caching.
+        pass
+    return mg
 
 
 # ----------------------------
@@ -264,9 +292,14 @@ def compute_qscores_from_emmap(
     radii: Optional[np.ndarray] = None,
     n_points_per_shell: int = 8,
     candidate_dirs: int = 256,
+    score_indices: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Compute per-atom Q-scores given atom coordinates and a ChemEM EMMap.
+
+    If score_indices is provided, build the neighbor tree from all atoms but
+    compute and return scores only for those atom indices. This keeps Q-score
+    occlusion semantics while avoiding repeated protein-context scoring.
     """
     if radii is None:
         radii = np.round(np.arange(0.0, 2.0 + 1e-6, 0.1), 3)  # 0..2Å inclusive
@@ -275,17 +308,24 @@ def compute_qscores_from_emmap(
     if atoms_xyz.ndim != 2 or atoms_xyz.shape[1] != 3:
         raise ValueError(f"atoms_xyz must be (N,3), got {atoms_xyz.shape}")
 
-    mapgrid = MapGrid.from_emmap(emmap)
+    mapgrid = _cached_mapgrid(emmap)
     map_mean, map_std = mapgrid.stats()
 
     kdtree = cKDTree(atoms_xyz)
     dirs_unit = fibonacci_sphere(candidate_dirs)
 
-    out = np.empty((atoms_xyz.shape[0],), dtype=np.float32)
-    for i in range(atoms_xyz.shape[0]):
-        out[i] = compute_atom_qscore(
-            i,
-            atoms_xyz[i],
+    if score_indices is None:
+        score_idx = np.arange(atoms_xyz.shape[0], dtype=int)
+    else:
+        score_idx = np.asarray(score_indices, dtype=int).reshape(-1)
+        if np.any(score_idx < 0) or np.any(score_idx >= atoms_xyz.shape[0]):
+            raise ValueError("score_indices contains out-of-range atom indices")
+
+    out = np.empty((score_idx.shape[0],), dtype=np.float32)
+    for row, i in enumerate(score_idx.tolist()):
+        out[row] = compute_atom_qscore(
+            int(i),
+            atoms_xyz[int(i)],
             kdtree=kdtree,
             mapgrid=mapgrid,
             radii=radii,

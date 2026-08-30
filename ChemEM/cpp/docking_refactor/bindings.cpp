@@ -63,7 +63,12 @@ PYBIND11_MODULE(docking, m) {
         .def_readwrite("hphobe_raw_hpil", &ECHOWeights::hphobe_raw_hpil)
         .def_readwrite("hphob_enc_gt_7_only_hpho", &ECHOWeights::hphob_enc_gt_7_only_hpho)
         .def_readwrite("hphob_enc_gt_7_only_hpil_unsat", &ECHOWeights::hphob_enc_gt_7_only_hpil_unsat)
-        .def_readwrite("unsat_polar", &ECHOWeights::unsat_polar);
+        .def_readwrite("unsat_polar", &ECHOWeights::unsat_polar)
+        .def_readwrite("aromatic_attr", &ECHOWeights::aromatic_attr)
+        .def_readwrite("aromatic_clash", &ECHOWeights::aromatic_clash)
+        .def_readwrite("nonbond_attr", &ECHOWeights::nonbond_attr)
+        .def_readwrite("nonbond_rep", &ECHOWeights::nonbond_rep)
+        .def_readwrite("clash", &ECHOWeights::clash);
 
     // -----------------------------
     // Score helpers (updated to accept weights + actually use rep_max)
@@ -109,6 +114,57 @@ PYBIND11_MODULE(docking, m) {
         py::arg("electro_clamp") = 2.0,
         py::arg("weights") = ECHOWeights::default_v1(),
         "Score one RDKit MolBlock conformer with ECHOScore."
+    );
+
+    // -----------------------------
+    // Raw per-term breakdown (for offline weight-fitting). Unweighted term values,
+    // including the split attractive/repulsive/clash channels.
+    // -----------------------------
+    m.def(
+        "run_echo_terms",
+        [](py::object py_pc,
+           const std::string& molblock,
+           int confId,
+           double interaction_cutoff,
+           double rep_max,
+           double electro_clamp) -> py::dict {
+
+            PreComputedData pre(py_pc);
+
+            std::unique_ptr<RDKit::RWMol> mol(
+                RDKit::v1::MolBlockToMol(
+                    molblock,
+                    true,   // sanitize
+                    false,  // removeHs
+                    true    // strictParsing
+                )
+            );
+            if (!mol) throw std::runtime_error("MolBlock parse failed");
+
+            if (confId < 0 || confId >= mol->getNumConformers()) {
+                throw std::runtime_error("confId out of range");
+            }
+            const RDKit::Conformer& conf = mol->getConformer(confId);
+
+            ECHOScore scorer{pre, ECHOWeights::default_v1()};
+            scorer.interaction_cutoff = interaction_cutoff;
+            scorer.electro_clamp      = electro_clamp;
+
+            const std::map<std::string, double> terms = scorer.score_terms(conf, rep_max);
+            py::dict out;
+            for (const auto& kv : terms) {
+                out[py::str(kv.first)] = kv.second;
+            }
+            return out;
+        },
+        py::arg("py_precomputed"),
+        py::arg("molblock"),
+        py::arg("confId") = 0,
+        py::arg("interaction_cutoff") = 6.0,
+        py::arg("rep_max") = 5.0,
+        py::arg("electro_clamp") = 2.0,
+        "Return the raw (unweighted) ECHO term channels as {name: value}, "
+        "including split aromatic/nonbond attractive/repulsive/clash sub-terms."
     );
 
     m.def(
@@ -180,7 +236,8 @@ PYBIND11_MODULE(docking, m) {
         "run_aco_docking",
         [](py::object py_pc,
            const std::string& molblock,
-           int confId) -> py::list {
+           int confId,
+           ECHOWeights weights) -> py::list {
 
             PreComputedData pre(py_pc);
 
@@ -196,12 +253,14 @@ PYBIND11_MODULE(docking, m) {
 
             RDKit::RWMol mol = keep_only_conformer(*mol_ptr, confId);
 
-            AntColonyOptimizer opt(pre, mol);
+            AntColonyOptimizer opt(pre, mol, weights);
             return opt.optimize(); // returns list of (score, coords)
         },
         py::arg("py_precomputed"),
         py::arg("molblock"),
         py::arg("confId") = 0,
-        "Run ACO docking and return [(score, coords_np), ...] from AntColonyOptimizer::optimize()."
+        py::arg("weights") = ECHOWeights::default_v1(),
+        "Run ACO docking (optionally with custom ECHO weights) and return "
+        "[(score, coords_np), ...] from AntColonyOptimizer::optimize()."
     );
 }

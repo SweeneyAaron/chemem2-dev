@@ -84,10 +84,29 @@ def normalize_coordination_geometry(name: str) -> str:
     return COORD_GEOM_ALIASES.get(n, n)
 
 def coord_geom_to_int(name: str) -> int:
+    """Stable integer ID for a geometry (for serialisation).
+
+    NOTE: this is an enum id, NOT a coordination number -- tetrahedral is 2, not 4. Use
+    coord_geom_to_cn() whenever you need the number of coordinating positions.
+    """
     g = normalize_coordination_geometry(name)
     if g not in COORD_GEOM_TO_INT:
         raise KeyError(f"Unknown coordination geometry {name!r} -> {g!r}")
     return COORD_GEOM_TO_INT[g]
+
+
+def coord_geom_to_cn(name: str) -> int:
+    """Coordination number (number of coordinating positions) for a geometry.
+
+    Derived from the geometry template itself (`_coord_geometry_templates`), which is the same
+    source `propose_dummy_water_oxygen_positions` uses to decide how many dummy waters complete
+    the shell -- so callers stay consistent with water placement.
+    """
+    g = _normalize_geom_name(name)
+    _, cn_map = _coord_geometry_templates()
+    if g not in cn_map:
+        raise KeyError(f"Unknown coordination geometry {name!r} -> {g!r}")
+    return cn_map[g]
 
 def _norm_ion_name(name: str) -> str:
     s = str(name).strip().upper()

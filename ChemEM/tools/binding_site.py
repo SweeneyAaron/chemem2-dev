@@ -490,7 +490,8 @@ def ses_ray_trace_binding_site(
     protein_openff_structure, # passed for writing PDBs
     system_output_dir: str,
     grid_spacing: float,
-    fall_back_radius: float = 15.0
+    fall_back_radius: float = 15.0,
+    write_files: bool = True,
 ) -> Optional[BindingSiteModel]:
     """
     Performs the fallback binding site extraction using SES (Solvent Excluded Surface)
@@ -506,7 +507,9 @@ def ses_ray_trace_binding_site(
         system_output_dir: Directory to write output files (PDBs, MRCs, tags).
         grid_spacing: Grid resolution in Angstroms.
         fall_back_radius: Radius to select atoms around the centroid for SES calculation.
-        
+        write_files: Write site_{key}.pdb / site_lining_residues_{key}.pdb, matching what
+            the primary (alpha-shape cluster) path does. Set False to suppress site output.
+
     Returns:
         BindingSiteModel object if successful, None otherwise.
     """
@@ -556,21 +559,28 @@ def ses_ray_trace_binding_site(
     # 6. Write Output Files (PDBs)
     pdb_path = os.path.join(system_output_dir, f'site_{centroid_key}.pdb')
     rdkit_mol = write_residues_to_pdb(
-        site_data.residues, 
-        protein_openff_structure.positions, 
-        pdb_path
+        site_data.residues,
+        protein_openff_structure.positions,
+        pdb_path,
+        write=write_files,
     )
-    
+
     pdb_lining_path = os.path.join(system_output_dir, f'site_lining_residues_{centroid_key}.pdb')
-    rdkit_lining_mol = write_residues_to_pdb(
-        site_data.lining_residues, 
-        protein_openff_structure.positions, 
-        pdb_lining_path
+    rdkit_lining_mol, lining_hydrogens = write_residues_to_pdb(
+        site_data.lining_residues,
+        protein_openff_structure.positions,
+        pdb_lining_path,
+        write=write_files,
+        return_hydrogens=True,
     )
     
     # 7. Finalize Data Dictionary
+    # NOTE: the field is `rdkit_lining_mol`; BindingSiteModel has no `lining_mol`
+    # field, so assigning to that name silently left rdkit_lining_mol as None and
+    # PreCompDataProtein blew up on `.GetConformer()` for every fallback site.
     site_data.rdkit_mol = rdkit_mol
-    site_data.lining_mol = rdkit_lining_mol
+    site_data.rdkit_lining_mol = rdkit_lining_mol
+    site_data.lining_hydrogens = lining_hydrogens
     
     # Add grid metadata
     site_data.origin = grid_origin 
@@ -952,6 +962,194 @@ def sasa_accessible_component_mask(
     if return_labels:
         return excluded, accessible, kept, origin, tuple(shape_xyz), labels, nlab
     return excluded, accessible, kept, origin, tuple(shape_xyz)
+
+
+def resolve_manual_extent(radius=None, box=None):
+    """Normalise the --manual-site-radius / --manual-site-box pair.
+
+    Returns ``(box_size, radius, label)`` where exactly one of box_size/radius is
+    not None, ready to hand to ``sasa_accessible_component_mask`` (which raises if
+    both are given). The box wins when both are supplied -- callers should surface
+    ``label`` in the log so a silently-ignored radius is visible.
+    """
+    if box is not None:
+        b = np.asarray(box, dtype=float).reshape(-1)
+        if b.size == 1:
+            b = np.repeat(b, 3)
+        if b.size != 3:
+            raise ValueError(
+                f"manual site box must be 1 or 3 values (A), got {b.size}")
+        if np.any(b <= 0):
+            raise ValueError(f"manual site box must be positive, got {b.tolist()}")
+        label_ = f"box={np.round(b, 2).tolist()} A"
+        if radius is not None:
+            label_ += f" (radius={radius} A ignored; box wins)"
+        return b, None, label_
+
+    if radius is None:
+        raise ValueError("manual site needs either a radius or a box")
+    if radius <= 0:
+        raise ValueError(f"manual site radius must be positive, got {radius}")
+    return None, float(radius), f"radius={radius} A"
+
+
+def manual_binding_site(
+    centroid,
+    centroid_key,
+    atoms,
+    positions,
+    atom_radii,
+    protein_openff_structure,
+    system_output_dir,
+    grid_spacing,
+    radius=None,
+    box=None,
+    probe_radius: float = 1.4,
+    lining_distance: float = 2.0,
+    padding: float = 6.0,
+    extra_lining_atom_indices=None,
+    write_files: bool = True,
+    log=None,
+) -> Optional[BindingSiteModel]:
+    """Build one binding site of a user-controlled extent around `centroid`.
+
+    Unlike the alpha-shape path (and unlike `ses_ray_trace_binding_site`, which still
+    needs the centroid to fall inside a detected pocket), this makes no attempt to
+    discover where the pocket is: the user says where and how big, and the only thing
+    subtracted is space the ligand physically cannot occupy. That is the point --
+    density segmentation splitting one pocket into several sites, or cropping a box
+    that clips part of the ligand, is exactly what this bypasses.
+
+    `box` wins over `radius` when both are given. Returns None if the requested volume
+    contains no accessible space at all.
+    """
+    def _say(msg):
+        if log is not None:
+            log(msg)
+
+    box_size, sphere_radius, extent_label = resolve_manual_extent(radius=radius, box=box)
+
+    _, _, kept, origin, shape_xyz = sasa_accessible_component_mask(
+        atom_positions=positions,
+        atom_radii=atom_radii,
+        centroid=centroid,
+        grid_spacing=grid_spacing,
+        probe_radius=probe_radius,
+        box_size=box_size,
+        radius=sphere_radius,
+        order="zyx",
+        # 26-neighbour, matching the adjacency the ACO builds over these voxels.
+        connectivity=3,
+        keep_mode="contains_or_closest",
+    )
+
+    nx, ny, nz = (int(v) for v in shape_xyz)
+    origin = np.asarray(origin, dtype=float).reshape(3)
+    centroid = np.asarray(centroid, dtype=float).reshape(3)
+
+    # Voxel-centre coordinates, xyz, for every voxel of the grid (kept is zyx).
+    zz, yy, xx = np.nonzero(kept)
+    if xx.size == 0:
+        _say(f"-- Manual site {centroid_key}: no solvent-accessible volume inside "
+             f"{extent_label} around {np.round(centroid, 3).tolist()}; site skipped.")
+        return None
+
+    voxel_xyz = origin[None, :] + np.stack([xx, yy, zz], axis=1) * float(grid_spacing)
+
+    # make_grid_and_origin_from_radius returns the CUBE circumscribing the sphere, so
+    # trim to the sphere the user actually asked for.
+    if sphere_radius is not None:
+        inside = np.linalg.norm(voxel_xyz - centroid[None, :], axis=1) <= sphere_radius
+        if not inside.any():
+            _say(f"-- Manual site {centroid_key}: no accessible voxel within "
+                 f"{extent_label}; site skipped.")
+            return None
+        if not inside.all():
+            drop = np.stack([zz, yy, xx], axis=1)[~inside]
+            kept[drop[:, 0], drop[:, 1], drop[:, 2]] = False
+            voxel_xyz = voxel_xyz[inside]
+
+    # Flat validity field rather than a boundary EDT. The ACO takes its translation
+    # points from `distance_map > probe_radius` (precomputed_data), so a real EDT
+    # would erode probe_radius off every face and a requested 10 A box would quietly
+    # become a 7.2 A placement region. Constant-fill keeps requested == actual.
+    # (Same trick as the alpha-feature-site path.)
+    distance_map = np.where(kept, np.float32(probe_radius * 10.0), np.float32(0.0))
+
+    # Residues by distance to the accessible volume -- KD-tree rather than the
+    # site-sphere distance matrix, which would be n_voxels x n_atoms.
+    kdtree = cKDTree(voxel_xyz)
+    dist_to_site, _ = kdtree.query(np.asarray(positions, dtype=float))
+    radii = np.asarray(atom_radii, dtype=float)
+
+    bounding_atom_indices = np.where(dist_to_site < (radii + padding))[0]
+    lining_atom_indices = np.where(dist_to_site < (radii + lining_distance))[0]
+
+    # Covalent docking: the target residue must be in the lining set (and therefore in
+    # rdkit_lining_mol) for the C++ warhead-anchor clash exclusion. No-op otherwise.
+    if extra_lining_atom_indices is not None and len(extra_lining_atom_indices):
+        lining_atom_indices = np.unique(np.concatenate([
+            np.asarray(lining_atom_indices, dtype=int),
+            np.asarray(extra_lining_atom_indices, dtype=int),
+        ]))
+
+    bounding_residues = residues_from_atom_indices(bounding_atom_indices, atoms)
+    lining_residues = residues_from_atom_indices(lining_atom_indices, atoms)
+
+    pdb_path = os.path.join(system_output_dir, f"site_{centroid_key}.pdb")
+    rdkit_mol = write_residues_to_pdb(
+        bounding_residues, protein_openff_structure.positions, pdb_path,
+        write=write_files,
+    )
+    pdb_lining_path = os.path.join(
+        system_output_dir, f"site_{centroid_key}_lining.pdb")
+    rdkit_lining_mol, lining_hydrogens = write_residues_to_pdb(
+        lining_residues, protein_openff_structure.positions, pdb_lining_path,
+        write=write_files, return_hydrogens=True,
+    )
+
+    apix = (float(grid_spacing),) * 3
+    # box_size is (nz,ny,nx) -- handle_centroids indexes it reversed to rebuild the
+    # xyz extent. shape_xyz from the grid helpers is (nx,ny,nz), so it must flip here.
+    max_coords = origin + np.asarray(apix, dtype=float) * np.array([nx, ny, nz], float)
+    effective_radius = (float(sphere_radius) if sphere_radius is not None
+                        else float(np.min(box_size)) / 2.0)
+
+    data = {
+        "key": centroid_key,
+        "source": "manual",
+        "residues": bounding_residues,
+        "lining_residues": lining_residues,
+        "unique_atom_indices": list(bounding_atom_indices),
+        "binding_site_centroid": centroid,
+        "min_coords": origin,
+        "max_coords": max_coords,
+        "bounding_box_size": max_coords - origin,
+        # One nominal sphere so covalent lining injection and any site-sphere
+        # consumer still has something meaningful to work with.
+        "site_centers": centroid.reshape(1, 3),
+        "site_radii": np.array([effective_radius], dtype=float),
+        "volume": float(np.count_nonzero(kept)) * float(grid_spacing) ** 3,
+        # ndarray, not a tuple: handle_centroids does `centroid > site.origin` with the
+        # config centroid, which is a plain list. list > tuple is a TypeError, while
+        # list > ndarray broadcasts. The automatic path stores an ndarray here too.
+        "origin": np.asarray(origin, dtype=float),
+        "apix": apix,
+        "box_size": (nz, ny, nx),
+        "densmap": kept.astype(np.float32),
+        "distance_map": distance_map,
+        "rdkit_mol": rdkit_mol,
+        "rdkit_lining_mol": rdkit_lining_mol,
+        "lining_hydrogens": lining_hydrogens,
+    }
+
+    _say(f"-- Manual site {centroid_key} at {np.round(centroid, 3).tolist()}: "
+         f"{extent_label}, grid {nz}x{ny}x{nx} @ {grid_spacing:.3f} A, "
+         f"{int(np.count_nonzero(kept))} accessible voxels "
+         f"({data['volume']:.1f} A^3), {len(lining_residues)} lining / "
+         f"{len(bounding_residues)} bounding residues.")
+
+    return BindingSiteModel.from_dict(data)
 
 
 

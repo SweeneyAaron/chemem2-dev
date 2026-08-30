@@ -104,6 +104,30 @@ struct LigandIntraData {
 
 
 
+// Optional covalent-ligand anchor: pins a ligand warhead heavy atom to a fixed
+// protein point (the protein is rigid during the search). Populated ONLY when
+// the Python precompute object carries the covalent_* attributes; otherwise
+// `enabled` stays false and the covalent scoring term is a no-op, so existing
+// non-covalent docking is byte-for-byte unchanged.
+// One tether: a ligand warhead heavy atom held at r0 from a fixed protein point.
+struct CovalentAnchor {
+    int    warhead_idx     = -1;    // heavy-atom index in ligand conformer order
+    int    anchor_prot_idx = -1;    // index into ProteinData.positions (-1 => use anchor_xyz)
+    Eigen::RowVector3d anchor_xyz = Eigen::RowVector3d::Zero();  // Angstrom, fallback/explicit
+    double r0 = 0.0;                // Angstrom (equilibrium warhead-anchor length)
+    double k  = 10.0;               // penalty stiffness (matches compute_constraint scale)
+};
+
+// A ligand may carry more than one covalent bond (a crosslinker bridging two
+// residues), so the anchors are a list; every one is tethered independently and
+// their penalties sum into the single `covalent` scoring term.
+struct CovalentData {
+    bool enabled = false;
+    std::vector<CovalentAnchor> anchors;
+};
+
+
+
   
 struct ScoringWeights {
     double nonbond, dsasa, hphob, electro, ligand_torsion, ligand_intra;
@@ -203,6 +227,17 @@ struct AlgorithmConfig {
     int n_cpu;
     int n_global_search;
     int n_local_search;
+
+    // Local minimiser used for BOTH the per-iteration refine of the top
+    // n_local_search ants and the final polish (Python: py_pc.local_minimiser,
+    // CLI --local-minimiser).
+    //   0 = staged Nelder-Mead: 6 rigid-body dims to convergence, frozen, then
+    //       torsions. Cannot reach coupled slide+torsion motions.
+    //   1 = one joint projected L-BFGS over all 6+nTors dims, FD gradients.
+    // Defaults to 0 so an older precompute object (no such attribute) keeps the
+    // historical behaviour bit-for-bit.
+    int local_minimiser = 0;
+
     int topN = 20;
     double interaction_cutoff = 6.0;
     double electro_clamp = 6.0;
@@ -227,6 +262,10 @@ struct AlgorithmConfig {
     bool no_map = true;
     int inner_map_score = 1;
     int outer_map_score = 0;
+    // Base seed for the ACO search RNG (Python: py_pc.dock_seed, CLI --dock-seed).
+    // Ants are seeded from (dock_seed, iteration, ant index), so this alone
+    // determines the result -- independent of thread count and ligand order.
+    uint64_t dock_seed = 1234567ULL;
 };
 
 
@@ -246,6 +285,7 @@ public:
     const HBondData&     hbond()     const { return m_hbond_score_data; }
     const AromaticData&  aromatic()  const { return m_aromatic_score_data; }
     const LigandIntraData& ligand_score() const { return m_ligand_intra; }
+    const CovalentData& covalent() const { return m_covalent; }
     const ScoringWeights& weights()   const { return m_weights; }
     const AlgorithmConfig& config()  const { return m_config; }
     const GridData& environment_grid() const { return m_environment_grid ;}
@@ -288,6 +328,7 @@ private:
     HBondData m_hbond_score_data;
     AromaticData m_aromatic_score_data;
     LigandIntraData m_ligand_intra;
+    CovalentData m_covalent;
     ScoringWeights m_weights;
     WaterData m_water_data;
     AlgorithmConfig m_config;
