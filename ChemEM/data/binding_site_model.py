@@ -59,6 +59,15 @@ class BindingSiteModel:
     rdkit_mol: Any = None
     rdkit_lining_mol: Any = None
 
+    # Hydrogen coordinates as the *prepared* structure placed them, one list per
+    # heavy atom of rdkit_lining_mol and in that mol's atom order. None when the
+    # source structure was not protonated, in which case PreCompDataProtein falls
+    # back to regenerating them with Chem.AddHs. Carried on the site rather than
+    # on the mol because rdkit_lining_mol is heavy-atom only (write_residues_to_pdb
+    # ends in RemoveHs), so the placement has nowhere else to live -- and the ECHO
+    # H-bond term scores real D-H...A geometry, so it is not recoverable later.
+    lining_hydrogens: Optional[List[Any]] = None
+
     # opening points (optional)
     openings: Optional[List[np.ndarray]] = None
 

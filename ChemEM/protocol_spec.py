@@ -78,6 +78,39 @@ def add_binding_site_args(p):
     g.add_argument("--lining_residue_distance", type=float,default=2.0)
     g.add_argument("--force-new-site", action="store_true")
 
+    g.add_argument("--protein-hydrogens", choices=("rdkit", "prep"), default="rdkit",
+                   help="Where the protein hydrogen coordinates the ECHO H-bond term "
+                        "reads come from. The site's RDKit mol is heavy-atom only, so "
+                        "'rdkit' (default) rebuilds them with Chem.AddHs(addCoords=True) "
+                        "and the prepared placement is lost: every freely rotatable donor "
+                        "(Ser OG, Thr OG1, Tyr OH, Cys SG, Lys NZ) ends up at an "
+                        "arbitrary torsion, and the H-bond term gates on the D-H...A "
+                        "angle, so a real hydrogen bond pointing the wrong way scores as "
+                        "a repulsive contact instead. 'prep' uses the hydrogens protein "
+                        "preparation actually placed and minimised. Still ligand-blind, "
+                        "but measured rather than guessed. Not the default because it "
+                        "moves every ECHO score and the fitted weights were derived "
+                        "against the RDKit placement.")
+
+    # --- Manual (centroid-defined) binding site ---
+    g.add_argument("--manual-site", action="store_true",
+                   help="Build one binding site per config 'centroid =' with an explicitly "
+                        "controlled extent, INSTEAD of alpha-shape pocket detection. The "
+                        "requested volume minus solvent-excluded space becomes the search "
+                        "region, so the site no longer depends on pocket detection or on "
+                        "density segmentation splitting a pocket into several sites. "
+                        "Alpha-mask may still attach density to these sites but may not "
+                        "create new ones. Incompatible with --alpha-feature-sites and "
+                        "--force-new-site, which both discard existing sites.")
+    g.add_argument("--manual-site-radius", type=float, default=12.0, metavar="Å",
+                   help="Radius of the --manual-site sphere. Default 12 Å. Ignored if "
+                        "--manual-site-box is given.")
+    g.add_argument("--manual-site-box", type=float, nargs="+", default=None, metavar="Å",
+                   help="Extent of the --manual-site box in Å: one value for a cube, or "
+                        "three for x y z. Takes precedence over --manual-site-radius. The "
+                        "extent you ask for is the extent the search gets -- it is not "
+                        "eroded by the probe radius.")
+
 
 def confidence_map_deps(args):
     return tuple() 
@@ -93,11 +126,51 @@ def add_dock_args(p):
     g = p.add_argument_group("Docking")
     
     g.add_argument("--rescore", action="store_true")
+    g.add_argument("--dock-seed", type=int, default=None,
+                   help="Base seed for the ACO search RNG. Unset (default) draws a "
+                        "fresh random seed each run, which is always logged as "
+                        "'[dock] seed: N' so any run can be reproduced by passing it "
+                        "back. The docking search is stochastic, and a fixed seed "
+                        "makes one trajectory look like a converged answer -- rerun "
+                        "with different seeds to see the real spread. The seed fully "
+                        "determines the result: ants are seeded from (seed, iteration, "
+                        "ant index), so it is independent of --ncpu and of ligand "
+                        "order. One seed is drawn per run and shared by every site "
+                        "and ligand in it.")
+    g.add_argument("--echo-lattice-anchor", choices=("off", "global", "centroid"),
+                   default="off",
+                   help="Anchor the ECHO grid lattice so its phase does not depend on "
+                        "the whole-protein bounding box. By default the grid origin is "
+                        "min(all atoms) - padding, so an atom at the protein's edge -- "
+                        "often a rebuilt, poorly-determined one tens of Angstrom from "
+                        "the site -- slides the sampling lattice and changes "
+                        "electro_attractive through trilinear interpolation. 'global' "
+                        "snaps the origin to the absolute lattice {i*spacing}; "
+                        "'centroid' makes the binding-site centroid an exact lattice "
+                        "node, so the grid follows the site under rigid translation. "
+                        "Both shift absolute ECHO scores by a small constant, which "
+                        "would require refitting the ECHO weights -- hence off by "
+                        "default. Prefer 'global' unless the config gives an explicit "
+                        "centroid, since a derived centroid is segmentation-dependent.")
     g.add_argument("-fr", "--flexible-rings", action="store_true")
     g.add_argument("-ss", "--split-site", action="store_true")
     g.add_argument("-np", "--no-para", action="store_true")
     g.add_argument("--n-global-search", type=int, default=2000) #8000
     g.add_argument("--n-local-search", type=int, default=20) #change here
+    g.add_argument("--local-minimiser", "--local-minimizer",
+                   choices=("nelder-mead", "lbfgs"), default="nelder-mead",
+                   help="Local minimiser used to refine poses, both in the "
+                        "per-iteration refine of the top --n-local-search ants and "
+                        "in the final polish. 'nelder-mead' (default) runs the staged "
+                        "simplex: the 6 rigid-body dims are optimised to convergence, "
+                        "frozen, and only then are the torsions optimised, so coupled "
+                        "slide+torsion motions are unreachable. 'lbfgs' runs one joint "
+                        "projected L-BFGS over all 6+nTors dims using central "
+                        "finite-difference gradients. Try 'lbfgs' when a larger "
+                        "--n-local-search finds the pose but is too slow: a gradient "
+                        "costs 2*D evaluations, so it pays off only when it converges "
+                        "in far fewer iterations than the simplex burns. Set "
+                        "CHEMEM_DOCK_PROFILE=1 to print evals/refine for either.")
     g.add_argument("-br", "--bias-radius", type=float, default=12.0)
     g.add_argument("--cluster-docking", type=float, default=1.0)
     g.add_argument("--energy-cutoff", type=float, default=3.0)
@@ -116,9 +189,102 @@ def add_dock_args(p):
     g.add_argument("--return-n", type=int, default=20)
     g.add_argument("--max-iterations", type=int, default=0)
     g.add_argument("--do-biased-md", action="store_true")
-    g.add_argument("--inner-map-score", type=int, default=1)
-    g.add_argument("--outer-map-score", type=int, default=0)
-    
+    g.add_argument("--inner-map-score", type=int, default=1, choices=(0, 1),
+                   help="Which map score drives the search (ant sampling + inner "
+                        "Nelder-Mead refine): 0 = mutual information, 1 = SCI (default). "
+                        "Scale with --mi-weight / --sci-weight respectively.")
+    g.add_argument("--outer-map-score", type=int, default=0, choices=(0, 1),
+                   help="Which map score drives the final polish, i.e. the score the "
+                        "returned poses are RANKED by: 0 = mutual information (default), "
+                        "1 = SCI. Set both --inner-map-score and --outer-map-score to the "
+                        "same value to use one map term throughout.")
+    g.add_argument("--dock-full-map", action="store_true",
+                   help="Score the docking map term (MI/SCI) against the FDR confidence map "
+                        "cropped to the binding-site box, instead of the alpha-masked / "
+                        "blob-segmented site map. The crop is bit-exact on the same grid. "
+                        "Also makes sites that segmentation dropped entirely dockable again. "
+                        "NOTE the full map contains protein density and is not on the same "
+                        "amplitude scale as the segmented map (which is multiplied by a "
+                        "boundary EDT), so --mi-weight/--sci-weight need recalibrating and "
+                        "absolute dock scores are NOT comparable across modes. Makes "
+                        "--refine-to-diff-map a no-op.")
+    g.add_argument("--echo-weights", type=str, default=None,
+                   help="Path to a JSON of ECHO per-term weights (ECHOWeights field names) "
+                        "used to drive the ACO search; overrides the compiled default_v1.")
+    g.add_argument("--fast-sample", action="store_true",
+                   help="(--dock2 only) score the ant-sampling stage with fast per-atom vdW "
+                        "affinity grids (trilinear interpolation) so n-global-search can be cranked; "
+                        "the final poses are still refined/ranked with the full ECHO score. Also "
+                        "switches the R2 refine to the cheap analytic grid L-BFGS minimiser.")
+    g.add_argument("--grid-min-steps", type=int, default=25,
+                   help="(--dock2 --fast-sample) analytic grid L-BFGS iterations in the R2 refine.")
+    g.add_argument("--polish-from-refined", action="store_true",
+                   help="(--dock2) seed the final polish from the R2-REFINED conformer instead of "
+                        "re-deriving the pose from the seed's discrete solution. Without this the "
+                        "refinement is scored and ranked on, then discarded: refinePoseGrid never "
+                        "updates discSol, and the FD path writes back only a 30-degree-quantised "
+                        "approximation, so the polish restarts from a coarser pose than the one "
+                        "that was measured. Off by default (previous behaviour).")
+    g.add_argument("--hbond-geometric-gate", action="store_true",
+                   help="(--dock2) classify an H-bond by GEOMETRY (atom-type mask, donor/"
+                        "acceptor roles, D-H...A angle > 110 deg, distance) instead of by the "
+                        "SIGN of the H-bond polynomial. A short charge-assisted contact such "
+                        "as N...OD2 at 2.27 A currently fails the val<0 test, so its atom is "
+                        "never marked satisfied and it collects unsat_polar and "
+                        "hphob_enc_gt_7_only_hpil_unsat ON TOP of the repulsion -- a double "
+                        "penalty on a real hydrogen bond. This removes only that double "
+                        "count: nonbond_rep is provably unchanged and no weights move. "
+                        "Off by default.")
+    g.add_argument("--torsion-refine-steps", type=int, default=0, metavar="N",
+                   help="(--dock2 --fast-sample) run N iterations of a TORSION-ONLY L-BFGS "
+                        "after the grid refine, with the 6 rigid-body DOFs pinned. Uses the "
+                        "analytic torsion gradient already computed by grid_pose_gradient, so "
+                        "it adds no scorer evaluations beyond its own iterations. Targets the "
+                        "measured failure mode on flexible ligands: the anchor fragment docks "
+                        "correctly while the distal tail stays 3-5 A out, which a coupled "
+                        "rigid+torsion step cannot escape. 0 (default) = off.")
+    g.add_argument("--map-lookup-channel", type=int, default=0, choices=(0, 1, 2, 3, 4, 5),
+                   help="(--dock2) which density field --map-lookup-weight samples: "
+                        "0=ccc0 smoothed local-CC (default), 1=ccc1 gradient, 2=ccc2 "
+                        "Laplacian, 3=RAW density, 4=ccc0+ccc1+ccc2 (SCI-like). Measured "
+                        "native-vs-decoy separation on 9DMU/GAD: raw density 1.87x "
+                        "(|rho| 0.79) vs 1.06-1.12x (|rho| 0.42-0.53) for every CCC "
+                        "variant -- the CCC maps are clamped to [0,1] and nearly flat. "
+                        "5 = raw normalised by its own max: same discrimination as 3 but "
+                        "amplitude-independent, so a weight tuned on one map transfers. "
+                        "Raw values are ~6x larger, so rescale the weight accordingly.")
+    g.add_argument("--map-lookup-full-weight", type=float, default=0.0, metavar="W",
+                   help="(--dock2) weight on the SAME density term inside the FULL score, "
+                        "i.e. the objective the R2 refine and the final polish rank by. "
+                        "The search objective ranks the deposited pose 1st (rho +0.52) "
+                        "while the ranking objective (MI x100) ranks it 6th (+0.43), so "
+                        "this lets the ranker use the term that discriminates. Separate "
+                        "from --map-lookup-weight; 0 (default) leaves score() unchanged.")
+    g.add_argument("--map-lookup-weight", type=float, default=0.0, metavar="W",
+                   help="(--dock2 --fast-sample) weight on a density term in the FAST sampling "
+                        "score: the summed local-CC map value under the ligand heavy atoms, "
+                        "trilinearly interpolated. Without it the ant stage and the grid L-BFGS "
+                        "are completely blind to the density and only the final polish sees the "
+                        "map, so the geometry is chosen before the density is ever consulted. "
+                        "0 (default) reproduces the previous behaviour exactly. Calibrate with "
+                        "echo_score_fast_vs_full; --sci-weight is NOT transferable (it scales a "
+                        "mean of three channels, this is a sum of one).")
+    g.add_argument("--pose-min-rmsd", type=float, default=0.0,
+                   help="(--dock2) finer RMSD for deduping the RETURNED modes (0 -> use the search "
+                        "rms cutoff). Lower keeps more distinct near-native poses. Pair with a large "
+                        "--return-n for recall.")
+    g.add_argument("--energy-range", type=float, default=0.0,
+                   help="(--dock2) return only modes within this score of the best (Vina energy_range; "
+                        "0 -> disabled). Calibrate to ECHO units (~6-8).")
+    g.add_argument("--reference-ligand", type=str, default=None,
+                   help="(--dock2, TEMP diagnostic) native ligand SDF (same atom order as the docked "
+                        "ligand); logs best heavy-atom RMSD-to-native at the sampled/refined/returned "
+                        "stages so you can see where a near-native pose is lost.")
+    g.add_argument("--no-write-site-files", dest="write_site_files", action="store_false",
+                   default=True,
+                   help="Suppress binding-site .mrc/.pdb writes (used by the redock loop to avoid "
+                        "clutter and the output-dir-must-exist error).")
+
 
 
 def alpha_mask_deps(args):
@@ -239,10 +405,10 @@ def add_refine_args(p):
     g.add_argument('--md-restraints', type=str, default = 'sse')
     g.add_argument("--restrain-sidechains", action="store_true",
                    help="")
-    
-    g.add_argument("--global-k", type=float, default=75.0,
-                   help="")
-    
+
+    # --global-k lives in the shared group in __main__.py: it now drives every
+    # minimiser (refine, slr2, ion_fixer, dock, lining_refine), not just this one.
+
     g.add_argument('--local-refine', action="store_true")
     g.add_argument('--local-radius', type=float, default = 12.0)
     g.add_argument('--annealing', action="store_true")   
@@ -269,6 +435,102 @@ def add_mapq_score_args(p):
     g = p.add_argument_group("MapQ Score")
     g.add_argument("--sigma-ref", type=float, default = 0.6)
     p.add_argument("--per-atom", action="store_true", help="Get per atom MapQ scores")
+
+
+def rescore_poses_deps(args):
+    # Same chain as dock. The ECHO precompute needs a binding site, and the map
+    # term needs the segmented site maps -- without them the reported total would
+    # not be the number --dock optimised, which is the whole point.
+    return ("binding_site", "alpha_mask", "confidence_map")
+
+
+def add_rescore_poses_args(p):
+    # Every option is --rescore-*-prefixed on purpose. The parser namespace is
+    # flat and global: bare --rescore already belongs to dock, and the standalone
+    # score_poses/echo_terms tools add bare --rep-max / --interaction-cutoff /
+    # --electro-clamp to build_parser()'s result, so an unprefixed name here
+    # would break them with an argparse conflict.
+    g = p.add_argument_group("Rescore poses (ECHO)")
+    g.add_argument("--rescore-engine", choices=["docking", "docking_v2"],
+                   default="docking",
+                   help="Which compiled ECHO engine to score with. Must match the "
+                        "engine that produced the poses for the totals to be "
+                        "comparable.")
+    g.add_argument("--rescore-site", default=None,
+                   help="Force every pose to be scored against this binding-site "
+                        "key. Default: pick the site whose box contains the pose, "
+                        "else the nearest site centroid.")
+    g.add_argument("--rescore-out", default="rescore",
+                   help="Output subdirectory under the run output directory.")
+    g.add_argument("--rescore-rep-max", type=float, default=None,
+                   help="ECHO repulsion cap. Unset uses --repulsion-cap-polish (the "
+                        "cap the docking engine's final polish scores with, and so "
+                        "the one the returned poses are ranked by). Note this is NOT "
+                        "the run_echo_score pybind default of 5.0; scoring with 5.0 "
+                        "makes every pose look several units better than dock said.")
+    g.add_argument("--rescore-interaction-cutoff", type=float, default=6.0,
+                   help="ECHO interaction cutoff in Angstrom.")
+    g.add_argument("--rescore-electro-clamp", type=float, default=2.0,
+                   help="ECHO electrostatic repulsion clamp.")
+    g.add_argument("--rescore-no-sdf", action="store_true",
+                   help="Write only the CSV; skip the per-ligand rescored SDFs.")
+
+    # --- polar-hydrogen torsion relaxation ---
+    g.add_argument("--rescore-minimise-hydrogens", action="store_true",
+                   help="Relax the ligand's polar (donor N/O/S-H) torsions against "
+                        "ECHO before scoring, so a pose is not penalised for the H "
+                        "placement its SDF happened to carry. Only rotatable donor "
+                        "H's move -- no heavy atom can, by construction -- and bond "
+                        "lengths and X-H angles are never relaxed. These are the "
+                        "same torsions the docking search samples. Because this "
+                        "optimises ECHO with ECHO, the pre-relaxation total is "
+                        "always reported alongside as echo_total_prehmin.")
+    # These three are all cost knobs. One score evaluation costs ~200 ms because
+    # run_echo_score rebuilds the whole precompute per call (the scoring itself
+    # is ~0.05 ms), so relaxation runs at a few seconds per pose. Lower the grid
+    # resolution, the pass count or maxiter to trade accuracy for wall time.
+    g.add_argument("--rescore-h-min-grid", type=float, default=60.0,
+                   help="Coarse scan step in degrees used to seed Nelder-Mead "
+                        "(hydroxyl rotation is multi-minimum and Nelder-Mead is "
+                        "local). Torsions are scanned one at a time, so the cost "
+                        "is passes x torsions x (360/grid) evaluations.")
+    g.add_argument("--rescore-h-min-passes", type=int, default=2,
+                   help="Sweeps over the torsion list during the coarse scan. A "
+                        "second pass picks up coupling between torsions sharing a "
+                        "pivot; 1 is enough for isolated hydroxyls.")
+    g.add_argument("--rescore-h-min-maxiter", type=int, default=100,
+                   help="Nelder-Mead iteration cap for the polish after the scan.")
+
+    # --- protein donor-hydrogen relaxation ---
+    g.add_argument("--rescore-protein-h", action="store_true",
+                   help="Also relax the *protein's* rotatable donor hydrogens (Ser OG, "
+                        "Thr OG1, Tyr OH, Cys SG, Lys NZ) against ECHO for each pose. "
+                        "These are frozen for the whole docking run and, unless "
+                        "--protein-hydrogens prep is given, are not even the prepared "
+                        "ones -- so a real hydrogen bond whose H points the wrong way "
+                        "fails the D-H...A angle gate and is scored as a repulsive "
+                        "contact. Only the hydrogen moves; no heavy atom can, so this "
+                        "is not sidechain flexibility. Rotation is unpenalised (there "
+                        "is no intra-protein term), so the relaxed total is an upper "
+                        "bound on the available gain and echo_total_prot_h_pre is "
+                        "always reported next to it. Writes a per-donor attribution to "
+                        "echo_rescore_protein_h.csv. The protein is restored between "
+                        "poses, so poses stay comparable.")
+    g.add_argument("--rescore-protein-h-grid", type=float, default=30.0,
+                   help="Coarse scan step in degrees for the protein donors. Finer "
+                        "than the ligand default because a hydroxyl aimed at a single "
+                        "acceptor has a narrow optimum; donors are scanned one at a "
+                        "time, so cost is passes x donors x (360/grid) evaluations. "
+                        "Conjugated donors (Tyr OH) ignore this: they have exactly two "
+                        "in-plane orientations.")
+    g.add_argument("--rescore-protein-h-passes", type=int, default=2,
+                   help="Sweeps over the donor list during the coarse scan. Protein "
+                        "donors couple only through the ligand, so a second pass "
+                        "matters mainly when two of them compete for one acceptor.")
+    g.add_argument("--rescore-protein-h-maxiter", type=int, default=100,
+                   help="Nelder-Mead iteration cap for the polish after the scan. "
+                        "Skipped entirely when every donor in range is conjugated, "
+                        "since those coordinates are discrete.")
 
 
 def ion_template_search_deps(args):
@@ -351,9 +613,21 @@ def ion_fixer_deps(args):
 
 def add_ion_fixer_args(p):
     g = p.add_argument_group("Ion Fixer")
-    g.add_argument("--ion-type", type=str)
+    g.add_argument("--ion-type", type=str, help="Ion to place, e.g. MG or ZN. Optional when --ion-spec is given: the type is then inferred from the supplied ion.")
     g.add_argument("--coordination-geometry", type=str, default='Octahedral', help="Coordination geometry : Octahedral |Square Planar | linear | Trigonal Bipyramidal | Triganal Planer | Square Pyrimidal | Tetrahedral | Pentagonal Bipyrimidal")
-    
+
+    g.add_argument(
+        "--ion-spec",
+        dest="ion_spec",
+        type=str,
+        default=None,
+        help=(
+            "Atom specification for an ion ALREADY PRESENT in the input structure. "
+            "When given, no new ion is placed; the coordination distances and angles "
+            "are refined around this ion instead. "
+            "Format example: A:ZN:301:ZN"
+        ))
+
     g.add_argument(
         "--atom-spec",
         dest="atom_specs",
@@ -432,8 +706,9 @@ def add_lining_refine_args(p):
     # --- Refinement ---
     g.add_argument("--lr-neighborhood", type=float, default=10.0,
                    help="Radius around flagged atoms for the refinement subset (Å)")
-    g.add_argument("--lr-global-k", type=float, default=150.0,
-                   help="Density-map global k for the local refinement")
+    g.add_argument("--lr-global-k", type=float, default=None,
+                   help="Density-map global k for the local refinement. Overrides the "
+                        "shared --global-k; both unset means 150.0.")
     g.add_argument("--lr-backbone-k", type=float, default=1000.0,
                    help="Soft positional pin k for non-flagged heavy atoms")
     g.add_argument("--lr-repel-k", type=float, default=500.0,
@@ -1018,14 +1293,19 @@ def add_orchestrate_args(p):
                    help="Per site, keep top-K candidates after Gate 1 ranking.")
     g.add_argument("--orch-gate2-topk", type=int, default=2,
                    help="Per site, keep top-K candidates after Gate 2 ranking.")
+    g.add_argument("--orch-gate3-topk", type=int, default=1,
+                   help="Per site, keep top-K final assignments at Gate 3 (default 1 = single "
+                        "winner; >1 returns ranked alternative solutions per site).")
     g.add_argument("--orch-audit-mode",
                    choices=["full", "scores", "selected", "off"],
                    default="full",
                    help="Persist orchestrator audit outputs: full, scores, selected, or off.")
     g.add_argument("--orch-score-mode",
-                   choices=["absolute", "coverage", "qscore"],
-                   default="absolute",
-                   help="Pose ranking mode: absolute map fit, legacy coverage z-score, or Q-score.")
+                   choices=["absolute", "coverage", "qscore", "evidence"],
+                   default="evidence",
+                   help="Pose ranking mode: absolute map fit, legacy coverage z-score, Q-score, or "
+                        "'evidence' (benchmark-backed: within-case Q-score gating, energy only for the "
+                        "which-ligand tie-break). See the evidence-mode knobs below.")
     g.add_argument("--orch-w-qscore", type=float, default=0.5,
                    help="Weight on Q-score in map-fit ranking.")
     g.add_argument("--orch-w-qtail", type=float, default=0.25,
@@ -1058,6 +1338,31 @@ def add_orchestrate_args(p):
                    help="Reject final sites below this density coverage.")
     g.add_argument("--orch-min-assignment-margin", type=float, default=0.15,
                    help="Reject final sites when the best ligand margin is below this value.")
+    # --- evidence-mode gating (only used when --orch-score-mode evidence) ---
+    g.add_argument("--orch-qscore-floor", type=float, default=0.25,
+                   help="[evidence] Reject a site whose best-candidate Q-score is below this absolute "
+                        "floor (keeps ~95%% of real sites).")
+    g.add_argument("--orch-qscore-strong", type=float, default=0.5,
+                   help="[evidence] A best-candidate Q-score at/above this is 'clearly real' and is "
+                        "accepted regardless of the within-structure relative gate.")
+    g.add_argument("--orch-qscore-accept-z", type=float, default=-0.5,
+                   help="[evidence] Relative decoy gate: a MODERATE site (Q-score below --orch-qscore-"
+                        "strong) is rejected if its Q-score z-scored across the structure's sites is "
+                        "below this. Bypassed for structures with <3 sites or no spread. Raise toward "
+                        "+0.5 for higher precision, lower toward -0.5 for higher recall.")
+    g.add_argument("--orch-wl-energy", choices=["on", "off"], default="on",
+                   help="[evidence] Use the MM-GBSA+overlap blend to disambiguate competing ligands at "
+                        "a site (density_overlap fallback when MM-GBSA fails).")
+    g.add_argument("--orch-wl-margin", type=float, default=0.05,
+                   help="[evidence] Q-score gap within which competing ligands are 'ambiguous' and the "
+                        "energy blend decides the winner.")
+    g.add_argument("--orch-wl-energy-w", type=float, default=0.6,
+                   help="[evidence] Weight on MM-GBSA vs density_overlap in the which-ligand blend "
+                        "(0.6 = 0.6*MM-GBSA + 0.4*overlap, within-site rank).")
+    g.add_argument("--orch-energy-reject", type=float, default=None,
+                   help="[evidence] Optional: reject a site as a fittable decoy if its accepted "
+                        "winner's MM-GBSA deltaG exceeds this (kcal/mol); unset = off (energy targeted "
+                        "to the which-ligand tie-break only).")
     g.add_argument("--orch-expected-assignments", type=str, default=None,
                    help="Optional labelled assignments for audit evaluation, e.g. '7:1,19:1'.")
     g.add_argument("--orch-compute-density-sci", action="store_true",
@@ -1083,11 +1388,13 @@ def add_orchestrate_args(p):
 SHORT_ALIASES = {
     "binding_site": "-b",
     "dock": "-d",
+    "dock2": "-d2",
     "alpha_mask" : "-am",
     "lining_refine": "-lr",
     "ion_template_search": "-its",
     "orchestrate": "-o",
-    "smart_ligand_refine2" : "-slr2"
+    "smart_ligand_refine2" : "-slr2",
+    "rescore_poses": "-rp"
 }
 
 REGISTRY = {
@@ -1121,6 +1428,16 @@ REGISTRY = {
         deps=dock_deps,
         add_args=add_dock_args,
         help="Dock ligands into the binding site",
+    ),
+    # Experimental sampling-efficient engine, fully isolated from `dock` (separate
+    # docking_v2 .so). Shares the Docking CLI flags (add_args=None → no duplicate
+    # argparse options; the flags are registered once by the `dock` spec above).
+    "dock2": ProtocolSpec(
+        name="dock2",
+        class_path="ChemEM.protocols._docking.docking_v2:DockingV2",
+        deps=dock_deps,
+        add_args=None,
+        help="Dock ligands with the experimental v2 engine (L-BFGS + cluster-refine)",
     ),
     "refine": ProtocolSpec(
         name="refine",
@@ -1156,6 +1473,13 @@ REGISTRY = {
         deps=mapq_score_deps,
         add_args=add_mapq_score_args,
         help="Score Ligand MapQ",
+    ),
+    "rescore_poses": ProtocolSpec(
+        name="rescore_poses",
+        class_path="ChemEM.protocols.rescore.rescore_poses:RescorePoses",
+        deps=rescore_poses_deps,
+        add_args=add_rescore_poses_args,
+        help="Rescore poses with ECHO: weighted total + every term, weighted and unweighted",
     ),
     "lining_refine": ProtocolSpec(
         name="lining_refine",

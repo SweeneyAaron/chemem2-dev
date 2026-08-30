@@ -71,7 +71,8 @@ import multiprocessing
 from joblib import Parallel, delayed
 import pickle
 import scipy.ndimage as ndimage
-from ChemEM.parsers.EMMap import EMMap 
+from ChemEM.parsers.EMMap import EMMap
+from ChemEM.tools.density import extract_subvolume_from_grid
 from ChemEM.tools.aromatic_score import AromaticScore
 from ChemEM.tools.halogen_bond_score import HalogenBondScore
 import numpy as np
@@ -92,6 +93,11 @@ from ChemEM.tools.resources import (
     set_native_thread_limit,
     thread_limit_env,
 )
+
+# Fallback ACO seed for callers that build a PreCompDataProtein from an ad-hoc
+# system object with no `dock_seed` (benchmark scripts, score_poses/echo_terms).
+# A real `chemem --dock` run always sets one explicitly. Must be non-zero.
+DEFAULT_DOCK_SEED = 1234567
 
 
 def _attach_attributes(dst, src, *, prefix: str = "") -> None:
@@ -373,6 +379,89 @@ def get_hbond_direction_for_atom(atom, role_int):
     return v / norm
 
 
+def resolve_docking_density_map(system, binding_site):
+    """Return (EMMap|None, source_label) for the grid the docking map term scores against.
+
+    Default: the alpha-masked / blob-segmented per-site map, returned as the *same*
+    object so the default path is bit-identical.
+
+    --dock-full-map: system.confidence_map cropped to the same site box. Every
+    AlphaMask branch derives its site maps from crops of confidence_map, which shares
+    density_map's grid exactly, so the submap is a bit-exact unmasked twin -- no
+    resampling and no sub-voxel shift. Sites that segmentation dropped have no
+    segmented map at all; for those the box comes from the BindingSite geometry,
+    snapped onto the parent grid by extract_subvolume_from_grid.
+    """
+    site_maps = getattr(system, "binding_site_maps", None) or {}
+    entry = site_maps.get(binding_site.key)
+    segmented = entry[0][0] if entry else None
+
+    def _mask_to_accessible(emmap, source):
+        """Zero the confidence-map crop outside the site's own accessible mask.
+
+        The crop is the site's axis-aligned bounding BOX, so for a manual site it
+        carries a lot of protein density the ligand centroid can never occupy -- on
+        9DMU with a 26 A box, 14983 of 35937 voxels are nonzero while only 8389 are
+        accessible. MI and SCI would spend their dynamic range explaining density no
+        pose can account for. `densmap` is that accessible mask, built on the same
+        grid as the crop, so this is a straight elementwise gate.
+
+        Manual sites only: automatic sites keep the documented --dock-full-map
+        behaviour, and their densmap is a pocket-occupancy map, not an ACO mask.
+        """
+        if not getattr(system.options, "manual_site", False):
+            return emmap, source
+        mask = getattr(binding_site, "densmap", None)
+        if mask is None:
+            return emmap, source
+        mask = np.asarray(mask)
+        if mask.shape != emmap.density_map.shape:
+            system.log(f"[dock-map] site {binding_site.key}: accessible mask "
+                       f"{mask.shape} does not match the map crop "
+                       f"{emmap.density_map.shape}; leaving the crop unmasked.")
+            return emmap, source
+        # New array, not in-place: submap()'s result must not alias the parent map.
+        emmap.density_map = emmap.density_map * (mask > 0)
+        return emmap, source + ",site-masked"
+
+    # A manual site is dockable even when segmentation found nothing inside it, so
+    # rather than dropping the map term entirely, fall through to the same crop-the-
+    # confidence-map path --dock-full-map uses. Sites that DO have a blob keep the
+    # segmented map, so this does not change their scoring.
+    manual_rescue = (getattr(system.options, "manual_site", False)
+                     and segmented is None)
+
+    if not getattr(system.options, "dock_full_map", False) and not manual_rescue:
+        if segmented is None:
+            system.log(f"[dock-map] site {binding_site.key} has no segmented density map; "
+                       f"docking it without a map term. Pass --dock-full-map to score it "
+                       f"against the cropped confidence map instead.")
+        return segmented, "segmented"
+
+    parent = getattr(system, "confidence_map", None)
+    if parent is None or getattr(parent, "density_map", None) is None:
+        _who = "--manual-site" if manual_rescue else "--dock-full-map"
+        system.log(f"[dock-map] {_who} needs the cropped confidence map but none is "
+                   "available; falling back to the segmented site map.")
+        return segmented, "segmented(no-parent-fallback)"
+
+    if segmented is not None:
+        # Same box, bit-exact grid alignment -> pure value swap.
+        unmasked = parent.submap(origin=segmented.origin,
+                                 box_size=segmented.density_map.shape)
+        unmasked.resolution = segmented.resolution
+        return _mask_to_accessible(unmasked, "full(site-blob-box)")
+
+    # Gate-relaxed path: this site has no segmented density at all.
+    unmasked = extract_subvolume_from_grid(parent.origin,
+                                          np.array(parent.apix),
+                                          parent.density_map,
+                                          binding_site.box_size,
+                                          grid_origin=binding_site.origin,
+                                          resolution=parent.resolution)
+    return _mask_to_accessible(unmasked, "full(binding-site-box,unsegmented)")
+
+
 class PreCompDataProtein:
     def __init__(self,
                  binding_site,
@@ -404,13 +493,47 @@ class PreCompDataProtein:
         self.iterations = system.options.max_iterations
         self.inner_map_score = system.options.inner_map_score
         self.outer_map_score = system.options.outer_map_score
+        # Base seed for the ACO search RNG. Docking resolves this once per run (random
+        # unless --dock-seed is given) and writes it back onto system.options, so every
+        # site and ligand in the run shares it. getattr default keeps the ad-hoc system
+        # objects in benchmark/ and score_poses/ working.
+        self.dock_seed = int(getattr(system.options, "dock_seed", None) or DEFAULT_DOCK_SEED)
+        # Local minimiser for the inner refine AND the final polish (--local-minimiser).
+        # 0 = staged Nelder-Mead (default, historical behaviour), 1 = joint projected
+        # L-BFGS with FD gradients. Sent as an int to match inner/outer_map_score.
+        self.local_minimiser = 1 if str(
+            getattr(system.options, "local_minimiser", "nelder-mead")) == "lbfgs" else 0
+        # fast grid-approximate sampling score (docking_v2 --fast-sample); off by default
+        self.fast_sample = bool(getattr(system.options, "fast_sample", False))
+        # analytic grid-L-BFGS iterations in the R2 refine (only used when fast_sample)
+        self.grid_min_steps = int(getattr(system.options, "grid_min_steps", 25))
+        # Seed the final polish from the R2-refined conformer instead of re-deriving the pose
+        # from the seed's discrete (30 deg-quantised) solution, which discards the refinement.
+        # docking_v2 only; ignored by the baseline engine. Default False = previous behaviour.
+        self.polish_from_refined = bool(getattr(system.options, "polish_from_refined", False))
+        # 0=ccc0 smoothed, 1=ccc1 gradient, 2=ccc2 laplacian, 3=raw density, 4=ccc0+1+2
+        self.map_lookup_channel = int(getattr(system.options, "map_lookup_channel", 0))
+        self.torsion_refine_steps = int(getattr(system.options, "torsion_refine_steps", 0))
+        self.hbond_geometric_gate = bool(getattr(system.options, "hbond_geometric_gate", False))
+        # recall-oriented return: finer output-dedup RMSD + energy window (0 -> use rms_cutoff / off)
+        self.pose_min_rmsd = float(getattr(system.options, "pose_min_rmsd", 0.0))
+        self.energy_range = float(getattr(system.options, "energy_range", 0.0))
         
         
 
         
         #-----protein data------
         self.residues = binding_site.lining_residues
-        self.protein_positions = binding_site.rdkit_lining_mol.GetConformer().GetPositions()
+        # A site whose builder forgot to populate rdkit_lining_mol used to surface here as a
+        # bare "'NoneType' object has no attribute 'GetConformer'", with no hint of which
+        # site or which builder was at fault. Name it instead.
+        lining_mol = binding_site.rdkit_lining_mol
+        if lining_mol is None:
+            raise ValueError(
+                f"Binding site {binding_site.key} (source={binding_site.source!r}) has no "
+                "rdkit_lining_mol; the site builder did not populate it."
+            )
+        self.protein_positions = lining_mol.GetConformer().GetPositions()
         self.protein_pdb_atom_ids = []
         self.protein_atom_types = []
         self.protein_atom_roles = []
@@ -456,14 +579,14 @@ class PreCompDataProtein:
                     
         self.protein_atom_types  = np.array(self.protein_atom_types, dtype=np.int32)
         self.protein_atom_roles = np.array(self.protein_atom_roles, dtype=np.int32)
-        self.protein_radii = np.array([get_vdw_radius(i.GetSymbol()) for i in binding_site.rdkit_lining_mol.GetAtoms()])
-        self.protein_hydrogens = get_protein_hydrogen_reference(binding_site.rdkit_lining_mol)
+        self.protein_radii = np.array([get_vdw_radius(i.GetSymbol()) for i in lining_mol.GetAtoms()])
+        self.protein_hydrogens = self._protein_hydrogen_coords(binding_site, lining_mol, system)
         
         #Don't need charges any more because the grid is computed already 
         self.protein_ring_types, self.protein_ring_coords, self.protein_ring_idx = compute_protein_ring_types(binding_site.lining_residues, self.protein_positions)
         self.protein_ring_type_ints= np.array([i.idx for i in self.protein_ring_types], dtype=np.int32)
         #has lining mol change
-        self.halogen_bond_acceptor_indices, self.halogen_bond_acceptor_root_indices = compute_halogen_bond_data(binding_site.rdkit_lining_mol, self.protein_atom_types, HALOGEN_ACCEPTOR_ATOM_IDXS)
+        self.halogen_bond_acceptor_indices, self.halogen_bond_acceptor_root_indices = compute_halogen_bond_data(lining_mol, self.protein_atom_types, HALOGEN_ACCEPTOR_ATOM_IDXS)
         
         
         self.protein_ion_mask = np.array(self.protein_atom_types == 44).astype(np.int32)
@@ -489,17 +612,49 @@ class PreCompDataProtein:
         self.apix = grid_apix #no longer needed
         
         
+        # Bias centre / radius.
+        #
+        # The site key was used as a POSITIONAL INDEX into the user's centroid list.
+        # That holds for sites the BindingSite protocol builds (keyed by centroid
+        # index) but not for alpha-mask-derived sites, which are keyed from a feature
+        # counter: with one `centroid =` and a site keyed 5, `len(centroid) <= key`
+        # was true, so the caller's --bias-radius was silently discarded and replaced
+        # by the enclosing radius of every translation point. The flag applied to some
+        # sites of a run and not others.
+        #
+        # Positional lookup is kept as-is so existing runs are unchanged; the new part
+        # is only the fallback, which asks whether a user centroid actually lies in
+        # this site before giving up on it.
         key = int(binding_site.key)
-        if system.centroid is None or len(system.centroid) <= key:
+        user_centroids = system.centroid if system.centroid is not None else []
+        chosen_centroid = None
+
+        if key < len(user_centroids):
+            chosen_centroid = np.asarray(user_centroids[key], dtype=float).reshape(3)
+        elif len(user_centroids):
+            box = getattr(binding_site, "box_size", None)
+            if box is not None:
+                # Same box convention as AlphaMask.handle_centroids, which is what
+                # decided this site was worth keeping: box_size is (nz,ny,nx).
+                lo = np.asarray(binding_site.origin, dtype=float).reshape(3)
+                hi = lo + (np.asarray(binding_site.apix, dtype=float)
+                           * np.array([box[2], box[1], box[0]], dtype=float))
+                for cand in user_centroids:
+                    cand = np.asarray(cand, dtype=float).reshape(3)
+                    if np.all(cand > lo) and np.all(cand < hi):
+                        chosen_centroid = cand
+                        break
+
+        if chosen_centroid is None:
             translation_coords = covert_idx_to_coords(np.array(self.translation_points),
                                                       binding_site.origin,
                                                       binding_site.apix
                                                       )
             centroid, radius = centroid_and_radius(translation_coords)
-            self.binding_site_centroid = centroid 
+            self.binding_site_centroid = centroid
             self.bias_radius = radius
-        else :
-            self.binding_site_centroid = system.centroid[key]
+        else:
+            self.binding_site_centroid = chosen_centroid
             self.bias_radius = bias_radius
             
         
@@ -517,10 +672,24 @@ class PreCompDataProtein:
             
             
             atoms, positions, atom_radii = get_position_input(system.protein.complex_structure)
-            zero_grid_origin, zero_grid = make_zero_grid(positions,
-                                               spacing = grid_spacing,
-                                               padding = pad_box
-                                               )
+
+            # Grid lattice anchoring. 'off' keeps the whole-protein bounding-box
+            # origin (bit-for-bit previous behaviour); the other modes make the
+            # lattice phase independent of distant atoms. See make_lattice_grid.
+            lattice_anchor = str(getattr(system.options, "echo_lattice_anchor", "off"))
+            if lattice_anchor == "off":
+                zero_grid_origin, zero_grid = make_zero_grid(positions,
+                                                   spacing = grid_spacing,
+                                                   padding = pad_box
+                                                   )
+            else:
+                lat0 = ((0.0, 0.0, 0.0) if lattice_anchor == "global"
+                        else self.binding_site_centroid)
+                zero_grid_origin, zero_grid = make_lattice_grid(positions,
+                                                   spacing = grid_spacing,
+                                                   padding = pad_box,
+                                                   lattice_origin = lat0
+                                                   )
                 
                 
                 
@@ -544,7 +713,8 @@ class PreCompDataProtein:
 
                 # optional tuning knobs to keep your old behavior adjustable
                 crop_box_size=(30, 30, 30),
-                electro_cutoff=12.0)
+                electro_cutoff=12.0,
+                lattice_anchor=(lattice_anchor != "off"))
             
             
             
@@ -857,11 +1027,23 @@ class PreCompDataProtein:
         
         #add maps 
         #-----Add the density map----
+        density_map = None
         if not system.options.no_map and hasattr(system,'binding_site_maps') :
+            density_map, _map_src = resolve_docking_density_map(system, binding_site)
+
+        if density_map is not None:
             self.no_map = False
-            density_map = system.binding_site_maps[binding_site.key][0][0]
-            
-            self.binding_site_density_map_grid = density_map.density_map 
+            _term = {0: "MI", 1: "SCI"}
+            system.log(f"[dock-map] site {binding_site.key}: source={_map_src} "
+                       f"box(zyx)={tuple(density_map.density_map.shape)} "
+                       f"origin={tuple(float(o) for o in density_map.origin)} "
+                       f"nonzero={int(np.count_nonzero(density_map.density_map))} "
+                       f"inner={_term.get(self.inner_map_score, self.inner_map_score)} "
+                       f"outer={_term.get(self.outer_map_score, self.outer_map_score)} "
+                       f"mi_weight={system.options.mi_weight} "
+                       f"sci_weight={system.options.sci_weight}")
+
+            self.binding_site_density_map_grid = density_map.density_map
             self.binding_site_density_map_apix = density_map.apix 
             self.binding_site_density_map_origin = density_map.origin
             self.binding_site_density_map_resolution = density_map.resolution
@@ -889,6 +1071,62 @@ class PreCompDataProtein:
             self.mi_weight = 0.0
         
             
+    @staticmethod
+    def _protein_hydrogen_coords(binding_site, lining_mol, system):
+        """Protein hydrogen coordinates for the ECHO H-bond term.
+
+        Two sources, selected by ``--protein-hydrogens``:
+
+        ``rdkit`` (default)
+            ``Chem.AddHs(addCoords=True)`` on the heavy-atom-only lining mol.
+            This *discards* the prepared placement: the site mol has already been
+            through ``RemoveHs`` (biomolecule.py), so every hydrogen is rebuilt
+            from idealised geometry. For donors whose H is fixed by topology
+            (backbone N, Trp NE1, His ring, the planar Arg/Asn/Gln amides) that is
+            harmless. For the freely rotatable ones -- Ser OG, Thr OG1, Tyr OH,
+            Cys SG, Lys NZ -- RDKit picks an essentially arbitrary torsion, and
+            the H-bond term reads that angle directly (ScoringFunctions.cpp:344
+            gates on D-H...A > 110 deg). A real hydrogen bond whose H happens to
+            point away then falls through to the plain Buckingham term, which at
+            ~2.7 A is repulsive.
+
+        ``prep``
+            The hydrogens the protein preparation actually placed and minimised
+            (protonation.py's ``Modeller.addHydrogens``), carried through by
+            ``write_residues_to_pdb(return_hydrogens=True)``. Still ligand-blind,
+            but at least it is a measurement rather than a default.
+
+        ``rdkit`` remains the default deliberately: switching sources moves every
+        ECHO score, and the fitted ECHO weights were derived against the RDKit
+        placement. Flipping the default is a re-baselining decision that needs the
+        benchmark behind it, not a side effect of this plumbing existing.
+        """
+        source = str(getattr(getattr(system, "options", None),
+                             "protein_hydrogens", "rdkit") or "rdkit")
+
+        if source == "prep":
+            prepped = getattr(binding_site, "lining_hydrogens", None)
+            if prepped is None:
+                # Not protonated upstream; AddHs is the only thing left.
+                if hasattr(system, "log"):
+                    system.log(
+                        f"[precompute] site {binding_site.key}: --protein-hydrogens prep "
+                        "requested but the site carries no prepared hydrogens; "
+                        "falling back to Chem.AddHs."
+                    )
+            elif len(prepped) != lining_mol.GetNumAtoms():
+                # The two must be index-aligned -- protein_hydrogens[i] is indexed
+                # by the same i as protein_positions in the C++ (PreComputedData.cpp:148).
+                raise ValueError(
+                    f"Binding site {binding_site.key}: prepared hydrogen reference has "
+                    f"{len(prepped)} entries but rdkit_lining_mol has "
+                    f"{lining_mol.GetNumAtoms()} atoms."
+                )
+            else:
+                return prepped
+
+        return get_protein_hydrogen_reference(lining_mol)
+
     def __add__(self, other):
         """
         protein + ligand  ->  new protein object with ligand attrs added
@@ -1191,6 +1429,50 @@ def make_zero_grid(atom_coords,
     # Zero-filled grid, axis order (Z, Y, X)
     grid = np.zeros((nz, ny, nx), dtype=float)
 
+    return origin, grid
+
+
+def snap_point_to_grid(point, origin, spacing):
+    """Nearest lattice node to `point` on the grid defined by (origin, spacing)."""
+    origin = np.asarray(origin, dtype=float)
+    return origin + np.round((np.asarray(point, dtype=float) - origin) / float(spacing)) * float(spacing)
+
+
+def make_lattice_grid(atom_coords, spacing=1.0, padding=2.0, lattice_origin=(0.0, 0.0, 0.0)):
+    """`make_zero_grid` with the origin snapped DOWN onto an absolute lattice.
+
+    `make_zero_grid` puts the origin at `coords.min(axis=0) - padding`, so the
+    lattice PHASE is set by whichever atom happens to sit at the protein's
+    extremity. Those are often rebuilt, poorly-determined atoms tens of Angstrom
+    from the binding site, and moving one slides the whole sampling lattice: the
+    scorer reads these grids by trilinear interpolation, so a sub-voxel shift
+    changes `electro_attractive` even though no physics changed. Measured on 9e26
+    before protein prep was made deterministic: parent origin moved 3.02 A, grid
+    shape changed by up to 4 voxels, and the cropped site sub-box shifted 0.358 A.
+
+    Snapping the origin to `{lattice_origin + i*spacing}` makes the phase a
+    function of `lattice_origin` alone. Extent is unchanged in meaning -- the grid
+    still strictly contains `coords +/- padding` -- and each axis grows by at most
+    one voxel.
+    """
+    coords = np.asarray(atom_coords, dtype=float)
+    if coords.ndim != 2 or coords.shape[1] != 3:
+        raise ValueError("atom_coords must be shape (N, 3)")
+
+    spacing = float(spacing)
+    lat0 = np.asarray(lattice_origin, dtype=float).reshape(3)
+
+    mins = coords.min(axis=0) - padding
+    maxs = coords.max(axis=0) + padding
+
+    # Snap DOWN so the grid still covers `mins`.
+    origin = np.floor((mins - lat0) / spacing) * spacing + lat0
+
+    # Count from the snapped origin, NOT from mins -- measuring from mins loses
+    # coverage of the top face by up to one voxel.
+    n = np.ceil((maxs - origin) / spacing).astype(int) + 1
+
+    grid = np.zeros((int(n[2]), int(n[1]), int(n[0])), dtype=float)
     return origin, grid
 
 
@@ -2406,7 +2688,19 @@ def export_torsion_profile(ligand,
         force.setForceGroup(force_group)
         force_group += 1
         
-    torsion_force, force_index = get_periodic_torsion_force(system)
+    _tf = get_periodic_torsion_force(system)
+    if _tf is None:
+        # No periodic-torsion terms (e.g. a harmonic-fallback ligand for boron/exotic
+        # elements). Emit a FLAT profile per rotatable bond (no barrier) so the C++
+        # engine still gets one profile per torsion — returning an empty list makes
+        # the search segfault.
+        idx_to_name = {a.idx: a.name for a in ligand.complex_structure.atoms}
+        flat = [(float(ang), 0.0) for ang in range(0, 360, 1)]
+        return [[[idx_to_name.get(t[0]), idx_to_name.get(t[1]),
+                  idx_to_name.get(t[2]), idx_to_name.get(t[3])],
+                 [t[0], t[1], t[2], t[3]], list(flat)]
+                for t in torsion_lists]
+    torsion_force, force_index = _tf
     lig_copy = Chem.AddHs(ligand.mol, addCoords = True)
     all_torsion_profiles = []
     for torsion in torsion_lists:
@@ -2443,8 +2737,14 @@ def export_torsion_profile(ligand,
         min_energy = min([i[1] for i in torsion_profile])
         torsion_profile = [(round(i[0],3) , i[1] - min_energy ) for i in torsion_profile]
         max_energy = max([i[1] for i in torsion_profile])
-        
-        torsion_profile = [(round(i[0],3) , i[1] / max_energy ) for i in torsion_profile]
+
+        # A flat profile (max_energy == 0) happens for rigid / harmonic-fallback
+        # ligands with no torsion barrier — normalise to a flat zero instead of
+        # dividing by zero.
+        if max_energy > 0:
+            torsion_profile = [(round(i[0],3) , i[1] / max_energy ) for i in torsion_profile]
+        else:
+            torsion_profile = [(round(i[0],3) , 0.0) for i in torsion_profile]
         
         # Step 3: Rescale to -1 to 1
         #torsion_profile = [(round(i[0]), 2 * i[1] - 1) for i in torsion_profile]
@@ -2938,6 +3238,118 @@ def remove_bonds_from_mol(mol, bonds_to_break):
 
 def get_ligand_heavy_atom_indexes( mol):
     return np.array([atom.GetIdx() for atom in mol.GetAtoms() if atom.GetSymbol() != 'H'])
+
+
+def _covalent_r0_angstrom(spec):
+    """Equilibrium warhead-anchor distance in Angstrom for a CovalentLinkSpec.
+
+    Prefers the OpenFF-derived junction bond length (parmed BondType.req, which is
+    already in Angstrom); guards against an accidental nm-scaled value and falls
+    back to a generic covalent single-bond length. Raises if the result is not a
+    physically plausible bond length so a wrong unit fails loudly rather than
+    pulling the warhead into a catastrophic clash.
+    """
+    jbp = getattr(spec, "junction_bond_params", None)
+    if jbp is not None and len(jbp) >= 2 and jbp[1] is not None:
+        req = float(jbp[1])
+        r0 = req * 10.0 if req < 0.5 else req      # nm -> Angstrom guard
+    else:
+        r0 = 1.8                                    # generic covalent single bond
+    if not (0.5 < r0 < 3.0):
+        raise ValueError(
+            f"[covalent] resolved bond length r0={r0:.3f} A is outside the expected "
+            "covalent range (0.5-3.0 A); check junction_bond_params units."
+        )
+    return r0
+
+
+def resolve_covalent_anchors(ligand, precomp_protein, protein_structure):
+    """Resolve the covalent-docking anchors for a ligand's covalent bonds.
+
+    The protein is rigid during the C++ search, so each covalent bond is enforced
+    by tethering its ligand warhead heavy atom to a fixed protein point. A
+    crosslinker with two bonds yields two anchors, both of which are tethered.
+
+    Returns a list of (warhead_heavy_idx, anchor_prot_idx_or_None, anchor_xyz,
+    r0_A, k) — empty when the ligand has no covalent link.
+      - warhead_heavy_idx : index of the warhead in the ligand HEAVY-atom order used
+                            by the C++ scorer (0..heavy_end).
+      - anchor_prot_idx   : index into precomp_protein.protein_positions (the C++
+                            ProteinData order) of the covalent protein atom, or None
+                            if it is not in the docking lining set (then only the
+                            penalty applies; the clash-exclusion is skipped).
+      - anchor_xyz        : (x, y, z) Angstrom of the covalent protein atom.
+      - r0_A              : equilibrium warhead-anchor distance in Angstrom.
+      - k                 : penalty stiffness.
+    """
+    specs = getattr(ligand, "covalent_links", None) or []
+    return [
+        _resolve_one_covalent_anchor(ligand, spec, precomp_protein, protein_structure)
+        for spec in specs
+    ]
+
+
+def _resolve_one_covalent_anchor(ligand, spec, precomp_protein, protein_structure):
+    """Resolve a single covalent bond's warhead/anchor tuple. See
+    resolve_covalent_anchors for the field meanings."""
+    # --- warhead heavy-atom index in the ligand scorer order ---
+    lig_atom_name = spec.resolved_ligand_atom_name
+    if lig_atom_name is None:
+        lig_atom_name = spec.ligand_atom_spec.split(":")[-1]
+    rdkit_idx = ligand.get_atom_idx_from_name(lig_atom_name)
+    if rdkit_idx is None:
+        raise RuntimeError(f"[covalent] warhead atom '{lig_atom_name}' not found in ligand.")
+    heavy_idxs = list(get_ligand_heavy_atom_indexes(ligand.mol))
+    if rdkit_idx not in heavy_idxs:
+        raise RuntimeError(f"[covalent] warhead atom '{lig_atom_name}' is not a heavy atom.")
+    warhead_heavy_idx = heavy_idxs.index(rdkit_idx)
+
+    # --- protein anchor: index into protein_positions (C++ frame) + coordinate ---
+    resname  = spec.resolved_protein_resname
+    resnum   = spec.resolved_protein_resnum
+    atomname = spec.resolved_protein_atom_name
+    chain    = spec.resolved_protein_chain
+
+    prot_pos = np.asarray(precomp_protein.protein_positions, dtype=float)
+    anchor_prot_idx = None
+    anchor_xyz = None
+    walk_idx = 0
+    for res in precomp_protein.residues:
+        for atom in res.atoms:
+            if atom.element_name == "H":
+                continue
+            if (res.name == resname and int(res.number) == int(resnum)
+                    and atom.name == atomname
+                    and (chain is None or str(res.chain) == str(chain))):
+                anchor_prot_idx = walk_idx
+                if walk_idx < prot_pos.shape[0]:
+                    anchor_xyz = prot_pos[walk_idx]
+                break
+            walk_idx += 1
+        if anchor_prot_idx is not None:
+            break
+
+    if anchor_xyz is None:
+        # Anchor residue is not in the docking lining set: fall back to the
+        # authoritative coordinate from the full protein structure. The penalty
+        # still applies; the nonbond clash-exclusion is skipped (no protein index).
+        from ChemEM.parsers.covalent_fragment import _find_complex_atom
+        atom = _find_complex_atom(protein_structure, resname, atomname,
+                                  resnum=resnum, chain=chain)
+        if atom is None:
+            raise RuntimeError(
+                f"[covalent] anchor atom {chain}:{resname}:{resnum}:{atomname} not found "
+                "in the protein structure."
+            )
+        anchor_xyz = np.array([atom.xx, atom.xy, atom.xz], dtype=float)
+        anchor_prot_idx = None
+        print(f"[covalent] anchor {chain}:{resname}:{resnum}:{atomname} not in docking "
+              "lining set; using explicit coordinate (clash-exclusion disabled).")
+
+    r0_A = _covalent_r0_angstrom(spec)
+    k = 10.0
+
+    return warhead_heavy_idx, anchor_prot_idx, np.asarray(anchor_xyz, dtype=float), r0_A, k
 
 def get_hbond_role_int(atom_type):
     """
@@ -4197,6 +4609,7 @@ def build_site_maps_standalone(
     # optional tuning knobs to keep your old behavior adjustable
     crop_box_size=(30, 30, 30),
     electro_cutoff=12.0,
+    lattice_anchor=False,
 ):
     """
     One fully-standalone pipeline that replaces the block you showed.
@@ -4217,9 +4630,17 @@ def build_site_maps_standalone(
           'delta_sasa_map'
         }
     """
-    
+
+    # With an anchored lattice, snap the centroid onto it too. Both consumers of
+    # the centroid feed it to crop_map_around_point, whose
+    # `ix_c = int(round((center - origin)/apix))` is a knife-edge rounding; an
+    # exact lattice node makes the sub-box index a pure function of the centroid
+    # rather than of where the parent lattice happens to fall.
+    if lattice_anchor:
+        system_centroid = snap_point_to_grid(system_centroid, grid_origin, grid_spacing)
+
     # 1) SASA / delta SASA
-    #bulk_solvent_mask, protein_mask, sasa_mask, delta_sasa_map 
+    #bulk_solvent_mask, protein_mask, sasa_mask, delta_sasa_map
     bulk_solvent_mask, protein_mask, sasa_mask = final_sasa_mask_standalone(
         positions=positions,
         atom_radii=atom_radii,

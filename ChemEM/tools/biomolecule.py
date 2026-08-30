@@ -101,9 +101,28 @@ def sse_groups_from_parmed(
 
 
 
-def write_residues_to_pdb(bounding_residues, positions, pdb_path=None, write=False):
-    
-   
+# Records each RDKit atom's index into `selected_atoms`, so the heavy atoms that
+# survive RemoveHs can still be traced back to their ParmEd atom. RemoveHs is not
+# guaranteed to drop every hydrogen (it keeps degree-zero and other "meaningful"
+# ones), so the survivors cannot be identified by counting.
+_SEL_IDX_PROP = "_parmedSelIdx"
+
+
+def write_residues_to_pdb(bounding_residues, positions, pdb_path=None, write=False,
+                          return_hydrogens=False):
+    """Build the heavy-atom RDKit view of a residue selection.
+
+    With ``return_hydrogens=True`` this returns ``(mol, hydrogen_ref)``, where
+    ``hydrogen_ref[i]`` holds the coordinates of the hydrogens bonded to
+    ``mol``'s atom ``i`` *as the input structure placed them*. That matters
+    because the ECHO H-bond term scores real D-H...A geometry
+    (ScoringFunctions.cpp:312-334): without this the caller has to re-derive the
+    hydrogens with ``Chem.AddHs``, which discards the prepared placement and puts
+    every rotatable donor (Ser/Thr/Tyr OH, Cys SH, Lys NH3+) at an arbitrary
+    torsion. ``hydrogen_ref`` is None when the structure carries no hydrogens at
+    all, which the caller must handle by falling back to ``AddHs``.
+    """
+
     selected_atoms = []
     for res in bounding_residues:
        for atom in res.atoms:  # iterate atoms in the ParmEd Residue
@@ -127,6 +146,7 @@ def write_residues_to_pdb(bounding_residues, positions, pdb_path=None, write=Fal
         rd_atom.SetProp("atomName", atom.name)
         rd_atom.SetProp("resName", atom.residue.name)
         rd_atom.SetProp("resId", str(getattr(atom.residue, 'number', atom.residue.idx + 1 if hasattr(atom.residue, 'idx') else 0)))
+        rd_atom.SetIntProp(_SEL_IDX_PROP, atom_index[atom])
         mol_idx = mol.AddAtom(rd_atom)
         
     
@@ -232,11 +252,39 @@ def write_residues_to_pdb(bounding_residues, positions, pdb_path=None, write=Fal
         print(f"RDKit sanitization failed: {e}")
     
     new_mol = Chem.RemoveHs(new_mol)
-    
+
     if write and (pdb_path is not None):
         Chem.MolToPDBFile(new_mol, pdb_path)
-    
-    return new_mol
+
+    if not return_hydrogens:
+        return new_mol
+
+    return new_mol, _hydrogen_reference_from_parmed(
+        new_mol, selected_atoms, atom_index, coords
+    )
+
+
+def _hydrogen_reference_from_parmed(mol, selected_atoms, atom_index, coords):
+    """Per-heavy-atom hydrogen coordinates, in `mol`'s own atom order.
+
+    Walks ParmEd's bond graph rather than RDKit's, because `mol` has already had
+    its hydrogens removed. Returns None when the source structure has no
+    hydrogens, so the caller can tell "not protonated" apart from "protonated but
+    this atom has no H".
+    """
+    if not any(a.atomic_number == 1 for a in selected_atoms):
+        return None
+
+    hydrogen_ref = []
+    for atom in mol.GetAtoms():
+        src = selected_atoms[atom.GetIntProp(_SEL_IDX_PROP)]
+        hydrogen_ref.append([
+            np.asarray(coords[atom_index[p]], dtype=float)
+            for p in src.bond_partners
+            if p.atomic_number == 1 and p in atom_index
+        ])
+
+    return hydrogen_ref
 
 def select_atoms(structure, indices=None, residues=None, include="heavy", exclude_indices=None):
     """
