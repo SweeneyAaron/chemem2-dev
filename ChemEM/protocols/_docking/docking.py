@@ -27,7 +27,6 @@ from rdkit import Chem
 # is unchanged: the same module still backs every call, just loaded on first use.
 from ChemEM.messages import Messages
 from ChemEM.parsers.models import Ligand #stay
-from ChemEM.tools.mmgbsa_score import MMGBSAScore #move
 
 from ChemEM.tools.precomputed_data import PreCompDataLigand, PreCompDataProtein #move 
 from ChemEM.tools.docking import energy_cutoff, write_results, dock_worker#move

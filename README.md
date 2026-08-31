@@ -166,7 +166,7 @@ current working directory.
 Example:
 
 ```bash
-python -m ChemEM 7jjo_conf.txt --dock --no-map --minimize-docking --rescore
+python -m ChemEM 7jjo_conf.txt --dock --no-map --minimize-docking --dock-rescore-mmgbsa
 ```
 
 Quick smoke test for a fresh install:
@@ -264,6 +264,7 @@ chemem <config> [shared options] [protocol selection flags] [protocol options]
 | `--output` | str | `None` | Output directory (overrides config/system default). |
 | `--ncpu` | int | `max(1, os.cpu_count() - 2)` | CPU count used by protocols that parallelize. |
 | `--no-map` | flag | `False` | Disable density-map usage (sets `system.density_map = None`). |
+| `--sigma-ref` | float | `0.6` | Q-score reference Gaussian width (Å). Read by `--score`, `--orchestrate` and `smart_ligand_refine2`. |
 
 ### Protein preparation determinism
 
@@ -444,7 +445,7 @@ chemem <conf_file> -d
 
 | Option | Type | Default | Notes |
 |---|---:|---:|---|
-| `--rescore` | flag | `False` | Rescore generated poses with a single frame MMGBSA). |
+| `--dock-rescore-mmgbsa` | flag | `False` | After docking, score the generated poses with a single-frame MM-GBSA into `mmgbsa_rescore.txt`. (Was `--rescore`, still accepted.) To score poses from a *file*, use `--score --score-with mmgbsa` instead. |
 | `--dock-seed` | int | *random* | Seed for the ACO search. Random each run and always logged. See below. |
 | `--echo-lattice-anchor` | str | `off` | `off` / `global` / `centroid`. Anchor the ECHO grid lattice so distant atoms cannot shift it. See below. |
 | `--flexible-rings` / `-fr` | flag | `False` | Allow hetrocyclic ring flexibility. |
@@ -508,34 +509,75 @@ Caveats:
 
 
 
-## Protocol: `rescore_poses`
+## Protocol: `score`
 
-Re-score poses that already exist with the ECHO scoring function, and report the
-weighted total **plus every individual term, both weighted and unweighted**.
-Poses come from the config, one pose per SDF record:
+Score poses that already exist. One protocol, one CSV, any combination of scorers:
 
 ```bash
-chemem <conf_file> --rescore-poses
+chemem <conf_file> --score --score-with echo,mmgbsa,qscore,density
 # or
-chemem <conf_file> -rp
+chemem <conf_file> -sc --score-with all
 ```
 
-with either `ligand = poses.sdf` (a multi-record SDF, e.g. the output of a
-previous `--dock`) or `ligands_from_dir = <dir>`. Like docking, it depends on
-`binding_site` / `alpha_mask` / `confidence_map`, which run first.
+Poses come from the config, one pose per SDF record — either `ligand = poses.sdf`
+(a multi-record SDF, e.g. the output of a previous `--dock`) or
+`ligands_from_dir = <dir>`. `--score` also composes with `--dock` in one run, in
+which case it scores the poses docking just produced.
 
-Output lands in `<output>/rescore/`:
+This replaces four separate things: the `--rescore-poses` and `--mapq-score`
+protocols and the unregistered `score_poses` / `echo_terms` scripts.
+`--rescore-poses`/`-rp` and `--mapq-score` still work as deprecated aliases; they
+select the right scorer, print a deprecation notice and write the new output layout.
 
-| File | Contents |
-|---|---|
-| `echo_rescore.csv` | one row per pose: `echo_total`, `echo_linear`, `map_score`, `bias`/`constraint`/`covalent`, `raw_<term>` for all 22 channels and `w_<term>` for the 17 that carry a weight |
-| `echo_weights.json` | the exact `ECHOWeights` used, so the CSV is self-describing |
-| `<stem>_rescored.sdf` | the poses ranked best-first, every term as an SD property |
+### Scorers
 
-The terms reconcile with the total exactly, matching `ECHOScore::score`:
+`--score-with` takes a comma-separated list (repeatable, and `all` selects every
+scorer). **The order matters**: it is the column order in the CSV, and the first
+scorer's headline column is the default ranking. Bare `--score` means `echo`.
+
+| Scorer | Headline column | Needs | Cost |
+|---|---|---|---|
+| `echo` | `echo_total` | binding site + segmentation | ~15 s/pose |
+| `mmgbsa` | `mmgbsa` | prepared receptor | ~20 s/pose |
+| `qscore` | `qscore` | density map | ~0.2 s/pose |
+| `density` | `density_overlap` | density map | ~1 s/pose |
+| `strain` | `ligand_strain` | nothing | negligible |
+| `clash` | `protein_ligand_clash_penalty` | prepared receptor | negligible |
+
+**Dependencies are per-scorer.** `--score` is the only protocol whose `deps()`
+reads the CLI flags: `--score-with echo` pulls in
+`binding_site` → `alpha_mask` → `confidence_map`, while `--score-with qscore`
+runs none of them. Scoring Q-score alone therefore no longer pays for
+segmentation, which `--mapq-score` did not either but `--rescore-poses` always did.
+
+### Output
+
+Lands in `<output>/score/` (`--score-out` to change the subdirectory):
+
+| File | When | Contents |
+|---|---|---|
+| `pose_scores.csv` | always | one row per pose: identity, then each scorer's headline, then each scorer's detail block, then the status columns |
+| `score_run.json` | always | selected scorers, resolved options, the ECHO weights used, per-scorer timings and failure counts |
+| `pose_scores.json` | `--score-json` | everything the flat CSV cannot hold: per-atom Q-scores, per-feature density metrics, SCI sub-terms |
+| `<stem>_scored.sdf` | `--score-sdf` | poses ranked best-first, every score as an SD property |
+| `echo_protein_h.csv` | `--score-echo-protein-h` | per-donor attribution of the receptor-H relaxation |
+| `<stem>_mmgbsa_minimised.sdf` + `mmgbsa_receptor.pdb` | `--score-mmgbsa-write-minimised` | the pocket-relaxed ligand poses, and the receptor to load them against |
+
+Column names are unchanged from the tools this replaces (`echo_total`, `raw_*`,
+`w_*`, `qscore`, `density_*`, `mmgbsa*`), so existing analysis scripts keep working.
+
+**A scorer that fails does so alone.** Each scorer is guarded per pose; a failure
+writes `<scorer>_error` into that row and the other scorers still report. One
+unscorable pose never costs you the other ninety-nine.
+
+### The ECHO terms
+
+`--score-with echo` reports the weighted total **plus every individual term, both
+weighted and unweighted**. They reconcile with the total exactly, matching
+`ECHOScore::score`:
 
 ```
-echo_total = -(echo_linear + map_score) + bias + constraint + covalent
+echo_total  = -(echo_linear + map_score) + bias + constraint + covalent
 echo_linear = sum(w_<term>)          # over the 17 weighted channels
 ```
 
@@ -545,27 +587,81 @@ are reported for convenience and deliberately excluded from `echo_linear`.
 
 ### Options
 
+Every option is `--score-<scorer>-*` prefixed. The old `--rescore-*` and
+`--per-atom` spellings still work and land on the same values.
+
 | Option | Type | Default | Notes |
 |---|---:|---:|---|
-| `--rescore-engine` | str | `docking` | `docking` or `docking_v2`. Must match the engine that produced the poses. |
-| `--rescore-site` | str | *auto* | Force one binding-site key. Default: the site whose box contains the pose, else the nearest site centroid. |
-| `--rescore-out` | str | `rescore` | Output subdirectory. |
-| `--rescore-rep-max` | float | *`--repulsion-cap-polish`* | Repulsion cap. See the note below — this is **not** 5.0. |
-| `--rescore-interaction-cutoff` | float | `6.0` | ECHO interaction cutoff (Å). |
-| `--rescore-electro-clamp` | float | `2.0` | Electrostatic repulsion clamp. |
-| `--rescore-no-sdf` | flag | `False` | Write only the CSV. |
-| `--rescore-minimise-hydrogens` | flag | `False` | Relax the ligand's polar-H torsions first. See below. |
-| `--rescore-h-min-grid` | float | `60.0` | Coarse scan step (degrees) seeding Nelder-Mead. |
-| `--rescore-h-min-passes` | int | `2` | Sweeps over the torsion list during the scan. |
-| `--rescore-h-min-maxiter` | int | `100` | Nelder-Mead iteration cap. |
+| `--score-with` | list | `echo` | Scorers to run, in column order. `all` selects every one. |
+| `--score-out` | str | `score` | Output subdirectory. |
+| `--score-site` | str | *auto* | Force one binding-site key. Default: the site whose box contains the pose, else the nearest site centroid. |
+| `--score-json` | flag | `False` | Also write `pose_scores.json`. |
+| `--score-sdf` | flag | `False` | Also write ranked SDFs. |
+| `--score-rank-by` | str | *first headline* | Column the SDFs are sorted by. |
+| `--score-echo-engine` | str | `docking` | `docking` or `docking_v2`. Must match the engine that produced the poses. |
+| `--score-echo-rep-max` | float | *`--repulsion-cap-polish`* | Repulsion cap. See below — this is **not** 5.0. |
+| `--score-echo-interaction-cutoff` | float | `6.0` | ECHO interaction cutoff (Å). |
+| `--score-echo-electro-clamp` | float | `2.0` | Electrostatic repulsion clamp. |
+| `--score-echo-minimise-hydrogens` | flag | `False` | Relax the ligand's polar-H torsions first. See below. |
+| `--score-echo-protein-h` | flag | `False` | Also relax the receptor's rotatable donor H's. |
+| `--score-qscore-sigma-ref` | float | *`--sigma-ref`* | Q-score reference Gaussian width. |
+| `--score-qscore-per-atom` | flag | `False` | Record per-atom Q-scores; implies `--score-json`. |
+| `--score-density-region` | str | `full` | `full`, `box` or `site`. See the warning below. |
+| `--score-density-box-size` | float | `24.0` | Cube edge for `--score-density-region box`. |
+| `--score-mmgbsa-minimise` | flag | `False` | Relax the ligand in a pinned pocket first. Strongly recommended on raw docked poses. |
+| `--score-mmgbsa-pocket-radius` | float | `12.0` | Pocket radius for that relaxation. |
+| `--score-mmgbsa-write-minimised` | flag | `False` | Write the relaxed poses out. Requires `--score-mmgbsa-minimise`. |
+
+### Writing out the minimised poses
+
+`--score-mmgbsa-write-minimised` (which requires `--score-mmgbsa-minimise`) writes
+the relaxed geometry the energy was actually evaluated on:
+
+```bash
+chemem <conf> --score --score-with mmgbsa \
+    --score-mmgbsa-minimise --score-mmgbsa-write-minimised
+```
+
+* `<stem>_mmgbsa_minimised.sdf` — one file per input source, holding each pose's
+  relaxed ligand with `mmgbsa` and `mmgbsa_min_shift_A` as SD properties. Atom order
+  matches the parsed input pose, so it diffs cleanly against `--score-sdf` output.
+* `mmgbsa_receptor.pdb` — the receptor, so the SDF has something to load against.
+
+**Only the ligand is minimised.** The pocket residues within
+`--score-mmgbsa-pocket-radius` are included in the truncated minimisation system but
+held by a positional restraint, and `_pocket_minimise` discards their relaxed
+coordinates in favour of the reference ones — the returned complex is
+`reference receptor + relaxed ligand`. So `mmgbsa_receptor.pdb` is the *prepared
+input structure, unchanged*; it is written for convenience, not because it moved.
+The log says so on every run.
+
+The `mmgbsa_minimised_sdf` column in the CSV points each row at its file, and
+`mmgbsa_min_shift_A` is the all-atom RMSD between the input and relaxed pose —
+verified to match the written coordinates to 6 decimal places.
+
+### Three different maps in one row
+
+A row from `--score-with echo,qscore,density` reports three density numbers
+against **three different maps**, and they are not comparable:
+
+* `qscore` — the full `system.density_map`.
+* `density_*` — whatever `--score-density-region` selects. `full` (the default)
+  is the whole map; `box` is a cube around the pose; `site` is the segmented
+  binding-site map, which alpha-mask has multiplied by a boundary EDT (~38×), so
+  its amplitudes are on a completely different scale. `site` is what
+  `--orchestrate` scores against internally.
+* `map_score` (ECHO's) — the segmented site map, or the cropped confidence map
+  under `--dock-full-map`.
+
+`density_region` is recorded on every row and in `score_run.json`.
 
 ### Optional hydrogen relaxation
 
-`--rescore-minimise-hydrogens` relaxes the ligand's polar (donor N/O/S–H)
+`--score-echo-minimise-hydrogens` relaxes the ligand's polar (donor N/O/S–H)
 torsions against ECHO before scoring, so a pose is not penalised for whatever H
 placement its SDF happened to carry. These are the same torsions the ACO search
-already samples (`get_donor_h_torsions` is folded into `get_torsion_lists`), so
-it puts an externally-supplied pose on the same footing as a docked one.
+already samples, so it puts an externally-supplied pose on the same footing as a
+docked one.
 
 Every candidate torsion is filtered through `only_h_moves_on_rotation`, so
 **"ligand hydrogens only" is guaranteed by topology, not by a restraint** — no
@@ -581,11 +677,15 @@ since rotating its pivot moves both H's), and bond lengths and X–H angles are
 never touched. Because this optimises ECHO with ECHO, the pre-relaxation total
 is always reported alongside as `echo_total_prehmin`.
 
+Relaxation runs **before any scorer scores the pose**, and the receptor is
+restored only **after every scorer has read it**. That ordering matters when you
+combine scorers: Q-score, density, strain and clash are heavy-atom only and are
+unaffected, but MM-GBSA is all-atom and does see the relaxed hydrogens.
+
 **Cost:** roughly 10–15 s per pose. Nearly all of it is API overhead —
 `run_echo_score` rebuilds the entire `PreComputedData` object from Python on
 every call, so one evaluation costs ~200 ms even though the scoring itself is
-~0.05 ms. `--rescore-h-min-grid` / `--rescore-h-min-passes` /
-`--rescore-h-min-maxiter` are the cost knobs.
+~0.05 ms. `--score-echo-h-min-grid` / `-passes` / `-maxiter` are the cost knobs.
 
 ### Reproducing a docking score
 
@@ -594,21 +694,27 @@ Two things stand between `echo_total` and the number `--dock` printed:
 1. **The repulsion cap.** `run_aco_docking` ranks and returns its poses from a
    final Nelder-Mead polish at `repCap_final_nm` (`--repulsion-cap-polish`,
    default 15.0), *not* the `rep_max=5.0` default baked into the
-   `run_echo_score` pybind signature. `--rescore-rep-max` therefore defaults to
-   `--repulsion-cap-polish`; scoring at 5.0 makes every pose look several score
-   units better than docking said it was.
-2. **Protein preparation is not reproducible across processes.** PDBFixer's
-   `addMissingAtoms()` runs an OpenMM minimisation on a non-deterministic
-   platform, so every ChemEM process builds slightly different protein
-   coordinates — heavy atoms included. On a heavily-repaired structure this
-   moves an ECHO score by 1–3 units run to run. This is upstream of the
-   re-scorer and affects `--dock` ranking identically. Within a single process
-   the re-scorer is exactly reproducible, so the only way to compare
-   bit-for-bit against a docking run is to rescore in the same invocation.
+   `run_echo_score` pybind signature. `--score-echo-rep-max` therefore defaults
+   to `--repulsion-cap-polish`; scoring at 5.0 makes every pose look several
+   score units better than docking said it was.
+2. **Protein preparation.** It is deterministic and cached by default, but a cold
+   preparation on a different machine still yields slightly different
+   coordinates, and an ECHO score moves with them. This is upstream of scoring
+   and affects `--dock` ranking identically.
 
 `--outer-map-score 1` (SCI) also cannot be reproduced: `run_echo_score` has no
 `use_map_score` argument and always uses mutual information. The protocol logs a
-warning when you ask for it. Every non-map term is unaffected.
+warning when you ask for it. Every non-map term is unaffected. Note this is a
+different quantity from the `density_sci` column, which the density scorer
+computes against its own region map.
+
+### Adding a scorer
+
+One file plus one line. Subclass `PoseScorer`
+(`ChemEM/protocols/score/scorers/base.py`), declare `NAME`, `COLUMNS`,
+`HEADLINE` and `DEPS`, implement `score(pose, row)`, and add an entry to
+`SCORER_REGISTRY` in `ChemEM/protocols/score/scorers/__init__.py`. The registry
+imports lazily, so a new scorer costs nothing to the runs that do not select it.
 
 ---
 

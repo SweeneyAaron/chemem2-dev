@@ -1,28 +1,62 @@
-# --Added density map segemntation and docking protocols 
+# Changelog: Unified pose scoring (`--score`)
 
---cpp scoring functions for sci score and mutual information were added 
---new protocls include alphamask for ligand segmentation
+## 1. Consolidated
+* **One protocol replaces five scattered entry points.** `--score` supersedes the
+  `--rescore-poses` (ECHO) and `--mapq-score` (Q-score) protocols and the two
+  unregistered `ChemEM/protocols/score_poses/` scripts. Scorers are selected with
+  `--score-with echo,mmgbsa,qscore,density,strain,clash`, and every selected scorer
+  contributes its columns to a single `pose_scores.csv`.
+* **Pluggable scorers.** `ChemEM/protocols/score/scorers/base.py` defines a
+  `PoseScorer` interface with a lazy `"module:Class"` registry, mirroring
+  `ProtocolSpec`. Adding a scorer is one file plus one registry line, and selecting
+  `qscore` never imports the compiled ECHO engine or OpenMM.
+* **Deleted duplicates.** `ChemEM/tools/mmgbsa_score.py` and
+  `ChemEM/protocols/_docking/scores/mmgbsa_score.py` (byte-identical, reachable only
+  through a never-instantiated import) are gone.
 
+## 2. Scorer-dependent dependencies
+* `--score` is the first protocol whose `deps()` reads the CLI flags. `--score-with
+  echo` pulls in `binding_site` -> `alpha_mask` -> `confidence_map`; `--score-with
+  qscore` runs none of them. The site list is also built lazily at runtime, so a
+  scorer that does not need a binding site never touches `system.binding_sites`.
 
-# Changelog: Architecture Refactor & Minimization Pipeline
+## 3. Failure containment
+* Each scorer is guarded per pose. A failure writes `<scorer>_error` into that row
+  and the remaining scorers still report, so one unscorable pose no longer costs the
+  whole run or the other scorers' columns.
+* Hydrogen relaxation is now an explicit `pre_score` phase running before *any*
+  scorer, with the receptor restored only after *every* scorer has read it -- MM-GBSA
+  is all-atom and must see the geometry ECHO scored.
 
-## 1. Refactored
-* **Modular Redesign:** Transitioned the minimization pipeline from a monolithic class structure into a decoupled Strategy/Composition pattern.
-* **Separation of Concerns:** System state and environment preparation are now strictly handled by `ChemEMSimulationSetup`, independent of the execution logic.
-* **Dedicated Execution Protocols:** Replaced unified minimization methods with isolated, purpose-built protocol classes (`BatchPoseMinimizer`, `MinimiseInPlace`, and `SimulatedAnnealingInPlace`).
+## 4. Compatibility
+* `--rescore-poses`/`-rp` and `--mapq-score` remain as deprecated aliases: they select
+  the right scorer, warn, and write the new output layout.
+* Every `--rescore-*` and `--per-atom` option spelling still lands on the new dest.
+* Column names are unchanged (`echo_total`, `raw_*`, `w_*`, `qscore`, `density_*`,
+  `mmgbsa*`), so the benchmark scripts that read them by name keep working.
+* `--sigma-ref` moved to the shared option group; it was registered by `mapq_score`
+  but is read by the orchestrator and `smart_refine_2` as well.
+* Dock's bare `--rescore` (post-docking MM-GBSA) is renamed
+  `--dock-rescore-mmgbsa`, with `--rescore` kept as an alias -- it was routinely
+  confused with `--rescore-poses`, which was a different thing entirely.
+* `echo_terms.py` moved to `ChemEM/benchmark/crossdocked/`, where its only importer
+  already lives; its `TERM_COLUMNS` order is frozen but now asserted against the
+  protocol's term table.
 
-## 2. API Unification
-* **Consolidated Wrappers:** Merged the redundant `Refine` and `Anneling` API classes into a single, unified `Refine` class, eliminating significant code duplication.
-* **Unified Job Queue:** Standardized "Local" (pocket subsets) and "Global" (full complex) refinement pathways to use the exact same data preparation and execution loop.
+## 5. New
+* `--score-mmgbsa-write-minimised` writes the pocket-relaxed poses MM-GBSA actually
+  scored to `<stem>_mmgbsa_minimised.sdf`, plus `mmgbsa_receptor.pdb` to load them
+  against. `PoseScore` gained `min_coords_A` and `_score_with_entry` now returns the
+  relaxed ligand coordinates, which were previously computed and discarded. Requires
+  `--score-mmgbsa-minimise`; fails at setup without it. Only the ligand moves -- the
+  pocket receptor is pinned and its minimised coordinates are discarded -- so the
+  receptor written is the prepared input, unchanged, and both the log and the docs
+  say so.
 
-## 3. Simulated Annealing Enhancements
-* **Literature Protocol Replication:** Completely rewrote the simulated annealing loop to ensure mathematical fidelity to ChemEM v1 method.
-* **Deterministic Steps:** Replaced arbitrary time-chunk calculations with deterministic temperature arrays and explicit molecular dynamics step counts.
-
-## 4. Critical Bug Fixes & Data Routing
-* **Spatial Coordinate Mapping:** Replaced brittle, text-based residue index mapping with robust 3D spatial mapping (`cKDTree`) to safely project minimized local subsets back into the global complex.
-* **ParmEd Write Failures:** Resolved a silent coordinate-update failure by enforcing explicit OpenMM `Vec3` formatting for all NumPy array transfers.
-* **Ligand State Synchronization:** Fixed SDF export bugs by ensuring optimization coordinates are synchronized to both the RDKit Mol object and the ParmEd structure simultaneously.
-* **Tether Stability:** Fixed simulation crashes (NaN forces) during batch minimization by ensuring flat-bottom tethers strictly exclude hydrogen atoms.
-
+## 6. Verified
+* ECHO output is **bitwise identical** to `--rescore-poses` at HEAD across all 45
+  term columns on 7jjo.
+* Q-score differs from `--mapq-score` by ~1e-7: the old protocol averaged in float32,
+  the shared kernel promotes to float64 first. The float64 value is the more accurate
+  one and is what the orchestrator has always ranked on.
 

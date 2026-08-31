@@ -162,6 +162,12 @@ def build_parser() -> argparse.ArgumentParser:
     shared.add_argument("--no-map", action="store_true",
                         help="Disable density map usage")
 
+    # Read by --score's Q-score scorer, by the orchestrator's triage and by
+    # smart_refine_2's Q-score objective, so it is shared rather than owned by any
+    # one protocol. --score-qscore-sigma-ref overrides it for scoring only.
+    shared.add_argument("--sigma-ref", type=float, default=0.6,
+                        help="Reference Gaussian width for Q-score, in Angstrom.")
+
     # --- protein preparation determinism ---
     # Applied before the protein is built, unlike every other option here, so they
     # are read by load_system() rather than apply_overrides().
@@ -310,6 +316,13 @@ def build_pipeline(system, ordered_protocols: list[str]) -> None:
 
 def main() -> None:
     args = build_parser().parse_args()
+
+    # Rewrite the deprecated --rescore-poses / --mapq-score spellings into --score.
+    # Must happen before selected_protocols(), because --score's dependencies are
+    # derived from args.score_with.
+    from ChemEM.protocols.score.cli import apply_score_back_compat
+    apply_score_back_compat(args)
+
     print(Messages.intro(ChemEM.__version__))
 
     if not os.path.exists(args.config):

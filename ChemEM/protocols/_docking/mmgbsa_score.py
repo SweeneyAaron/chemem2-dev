@@ -39,6 +39,11 @@ class PoseScore:
     deltaG          : float
     components  : Dict[str, float]      # {"ΔEEL": …, "ΔVDW": …, …}
     min_shift_A : float = None          # ligand RMSD moved by pre-min (None if not minimised)
+    # Relaxed ligand coordinates (n_atoms, 3) in A, in ligand.complex_structure /
+    # ligand.mol atom order. None unless the pose was minimised. Only the LIGAND is
+    # here because only the ligand moves: the pocket receptor atoms are pinned and
+    # their minimised positions are discarded in favour of the reference ones.
+    min_coords_A : "np.ndarray | None" = None
 
     def to_row(self):
         base = {"ligand": self.ligand_name, "pose": self.pose_idx, "deltaG": self.deltaG}
@@ -334,7 +339,12 @@ def _score_with_entry(entry, pose_A, gamma, beta, minimise_ligand, minimise_iter
         "EGB": egb_c - (egb_r + egb_l),
         "ECAV": ecav - (ecav + ecav),
     }
-    return comps, float(sum(comps.values())), min_shift
+    # Relaxed ligand coordinates, for callers that want to write the pose out. The
+    # receptor half of complex_pos_nm is entry["prot_ref_nm"] verbatim -- the pocket
+    # protein is pinned and _pocket_minimise discards its minimised positions -- so
+    # there is no "minimised receptor" to hand back.
+    min_coords_A = lig_pos * 10.0 if min_shift is not None else None
+    return comps, float(sum(comps.values())), min_shift, min_coords_A
 
 
 def _score_single_pose_cached(positions, ligand, protein, pose_idx, resource_owner,
@@ -352,10 +362,11 @@ def _score_single_pose_cached(positions, ligand, protein, pose_idx, resource_own
                                     platform_name, ncpu, platform_properties, minimise_ligand,
                                     cutoff_A=minimise_cutoff_A)
         cache[key] = entry
-    comps, deltaG, min_shift = _score_with_entry(entry, positions, GAMMA, BETA,
-                                                 minimise_ligand, minimise_iters)
+    comps, deltaG, min_shift, min_coords = _score_with_entry(
+        entry, positions, GAMMA, BETA, minimise_ligand, minimise_iters)
     return PoseScore(ligand_name=ligand.ligand_int, pose_idx=pose_idx,
-                     deltaG=deltaG, components=comps, min_shift_A=min_shift)
+                     deltaG=deltaG, components=comps, min_shift_A=min_shift,
+                     min_coords_A=min_coords)
 
 
 def score_single_pose(positions,
@@ -389,10 +400,11 @@ def score_single_pose(positions,
         entry = _build_mmgbsa_entry(protein, ligand, positions, resource_owner,
                                     platform_name, ncpu, platform_properties,
                                     minimise_ligand=True, cutoff_A=minimise_cutoff_A)
-        comps, deltaG, min_shift = _score_with_entry(entry, positions, GAMMA, BETA,
-                                                     True, minimise_iters)
+        comps, deltaG, min_shift, min_coords = _score_with_entry(
+            entry, positions, GAMMA, BETA, True, minimise_iters)
         return PoseScore(ligand_name=ligand.ligand_int, pose_idx=pose_idx,
-                         deltaG=deltaG, components=comps, min_shift_A=min_shift)
+                         deltaG=deltaG, components=comps, min_shift_A=min_shift,
+                         min_coords_A=min_coords)
 
     complex_struct = build_complex(protein.complex_structure,
                                    ligand,

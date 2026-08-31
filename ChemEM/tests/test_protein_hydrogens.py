@@ -34,7 +34,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from ChemEM.tools.biomolecule import write_residues_to_pdb
-from ChemEM.protocols.rescore.protein_hydrogen_torsions import (
+from ChemEM.protocols.score.protein_hydrogen_torsions import (
     ProteinHydrogenRelaxer,
     _rotate_about,
     _wrap180,
