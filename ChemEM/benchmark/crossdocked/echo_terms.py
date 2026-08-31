@@ -20,7 +20,7 @@ consumes the raw channels.
 Run from the repo root so the local ChemEM package is imported:
 
     cd .../chemem2-dev
-    python -m ChemEM.protocols.score_poses.echo_terms CONF --out CASE.csv \\
+    python -m ChemEM.benchmark.crossdocked.echo_terms CONF --out CASE.csv \\
         [--rep-max 5.0 --interaction-cutoff 6.0 --electro-clamp 2.0 --proton-ph 7.4]
 
 One CSV per conf → naturally shardable/resumable across the cluster.
@@ -43,10 +43,19 @@ from ChemEM.__main__ import (
 )
 from ChemEM.parsers.ligand_parser import _make_ligand_from_rd_mol
 from ChemEM.parsers.remodel.protonation import set_mol_protonatation_state
+from ChemEM.protocols.score.scorers.echo import RAW_TERMS
 from ChemEM.tools.precomputed_data import PreCompDataLigand, PreCompDataProtein
 from ChemEM import docking
 
 # Raw channels returned by run_echo_terms (split + lumped + penalties).
+#
+# The order is frozen: it is the column order of every echo_terms CSV already
+# collected on the cluster, and re-ordering it would make old and new shards
+# concatenate wrong. The *membership* is checked against the protocol's own term
+# table below, so a channel added to the engine cannot be silently missed here.
+#
+# `covalent` is deliberately absent: CrossDocked has no covalent ligands, and adding
+# the column now would change the header of every existing shard.
 TERM_COLUMNS = [
     "aromatic_attr", "aromatic_clash",
     "nonbond_attr", "nonbond_rep", "clash",
@@ -59,6 +68,13 @@ TERM_COLUMNS = [
     "aromatic", "nonbond",          # lumped (== sum of their split channels)
     "bias", "constraint",
 ]
+
+assert set(TERM_COLUMNS) == set(RAW_TERMS) - {"covalent"}, (
+    "echo_terms.TERM_COLUMNS is out of step with the ECHO term table in "
+    "ChemEM.protocols.score.scorers.echo: "
+    f"missing {sorted(set(RAW_TERMS) - {'covalent'} - set(TERM_COLUMNS))}, "
+    f"unexpected {sorted(set(TERM_COLUMNS) - set(RAW_TERMS))}"
+)
 # `decoy_file` (basename) + `folder` + `pose_idx` is the ROOT-INDEPENDENT join key to
 # rmsds.csv (echo_terms runs on the HPC with different absolute paths than compute_rmsds).
 LEAD_COLUMNS = ["case_id", "folder", "rec_id", "lig_token", "decoy_file", "sdf_path",

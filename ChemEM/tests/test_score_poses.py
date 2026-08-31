@@ -1,10 +1,10 @@
-"""Tests for the ECHO pose re-scorer (``--rescore-poses``).
+"""Tests for the ECHO scorer of ``--score --score-with echo``.
 
-Covers the two things that are easy to get silently wrong:
+Covers the things that are easy to get silently wrong:
   - the weighted/raw term bookkeeping must reproduce the C++ total exactly
-    (`_breakdown`), including keeping the lumped aromatic/nonbond duplicates out
+    (`breakdown`), including keeping the lumped aromatic/nonbond duplicates out
     of the weighted sum;
-  - `_resolve_rep_max` must default to --repulsion-cap-polish, not the
+  - `resolve_rep_max` must default to --repulsion-cap-polish, not the
     run_echo_score pybind default of 5.0, or every pose scores several units
     better than docking said it did;
   - the donor-H torsion filter must only ever admit torsions that move a single
@@ -19,11 +19,13 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, rdMolTransforms
 
 try:
-    from ChemEM.protocols.rescore import rescore_poses as rp
-    from ChemEM.protocols.rescore import hydrogen_torsions as ht
+    from ChemEM.protocols.score import hydrogen_torsions as ht
+    from ChemEM.protocols.score import poses as sp
+    from ChemEM.protocols.score.scorers import echo as rp
 except ModuleNotFoundError:
-    from protocols.rescore import rescore_poses as rp
-    from protocols.rescore import hydrogen_torsions as ht
+    from protocols.score import hydrogen_torsions as ht
+    from protocols.score import poses as sp
+    from protocols.score.scorers import echo as rp
 
 
 def _weights(**overrides):
@@ -36,20 +38,13 @@ def _weights(**overrides):
     return w
 
 
-def _protocol(weights, options=None):
-    proto = rp.RescorePoses.__new__(rp.RescorePoses)
-    proto._weights = weights
-    proto.system = types.SimpleNamespace(options=options or argparse.Namespace())
-    return proto
-
-
 class TestBreakdown(unittest.TestCase):
     def test_weighted_terms_sum_to_echo_linear(self):
-        proto = _protocol(_weights(hbond_raw=-0.5, clash=-2.0, nonbond_attr=-0.25))
+        weights = _weights(hbond_raw=-0.5, clash=-2.0, nonbond_attr=-0.25)
         terms = {name: 0.0 for name in rp.RAW_TERMS}
         terms.update(hbond_raw=-10.0, clash=3.0, nonbond_attr=-8.0)
 
-        raw, weighted, echo_linear, _map = proto._breakdown(terms, echo_total=0.0)
+        raw, weighted, echo_linear, _map = rp.breakdown(terms, 0.0, weights)
 
         self.assertAlmostEqual(weighted["hbond_raw"], 5.0)
         self.assertAlmostEqual(weighted["clash"], -6.0)
@@ -65,10 +60,10 @@ class TestBreakdown(unittest.TestCase):
         self.assertNotIn("nonbond", rp.LINEAR_TERMS)
 
         # Even with a non-zero weight on the lumped names, they contribute nothing.
-        proto = _protocol(_weights(aromatic=-9.0, nonbond=-9.0))
+        weights = _weights(aromatic=-9.0, nonbond=-9.0)
         terms = {name: 0.0 for name in rp.RAW_TERMS}
         terms.update(aromatic=5.0, nonbond=5.0)
-        _raw, weighted, echo_linear, _map = proto._breakdown(terms, echo_total=0.0)
+        _raw, weighted, echo_linear, _map = rp.breakdown(terms, 0.0, weights)
 
         self.assertEqual(echo_linear, 0.0)
         self.assertNotIn("aromatic", weighted)
@@ -78,7 +73,7 @@ class TestBreakdown(unittest.TestCase):
         """ECHOScore::score computes
         total = -(linear + map) + bias + constraint + covalent,
         so recovering `map` from the total must invert exactly that."""
-        proto = _protocol(_weights(hbond_raw=2.0))
+        weights = _weights(hbond_raw=2.0)
         terms = {name: 0.0 for name in rp.RAW_TERMS}
         terms.update(hbond_raw=3.0, bias=0.5, constraint=0.25, covalent=0.125)
 
@@ -87,15 +82,14 @@ class TestBreakdown(unittest.TestCase):
         offsets = 0.875
         echo_total = -(echo_linear_expected + map_expected) + offsets
 
-        _raw, _w, echo_linear, map_score = proto._breakdown(terms, echo_total)
+        _raw, _w, echo_linear, map_score = rp.breakdown(terms, echo_total, weights)
 
         self.assertAlmostEqual(echo_linear, echo_linear_expected)
         self.assertAlmostEqual(map_score, map_expected)
 
     def test_missing_channel_defaults_to_zero(self):
         """`covalent` is absent from older engines' term dicts."""
-        proto = _protocol(_weights())
-        _raw, _w, echo_linear, _map = proto._breakdown({}, echo_total=0.0)
+        _raw, _w, echo_linear, _map = rp.breakdown({}, 0.0, _weights())
         self.assertEqual(echo_linear, 0.0)
 
 
@@ -103,16 +97,16 @@ class TestRepMax(unittest.TestCase):
     def test_defaults_to_repulsion_cap_polish(self):
         """run_aco_docking ranks its returned poses with repCap_final_nm, so the
         re-scorer must too -- not the pybind rep_max=5.0 default."""
-        opts = argparse.Namespace(rescore_rep_max=None, repulsion_cap_polish=15.0)
-        self.assertEqual(_protocol(_weights(), opts)._resolve_rep_max(), 15.0)
+        opts = argparse.Namespace(score_echo_rep_max=None, repulsion_cap_polish=15.0)
+        self.assertEqual(rp.resolve_rep_max(opts), 15.0)
 
     def test_tracks_a_changed_dock_flag(self):
-        opts = argparse.Namespace(rescore_rep_max=None, repulsion_cap_polish=22.0)
-        self.assertEqual(_protocol(_weights(), opts)._resolve_rep_max(), 22.0)
+        opts = argparse.Namespace(score_echo_rep_max=None, repulsion_cap_polish=22.0)
+        self.assertEqual(rp.resolve_rep_max(opts), 22.0)
 
     def test_explicit_override_wins(self):
-        opts = argparse.Namespace(rescore_rep_max=5.0, repulsion_cap_polish=15.0)
-        self.assertEqual(_protocol(_weights(), opts)._resolve_rep_max(), 5.0)
+        opts = argparse.Namespace(score_echo_rep_max=5.0, repulsion_cap_polish=15.0)
+        self.assertEqual(rp.resolve_rep_max(opts), 5.0)
 
 
 def _embed(smiles):
@@ -226,22 +220,62 @@ class TestRelaxer(unittest.TestCase):
         self.assertAlmostEqual(delta, 0.0, places=6)
 
 
+class TestRepMaxDeprecatedSpelling(unittest.TestCase):
+    def test_old_flag_lands_on_the_new_dest(self):
+        """--rescore-rep-max must keep working, and must keep meaning rep_max."""
+        from ChemEM.__main__ import build_parser
+
+        args = build_parser().parse_args(
+            ["conf.txt", "--score", "--rescore-rep-max", "7.5"]
+        )
+        self.assertEqual(args.score_echo_rep_max, 7.5)
+        self.assertEqual(rp.resolve_rep_max(args), 7.5)
+
+    def test_unused_old_flag_does_not_clobber_the_new_default(self):
+        """The alias shares a dest with the new flag; if it also carried a default,
+        it would overwrite `None` and silently pin rep_max."""
+        from ChemEM.__main__ import build_parser
+
+        args = build_parser().parse_args(["conf.txt", "--score"])
+        self.assertIsNone(args.score_echo_rep_max)
+
+
+class _FakeLigand:
+    def __init__(self, source, mol, identifier):
+        self.input = source
+        self.mol = mol
+        self.identifier = identifier
+
+
 class TestPoseNumbering(unittest.TestCase):
+    """A multi-record SDF loads as one Ligand per record, so the pose number has to
+    come from the source grouping, not from ligand_idx or conf_id."""
+
+    def _poses(self, sources):
+        mol = _embed("CCO")
+        system = types.SimpleNamespace(
+            ligand=[_FakeLigand(s, mol, f"L{i}") for i, s in enumerate(sources)]
+        )
+        out = []
+        for _lig_ctx, poses in sp.iter_ligands(system, ctx=None):
+            out.extend(poses)
+        return out
+
     def test_poses_are_numbered_per_source(self):
-        """A multi-record SDF loads as one Ligand per record, so the pose number
-        has to come from the source grouping, not from ligand_idx."""
-        rows = [
-            {"source": "a.sdf", "ligand_idx": 0},
-            {"source": "a.sdf", "ligand_idx": 1},
-            {"source": "b.sdf", "ligand_idx": 2},
-            {"source": "a.sdf", "ligand_idx": 3},
-        ]
-        rp._number_poses(rows)
-        self.assertEqual([r["pose"] for r in rows], [0, 1, 0, 2])
+        poses = self._poses(["a.sdf", "a.sdf", "b.sdf", "a.sdf"])
+        self.assertEqual([p.pose for p in poses], [0, 1, 0, 2])
+        self.assertEqual([p.ligand_idx for p in poses], [0, 1, 2, 3])
+
+    def test_a_conformerless_ligand_yields_no_poses(self):
+        mol = Chem.AddHs(Chem.MolFromSmiles("CCO"))  # never embedded
+        system = types.SimpleNamespace(ligand=[_FakeLigand("a.sdf", mol, "L0")])
+        pairs = list(sp.iter_ligands(system, ctx=None))
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0][1], [])
 
     def test_source_stem_falls_back_for_smiles(self):
-        self.assertEqual(rp._source_stem("c1ccccc1CCO", 7), "Ligand_7")
-        self.assertEqual(rp._source_stem("", 2), "Ligand_2")
+        self.assertEqual(sp.source_stem("c1ccccc1CCO", 7), "Ligand_7")
+        self.assertEqual(sp.source_stem("", 2), "Ligand_2")
 
 
 if __name__ == "__main__":

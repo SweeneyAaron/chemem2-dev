@@ -125,7 +125,14 @@ def dock_deps(args):
 def add_dock_args(p):
     g = p.add_argument_group("Docking")
     
-    g.add_argument("--rescore", action="store_true")
+    # Post-docking MM-GBSA of the poses --dock just produced. Renamed because bare
+    # `--rescore` was routinely confused with the old `--rescore-poses` (ECHO), which
+    # is a different thing entirely; `--rescore` is kept as a deprecated alias.
+    g.add_argument("--dock-rescore-mmgbsa", "--rescore", dest="rescore",
+                   action="store_true",
+                   help="After docking, score the generated poses with a single-frame "
+                        "MM-GBSA and write mmgbsa_rescore.txt. To score poses from a "
+                        "file instead, use --score --score-with mmgbsa.")
     g.add_argument("--dock-seed", type=int, default=None,
                    help="Base seed for the ACO search RNG. Unset (default) draws a "
                         "fresh random seed each run, which is always logged as "
@@ -428,109 +435,18 @@ def add_refine_args(p):
 
     
     
-def mapq_score_deps(args):
-    return tuple() 
-
-def add_mapq_score_args(p):
-    g = p.add_argument_group("MapQ Score")
-    g.add_argument("--sigma-ref", type=float, default = 0.6)
-    p.add_argument("--per-atom", action="store_true", help="Get per atom MapQ scores")
-
-
-def rescore_poses_deps(args):
-    # Same chain as dock. The ECHO precompute needs a binding site, and the map
-    # term needs the segmented site maps -- without them the reported total would
-    # not be the number --dock optimised, which is the whole point.
-    return ("binding_site", "alpha_mask", "confidence_map")
+# --score: pose scoring. Both the dependency function and the option registration
+# live in the protocol's own package, because the dependencies depend on which
+# scorers --score-with selected. `ChemEM.protocols.score.cli` is stdlib-only for
+# exactly this reason -- it is imported while the parser is being built.
+def score_deps(args):
+    from ChemEM.protocols.score.cli import score_deps as _score_deps
+    return _score_deps(args)
 
 
-def add_rescore_poses_args(p):
-    # Every option is --rescore-*-prefixed on purpose. The parser namespace is
-    # flat and global: bare --rescore already belongs to dock, and the standalone
-    # score_poses/echo_terms tools add bare --rep-max / --interaction-cutoff /
-    # --electro-clamp to build_parser()'s result, so an unprefixed name here
-    # would break them with an argparse conflict.
-    g = p.add_argument_group("Rescore poses (ECHO)")
-    g.add_argument("--rescore-engine", choices=["docking", "docking_v2"],
-                   default="docking",
-                   help="Which compiled ECHO engine to score with. Must match the "
-                        "engine that produced the poses for the totals to be "
-                        "comparable.")
-    g.add_argument("--rescore-site", default=None,
-                   help="Force every pose to be scored against this binding-site "
-                        "key. Default: pick the site whose box contains the pose, "
-                        "else the nearest site centroid.")
-    g.add_argument("--rescore-out", default="rescore",
-                   help="Output subdirectory under the run output directory.")
-    g.add_argument("--rescore-rep-max", type=float, default=None,
-                   help="ECHO repulsion cap. Unset uses --repulsion-cap-polish (the "
-                        "cap the docking engine's final polish scores with, and so "
-                        "the one the returned poses are ranked by). Note this is NOT "
-                        "the run_echo_score pybind default of 5.0; scoring with 5.0 "
-                        "makes every pose look several units better than dock said.")
-    g.add_argument("--rescore-interaction-cutoff", type=float, default=6.0,
-                   help="ECHO interaction cutoff in Angstrom.")
-    g.add_argument("--rescore-electro-clamp", type=float, default=2.0,
-                   help="ECHO electrostatic repulsion clamp.")
-    g.add_argument("--rescore-no-sdf", action="store_true",
-                   help="Write only the CSV; skip the per-ligand rescored SDFs.")
-
-    # --- polar-hydrogen torsion relaxation ---
-    g.add_argument("--rescore-minimise-hydrogens", action="store_true",
-                   help="Relax the ligand's polar (donor N/O/S-H) torsions against "
-                        "ECHO before scoring, so a pose is not penalised for the H "
-                        "placement its SDF happened to carry. Only rotatable donor "
-                        "H's move -- no heavy atom can, by construction -- and bond "
-                        "lengths and X-H angles are never relaxed. These are the "
-                        "same torsions the docking search samples. Because this "
-                        "optimises ECHO with ECHO, the pre-relaxation total is "
-                        "always reported alongside as echo_total_prehmin.")
-    # These three are all cost knobs. One score evaluation costs ~200 ms because
-    # run_echo_score rebuilds the whole precompute per call (the scoring itself
-    # is ~0.05 ms), so relaxation runs at a few seconds per pose. Lower the grid
-    # resolution, the pass count or maxiter to trade accuracy for wall time.
-    g.add_argument("--rescore-h-min-grid", type=float, default=60.0,
-                   help="Coarse scan step in degrees used to seed Nelder-Mead "
-                        "(hydroxyl rotation is multi-minimum and Nelder-Mead is "
-                        "local). Torsions are scanned one at a time, so the cost "
-                        "is passes x torsions x (360/grid) evaluations.")
-    g.add_argument("--rescore-h-min-passes", type=int, default=2,
-                   help="Sweeps over the torsion list during the coarse scan. A "
-                        "second pass picks up coupling between torsions sharing a "
-                        "pivot; 1 is enough for isolated hydroxyls.")
-    g.add_argument("--rescore-h-min-maxiter", type=int, default=100,
-                   help="Nelder-Mead iteration cap for the polish after the scan.")
-
-    # --- protein donor-hydrogen relaxation ---
-    g.add_argument("--rescore-protein-h", action="store_true",
-                   help="Also relax the *protein's* rotatable donor hydrogens (Ser OG, "
-                        "Thr OG1, Tyr OH, Cys SG, Lys NZ) against ECHO for each pose. "
-                        "These are frozen for the whole docking run and, unless "
-                        "--protein-hydrogens prep is given, are not even the prepared "
-                        "ones -- so a real hydrogen bond whose H points the wrong way "
-                        "fails the D-H...A angle gate and is scored as a repulsive "
-                        "contact. Only the hydrogen moves; no heavy atom can, so this "
-                        "is not sidechain flexibility. Rotation is unpenalised (there "
-                        "is no intra-protein term), so the relaxed total is an upper "
-                        "bound on the available gain and echo_total_prot_h_pre is "
-                        "always reported next to it. Writes a per-donor attribution to "
-                        "echo_rescore_protein_h.csv. The protein is restored between "
-                        "poses, so poses stay comparable.")
-    g.add_argument("--rescore-protein-h-grid", type=float, default=30.0,
-                   help="Coarse scan step in degrees for the protein donors. Finer "
-                        "than the ligand default because a hydroxyl aimed at a single "
-                        "acceptor has a narrow optimum; donors are scanned one at a "
-                        "time, so cost is passes x donors x (360/grid) evaluations. "
-                        "Conjugated donors (Tyr OH) ignore this: they have exactly two "
-                        "in-plane orientations.")
-    g.add_argument("--rescore-protein-h-passes", type=int, default=2,
-                   help="Sweeps over the donor list during the coarse scan. Protein "
-                        "donors couple only through the ligand, so a second pass "
-                        "matters mainly when two of them compete for one acceptor.")
-    g.add_argument("--rescore-protein-h-maxiter", type=int, default=100,
-                   help="Nelder-Mead iteration cap for the polish after the scan. "
-                        "Skipped entirely when every donor in range is conjugated, "
-                        "since those coordinates are discrete.")
+def add_score_args(p):
+    from ChemEM.protocols.score.cli import add_score_args as _add_score_args
+    return _add_score_args(p)
 
 
 def ion_template_search_deps(args):
@@ -1394,7 +1310,7 @@ SHORT_ALIASES = {
     "ion_template_search": "-its",
     "orchestrate": "-o",
     "smart_ligand_refine2" : "-slr2",
-    "rescore_poses": "-rp"
+    "score": "-sc",
 }
 
 REGISTRY = {
@@ -1467,19 +1383,17 @@ REGISTRY = {
         add_args=add_ion_fixer_args,
         help="Refine Ion Cordination in cryoEM maps"),
     
-    "mapq_score": ProtocolSpec(
-        name="mapq_score",
-        class_path="ChemEM.protocols.mapQ_score.mapQ_score:ScoreMapQ",
-        deps=mapq_score_deps,
-        add_args=add_mapq_score_args,
-        help="Score Ligand MapQ",
-    ),
-    "rescore_poses": ProtocolSpec(
-        name="rescore_poses",
-        class_path="ChemEM.protocols.rescore.rescore_poses:RescorePoses",
-        deps=rescore_poses_deps,
-        add_args=add_rescore_poses_args,
-        help="Rescore poses with ECHO: weighted total + every term, weighted and unweighted",
+    # Replaces the old `mapq_score` and `rescore_poses` protocols and the two
+    # unregistered score_poses/echo_terms scripts. Its deps() is the only one in the
+    # registry that varies with the CLI flags: scoring with Q-score alone needs no
+    # binding site and no segmentation, scoring with ECHO needs both.
+    "score": ProtocolSpec(
+        name="score",
+        class_path="ChemEM.protocols.score.score_poses:ScorePoses",
+        deps=score_deps,
+        add_args=add_score_args,
+        help="Score docked poses with ECHO, MM-GBSA and/or the map metrics "
+             "(--score-with echo,mmgbsa,qscore,density)",
     ),
     "lining_refine": ProtocolSpec(
         name="lining_refine",
