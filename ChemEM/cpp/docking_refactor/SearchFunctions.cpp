@@ -1903,6 +1903,60 @@ AntColonyOptimizer::runLocalNelderMeadFromSeeds(
     return { f_best, std::move(workMol) };
 }
 
+
+// Refine m_original_mol's own conformer in place of an ACO seed. See the header for why
+// this exists.
+//
+// The seeds are chosen so that applyNormalizedSolution at x_norm = 0.5 is the IDENTITY on
+// the input pose: the translation delta is (0.5*2-1)*max_shift = 0, the rotation delta is
+// 0.5*360-180 = 0 on top of ini_rot_deg = 0, and each torsion is set back to the value it
+// already has. So the refiner starts exactly at the pose handed in, which is what makes
+// "how far does this pose move under these weights" a well-posed question.
+std::pair<double, RDKit::ROMol>
+AntColonyOptimizer::refineCurrentPose(double rep_max, double map_score_function) const
+{
+    const RDKit::Conformer &conf = m_original_mol.getConformer();
+
+    // Translation seed: the pose's own centroid, expressed in the grid index units
+    // applyNormalizedSolution multiplies back up by apix. Called with the SAME default
+    // ignoreHs as applyNormalizedSolution uses -- a different flag here would silently
+    // offset every refined pose by the heavy-atom/all-atom centroid difference.
+    const auto centroid = MolTransforms::computeCentroid(conf);
+    const auto &grid = pre.binding_site_grid();
+    Eigen::RowVector3d ini_trans_xyz;
+    for (int i = 0; i < 3; ++i) {
+        // apix is strictly positive for any real grid; guard anyway so a malformed
+        // precompute fails loudly at the binding rather than producing inf coordinates.
+        if (!(grid.apix[i] > 0.0)) {
+            throw std::runtime_error(
+                "refineCurrentPose: binding-site grid apix is not positive");
+        }
+    }
+    ini_trans_xyz[0] = (centroid.x - grid.origin[0]) / grid.apix[0];
+    ini_trans_xyz[1] = (centroid.y - grid.origin[1]) / grid.apix[1];
+    ini_trans_xyz[2] = (centroid.z - grid.origin[2]) / grid.apix[2];
+
+    // No rotation offset: the pose is already oriented, and x_norm[3..5] = 0.5 adds zero.
+    const Eigen::Vector3d ini_rot_deg = Eigen::Vector3d::Zero();
+
+    // Torsion seeds are the conformer's CURRENT dihedrals, read through the same index
+    // quads applyNormalizedSolution will write back through.
+    const auto &tors_idx = pre.ligand_score().ligand_torsion_idxs;
+    std::vector<double> ini_tors_deg;
+    ini_tors_deg.reserve(tors_idx.size());
+    for (const auto &q : tors_idx) {
+        ini_tors_deg.push_back(MolTransforms::getDihedralDeg(
+            conf,
+            static_cast<unsigned int>(q[0]), static_cast<unsigned int>(q[1]),
+            static_cast<unsigned int>(q[2]), static_cast<unsigned int>(q[3])));
+    }
+
+    ECHOScore scorer = m_scorer_base;
+    return runLocalNelderMeadFromSeeds(ini_trans_xyz, ini_rot_deg, ini_tors_deg,
+                                       scorer, rep_max, map_score_function);
+}
+
+
 static py::array_t<double> conformerToCoords(const RDKit::Conformer &conf) {
     py::ssize_t N = conf.getNumAtoms();
     // shape = { N, 3 }
