@@ -44,11 +44,26 @@ public:
     
     const std::vector< std::array<unsigned int, 4> > dihedral_indices() const { return m_dihedral_indices ; }
     const uint64_t baseseed() const { return m_baseseed ; }
-    
-    
-    
+
+
+
     pybind11::list optimize();
-    
+
+    // Locally refine the conformer this optimizer was CONSTRUCTED with, with no ACO
+    // search in front of it: exactly the final polish `optimize()` ranks its poses by,
+    // seeded at the pose handed in rather than at an ant's discrete solution.
+    //
+    // Exists for the offline refinement-weight fit, which needs "minimise THIS pose
+    // under THESE weights" as a callable step. Doing that from Python is not viable:
+    // run_echo_score rebuilds the whole PreComputedData per call, so a scipy loop pays
+    // ~10-100 ms for a 0.05 ms score.
+    //
+    // The seeds are derived so that the refiner's x_norm = 0.5 reproduces the input
+    // pose exactly (see applyNormalizedSolution): translation from the conformer's own
+    // centroid, zero rotation delta, and the conformer's current dihedral values.
+    std::pair<double, RDKit::ROMol> refineCurrentPose(double rep_max,
+                                                      double map_score_function) const;
+
 private:
     //data
     const PreComputedData &pre;

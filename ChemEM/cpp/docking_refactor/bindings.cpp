@@ -41,6 +41,22 @@ static RDKit::RWMol keep_only_conformer(const RDKit::RWMol& in, int confId) {
     return m;
 }
 
+// (N,3) float64 view of a conformer. SearchFunctions.cpp has its own copy of this for
+// optimize()'s return value, but that one is file-static, so run_local_refine needs its
+// own. Both produce the same layout, so poses from either entry point are interchangeable.
+static py::array_t<double> conformer_to_coords(const RDKit::Conformer& conf) {
+    const py::ssize_t N = static_cast<py::ssize_t>(conf.getNumAtoms());
+    py::array_t<double> arr({N, static_cast<py::ssize_t>(3)});
+    auto buf = arr.mutable_unchecked<2>();
+    for (py::ssize_t i = 0; i < N; ++i) {
+        const auto p = conf.getAtomPos(static_cast<unsigned int>(i));
+        buf(i, 0) = p.x;
+        buf(i, 1) = p.y;
+        buf(i, 2) = p.z;
+    }
+    return arr;
+}
+
 PYBIND11_MODULE(docking, m) {
     m.doc() = "ChemEM core scoring + docking bindings";
 
@@ -262,5 +278,98 @@ PYBIND11_MODULE(docking, m) {
         py::arg("weights") = ECHOWeights::default_v1(),
         "Run ACO docking (optionally with custom ECHO weights) and return "
         "[(score, coords_np), ...] from AntColonyOptimizer::optimize()."
+    );
+
+    // -----------------------------
+    // Local refinement of ONE given pose (no ACO search in front of it)
+    // -----------------------------
+    m.def(
+        "run_local_refine",
+        [](py::object py_pc,
+           const std::string& molblock,
+           int confId,
+           ECHOWeights weights,
+           double rep_max,
+           double map_score_function) -> py::dict {
+
+            PreComputedData pre(py_pc);
+
+            // rep_max < 0 means "whatever the polish uses", i.e. --repulsion-cap-polish.
+            // Defaulting to the config rather than to a literal keeps this entry point
+            // from drifting away from the cap --dock actually ranks its poses at.
+            const double cap = (rep_max < 0.0) ? pre.config().repCap_final_nm : rep_max;
+
+            std::unique_ptr<RDKit::RWMol> mol_ptr(
+                RDKit::v1::MolBlockToMol(
+                    molblock,
+                    true,   // sanitize
+                    false,  // removeHs
+                    true    // strictParsing
+                )
+            );
+            if (!mol_ptr) throw std::runtime_error("MolBlock parse failed");
+
+            RDKit::RWMol mol = keep_only_conformer(*mol_ptr, confId);
+
+            // One scorer, built exactly as the refiner's own is: interaction_cutoff and
+            // electro_clamp come from the config, NOT from pybind defaults. Those two are
+            // never plumbed through py_pc, so run_echo_score's 6.0/2.0 signature defaults
+            // do not match what the engine scores with -- reading the config is what keeps
+            // the terms describing the surface the pose was actually minimised on.
+            ECHOScore scorer{pre, weights};
+            scorer.interaction_cutoff = pre.config().interaction_cutoff;
+            scorer.electro_clamp      = pre.config().electro_clamp;
+
+            auto dump = [&](const RDKit::Conformer& c) {
+                py::dict d;
+                for (const auto& kv : scorer.score_terms(c, cap)) {
+                    d[py::str(kv.first)] = kv.second;
+                }
+                return d;
+            };
+
+            // Before: the pose as handed in. For the deposited pose this IS the native
+            // reference the offline fit scores against, and taking it here rather than
+            // from a separate run_echo_terms call means the two can never be dumped under
+            // different constants.
+            const double score_start = scorer.score(mol.getConformer(), cap,
+                                                    map_score_function);
+            py::dict terms_start = dump(mol.getConformer());
+
+            AntColonyOptimizer opt(pre, mol, weights);
+            auto [score, refined] = opt.refineCurrentPose(cap, map_score_function);
+            const RDKit::Conformer& conf = refined.getConformer();
+
+            py::dict out;
+            out["score"]        = score;
+            out["coords"]       = conformer_to_coords(conf);
+            out["terms"]        = dump(conf);
+            out["score_start"]  = score_start;
+            out["terms_start"]  = terms_start;
+            // The constants this call actually used, so a caller never has to guess them.
+            out["rep_max"]            = cap;
+            out["interaction_cutoff"] = scorer.interaction_cutoff;
+            out["electro_clamp"]      = scorer.electro_clamp;
+            out["local_minimiser"]    = pre.config().local_minimiser;
+            return out;
+        },
+        py::arg("py_precomputed"),
+        py::arg("molblock"),
+        py::arg("confId") = 0,
+        py::arg("weights") = ECHOWeights::default_v1(),
+        py::arg("rep_max") = -1.0,
+        py::arg("map_score_function") = 0.0,
+        "Locally refine ONE pose under the given ECHO weights.\n\n"
+        "This is the final Nelder-Mead/L-BFGS polish --dock ranks its poses by, seeded\n"
+        "at the pose you pass in instead of at an ant's solution, so it answers 'where\n"
+        "does this pose settle under these weights'.\n\n"
+        "Returns a dict: score / coords / terms (after refinement), score_start /\n"
+        "terms_start (the pose as handed in), and the rep_max, interaction_cutoff,\n"
+        "electro_clamp and local_minimiser it used. Before and after are scored with ONE\n"
+        "scorer, so they are directly comparable and an offline fit cannot mix constants.\n\n"
+        "rep_max < 0 (the default) uses --repulsion-cap-polish from the precompute.\n"
+        "--local-minimiser selects Nelder-Mead vs L-BFGS, as in a dock run.\n"
+        "Note the refiner's translation box is +/-2 A around the input centroid, so a\n"
+        "pose displaced further than that cannot be fully recovered whatever the weights."
     );
 }
